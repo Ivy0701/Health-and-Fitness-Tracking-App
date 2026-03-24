@@ -1,0 +1,47 @@
+import { createRouter, createWebHistory } from "vue-router";
+import { useAuthStore } from "../stores/auth";
+
+import LandingView from "../views/LandingView.vue";
+import LoginView from "../views/LoginView.vue";
+import RegisterView from "../views/RegisterView.vue";
+import AssessmentView from "../views/AssessmentView.vue";
+import DashboardView from "../views/DashboardView.vue";
+import CoursesView from "../views/CoursesView.vue";
+import WorkoutView from "../views/WorkoutView.vue";
+import DietView from "../views/DietView.vue";
+import ScheduleView from "../views/ScheduleView.vue";
+import ProfileView from "../views/ProfileView.vue";
+import FavoritesView from "../views/FavoritesView.vue";
+import FeedbackView from "../views/FeedbackView.vue";
+import VipView from "../views/VipView.vue";
+
+const routes = [
+  { path: "/", component: LandingView },
+  { path: "/login", component: LoginView },
+  { path: "/register", component: RegisterView },
+  { path: "/assessment", component: AssessmentView, meta: { auth: true } },
+  { path: "/dashboard", component: DashboardView, meta: { auth: true } },
+  { path: "/courses", component: CoursesView, meta: { auth: true } },
+  { path: "/workouts", component: WorkoutView, meta: { auth: true } },
+  { path: "/diet", component: DietView, meta: { auth: true } },
+  { path: "/schedule", component: ScheduleView, meta: { auth: true } },
+  { path: "/profile", component: ProfileView, meta: { auth: true } },
+  { path: "/favorites", component: FavoritesView, meta: { auth: true } },
+  { path: "/feedback", component: FeedbackView, meta: { auth: true } },
+  { path: "/vip", component: VipView, meta: { auth: true } }
+];
+
+const router = createRouter({
+  history: createWebHistory(),
+  routes
+});
+
+router.beforeEach((to) => {
+  const auth = useAuthStore();
+  if (to.meta.auth && !auth.isLoggedIn) {
+    return "/login";
+  }
+  return true;
+});
+
+export default router;
