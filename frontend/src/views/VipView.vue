@@ -18,16 +18,11 @@ async function upgrade(plan) {
 <template>
   <AppNavbar />
   <main class="page">
-    <h2>VIP</h2>
+    <h2 class="title">👑 VIP Plans</h2>
     <div v-for="p in plans" :key="p.plan" class="card">
-      <h3>{{ p.plan }} - ${{ p.price }}</h3>
-      <p>{{ p.benefits.join(", ") }}</p>
-      <button @click="upgrade(p.plan)">Upgrade</button>
+      <h3>✨ {{ p.plan }} - ${{ p.price }}</h3>
+      <p class="muted">{{ p.benefits.join(", ") }}</p>
+      <button @click="upgrade(p.plan)">🚀 Upgrade</button>
     </div>
   </main>
 </template>
-
-<style scoped>
-.page { padding: 24px; }
-.card { border: 1px solid #ddd; margin-bottom: 12px; padding: 12px; }
-</style>

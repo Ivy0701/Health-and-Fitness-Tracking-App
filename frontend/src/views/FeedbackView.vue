@@ -13,17 +13,18 @@ async function submit() {
 <template>
   <AppNavbar />
   <main class="page">
-    <h2>Feedback</h2>
-    <form @submit.prevent="submit">
-      <input v-model.number="form.rating" type="number" min="1" max="5" />
-      <textarea v-model="form.content" placeholder="Your feedback" />
-      <input v-model="form.contact_email" placeholder="Contact email (optional)" />
-      <button type="submit">Submit</button>
-    </form>
+    <section class="panel feedback">
+      <h2 class="title">💬 Feedback</h2>
+      <form @submit.prevent="submit">
+        <input v-model.number="form.rating" type="number" min="1" max="5" placeholder="Rating (1-5)" />
+        <textarea v-model="form.content" placeholder="Your feedback" />
+        <input v-model="form.contact_email" placeholder="Contact email (optional)" />
+        <button type="submit">📨 Submit Feedback</button>
+      </form>
+    </section>
   </main>
 </template>
 
 <style scoped>
-.page { padding: 24px; }
-form { display: flex; flex-direction: column; gap: 10px; max-width: 420px; }
+.feedback { max-width: 620px; }
 </style>

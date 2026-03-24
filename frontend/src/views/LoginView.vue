@@ -15,16 +15,18 @@ async function submit() {
 
 <template>
   <main class="page">
-    <h2>Login</h2>
-    <form @submit.prevent="submit">
-      <input v-model="form.email" placeholder="Email" required />
-      <input v-model="form.password" type="password" placeholder="Password" required />
-      <button type="submit">Login</button>
-    </form>
+    <section class="panel auth">
+      <h2 class="title">🔐 Login</h2>
+      <form @submit.prevent="submit">
+        <input v-model="form.email" placeholder="Email" required />
+        <input v-model="form.password" type="password" placeholder="Password" required />
+        <button type="submit">进入系统 🚀</button>
+      </form>
+      <p class="muted">没有账号？去注册页面创建一个新账号。</p>
+    </section>
   </main>
 </template>
 
 <style scoped>
-.page { padding: 24px; max-width: 420px; margin: 0 auto; }
-form { display: flex; flex-direction: column; gap: 10px; }
+.auth { max-width: 440px; margin: 30px auto; }
 </style>

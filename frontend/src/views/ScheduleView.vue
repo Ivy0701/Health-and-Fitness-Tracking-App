@@ -13,13 +13,14 @@ onMounted(async () => {
 <template>
   <AppNavbar />
   <main class="page">
-    <h2>Schedule</h2>
-    <ul>
-      <li v-for="s in list" :key="s.id">{{ s.title }} - {{ s.status }}</li>
+    <h2 class="title">🗓 Schedule</h2>
+    <ul class="card list">
+      <li v-for="s in list" :key="s.id">⏰ {{ s.title }} - <strong>{{ s.status }}</strong></li>
     </ul>
   </main>
 </template>
 
 <style scoped>
-.page { padding: 24px; }
+.list { margin: 0; padding-left: 20px; }
+.list li { margin-bottom: 8px; }
 </style>

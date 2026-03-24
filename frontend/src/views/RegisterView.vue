@@ -15,17 +15,19 @@ async function submit() {
 
 <template>
   <main class="page">
-    <h2>Register</h2>
-    <form @submit.prevent="submit">
-      <input v-model="form.username" placeholder="Username" required />
-      <input v-model="form.email" placeholder="Email" required />
-      <input v-model="form.password" type="password" placeholder="Password" required />
-      <button type="submit">Register</button>
-    </form>
+    <section class="panel auth">
+      <h2 class="title">📝 Register</h2>
+      <form @submit.prevent="submit">
+        <input v-model="form.username" placeholder="Username" required />
+        <input v-model="form.email" placeholder="Email" required />
+        <input v-model="form.password" type="password" placeholder="Password" required />
+        <button type="submit">创建账号 ✨</button>
+      </form>
+      <p class="muted">注册后会直接进入健康评估页。</p>
+    </section>
   </main>
 </template>
 
 <style scoped>
-.page { padding: 24px; max-width: 420px; margin: 0 auto; }
-form { display: flex; flex-direction: column; gap: 10px; }
+.auth { max-width: 440px; margin: 30px auto; }
 </style>

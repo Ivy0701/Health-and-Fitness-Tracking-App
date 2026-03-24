@@ -13,11 +13,13 @@ onMounted(async () => {
 <template>
   <AppNavbar />
   <main class="page">
-    <h2>Profile</h2>
-    <pre v-if="profile">{{ profile }}</pre>
+    <h2 class="title">👤 Profile</h2>
+    <div v-if="profile" class="card">
+      <p>📧 Email: {{ profile.email }}</p>
+      <p>🙍 Username: {{ profile.username }}</p>
+      <p>📏 Height: {{ profile.height_cm || "-" }} cm</p>
+      <p>⚖️ Weight: {{ profile.weight_kg || "-" }} kg</p>
+      <p>🎯 Target Weight: {{ profile.target_weight_kg || "-" }} kg</p>
+    </div>
   </main>
 </template>
-
-<style scoped>
-.page { padding: 24px; }
-</style>

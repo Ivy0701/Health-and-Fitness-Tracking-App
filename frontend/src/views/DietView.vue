@@ -13,13 +13,14 @@ onMounted(async () => {
 <template>
   <AppNavbar />
   <main class="page">
-    <h2>Diet</h2>
-    <ul>
-      <li v-for="(tip, idx) in tips" :key="idx">{{ tip }}</li>
+    <h2 class="title">🥗 Diet Tips</h2>
+    <ul class="card list">
+      <li v-for="(tip, idx) in tips" :key="idx">🍽 {{ tip }}</li>
     </ul>
   </main>
 </template>
 
 <style scoped>
-.page { padding: 24px; }
+.list { margin: 0; padding-left: 20px; }
+.list li { margin-bottom: 8px; }
 </style>

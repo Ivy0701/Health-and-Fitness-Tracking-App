@@ -13,16 +13,13 @@ onMounted(async () => {
 <template>
   <AppNavbar />
   <main class="page">
-    <h2>Dashboard</h2>
-    <div v-if="data">
-      <p>Today Workout Minutes: {{ data.todayWorkoutMinutes }}</p>
-      <p>Today Courses: {{ data.todayCourses }}</p>
-      <p>Today Calories: {{ data.todayCalories }}</p>
-      <p>Latest BMI: {{ data.latestBmi?.bmi || '-' }}</p>
+    <h2 class="title">📊 Dashboard Overview</h2>
+    <div v-if="data" class="grid grid-2">
+      <article class="card">💪 Today Workout: <strong>{{ data.todayWorkoutMinutes }}</strong> min</article>
+      <article class="card">📚 Today Courses: <strong>{{ data.todayCourses }}</strong></article>
+      <article class="card">🔥 Today Calories: <strong>{{ data.todayCalories }}</strong> kcal</article>
+      <article class="card">⚖️ Latest BMI: <strong>{{ data.latestBmi?.bmi || "-" }}</strong></article>
     </div>
+    <p v-else class="muted">Loading your healthy stats...</p>
   </main>
 </template>
-
-<style scoped>
-.page { padding: 24px; }
-</style>
