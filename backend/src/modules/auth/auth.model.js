@@ -4,6 +4,10 @@ async function findByEmail(email) {
   return db.get("SELECT * FROM users WHERE email = ?", [email]);
 }
 
+async function findByUsername(username) {
+  return db.get("SELECT * FROM users WHERE username = ?", [username]);
+}
+
 async function findById(id) {
   return db.get("SELECT id, email, username, role, is_active, created_at FROM users WHERE id = ?", [id]);
 }
@@ -16,4 +20,4 @@ async function createUser({ email, passwordHash, username }) {
   return findById(result.id);
 }
 
-module.exports = { findByEmail, findById, createUser };
+module.exports = { findByEmail, findByUsername, findById, createUser };

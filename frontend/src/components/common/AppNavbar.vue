@@ -1,3 +1,16 @@
+<script setup>
+import { useRouter } from "vue-router";
+import { useAuthStore } from "../../stores/auth";
+
+const router = useRouter();
+const auth = useAuthStore();
+
+function logout() {
+  auth.logout();
+  router.push("/login");
+}
+</script>
+
 <template>
   <nav class="nav">
     <router-link to="/dashboard">🏠 Dashboard</router-link>
@@ -9,6 +22,7 @@
     <router-link to="/favorites">⭐ Favorites</router-link>
     <router-link to="/feedback">💬 Feedback</router-link>
     <router-link to="/vip">👑 VIP</router-link>
+    <button class="logout" @click="logout">🚪 Logout</button>
   </nav>
 </template>
 
@@ -32,5 +46,14 @@ a {
 a.router-link-active {
   background: #2f4858;
   color: #fff;
+}
+.logout {
+  margin-left: auto;
+  border: none;
+  border-radius: 999px;
+  background: #2f4858;
+  color: #fff;
+  padding: 6px 12px;
+  cursor: pointer;
 }
 </style>

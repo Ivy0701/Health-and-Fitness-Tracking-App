@@ -6,10 +6,16 @@ import { useAuthStore } from "../stores/auth";
 const auth = useAuthStore();
 const router = useRouter();
 const form = reactive({ username: "", email: "", password: "" });
+const state = reactive({ error: "" });
 
 async function submit() {
-  await auth.register(form);
-  router.push("/assessment");
+  state.error = "";
+  try {
+    await auth.register(form);
+    router.push("/assessment");
+  } catch (error) {
+    state.error = error?.response?.data?.message || "Register failed";
+  }
 }
 </script>
 
@@ -23,6 +29,7 @@ async function submit() {
         <input v-model="form.password" type="password" placeholder="Password" required />
         <button type="submit">创建账号 ✨</button>
       </form>
+      <p v-if="state.error" class="error">❌ {{ state.error }}</p>
       <p class="muted">注册后会直接进入健康评估页。</p>
     </section>
   </main>
@@ -30,4 +37,5 @@ async function submit() {
 
 <style scoped>
 .auth { max-width: 440px; margin: 30px auto; }
+.error { color: #b42318; background: #fdecec; border: 1px solid #f5c2c0; border-radius: 8px; padding: 8px; }
 </style>

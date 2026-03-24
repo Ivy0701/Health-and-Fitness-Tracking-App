@@ -11,9 +11,15 @@ function signToken(user) {
 }
 
 async function register(payload) {
-  const exists = await authModel.findByEmail(payload.email);
-  if (exists) {
-    const error = new Error("Email already exists");
+  const emailExists = await authModel.findByEmail(payload.email);
+  if (emailExists) {
+    const error = new Error("Email already exists, please use another email");
+    error.status = 400;
+    throw error;
+  }
+  const usernameExists = await authModel.findByUsername(payload.username);
+  if (usernameExists) {
+    const error = new Error("Username already exists, please use another username");
     error.status = 400;
     throw error;
   }
@@ -29,13 +35,13 @@ async function register(payload) {
 async function login(email, password) {
   const user = await authModel.findByEmail(email);
   if (!user) {
-    const error = new Error("Invalid credentials");
+    const error = new Error("Invalid email or password");
     error.status = 401;
     throw error;
   }
   const ok = await bcrypt.compare(password, user.password_hash);
   if (!ok) {
-    const error = new Error("Invalid credentials");
+    const error = new Error("Invalid email or password");
     error.status = 401;
     throw error;
   }

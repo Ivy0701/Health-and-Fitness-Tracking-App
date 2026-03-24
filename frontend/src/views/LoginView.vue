@@ -6,10 +6,16 @@ import { useAuthStore } from "../stores/auth";
 const auth = useAuthStore();
 const router = useRouter();
 const form = reactive({ email: "", password: "" });
+const state = reactive({ error: "" });
 
 async function submit() {
-  await auth.login(form);
-  router.push("/assessment");
+  state.error = "";
+  try {
+    await auth.login(form);
+    router.push("/assessment");
+  } catch (error) {
+    state.error = error?.response?.data?.message || "Login failed";
+  }
 }
 </script>
 
@@ -22,6 +28,7 @@ async function submit() {
         <input v-model="form.password" type="password" placeholder="Password" required />
         <button type="submit">进入系统 🚀</button>
       </form>
+      <p v-if="state.error" class="error">❌ {{ state.error }}</p>
       <p class="muted">没有账号？去注册页面创建一个新账号。</p>
     </section>
   </main>
@@ -29,4 +36,5 @@ async function submit() {
 
 <style scoped>
 .auth { max-width: 440px; margin: 30px auto; }
+.error { color: #b42318; background: #fdecec; border: 1px solid #f5c2c0; border-radius: 8px; padding: 8px; }
 </style>
