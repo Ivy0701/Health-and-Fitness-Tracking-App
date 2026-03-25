@@ -12,7 +12,7 @@ import DietView from "../views/DietView.vue";
 import ScheduleView from "../views/ScheduleView.vue";
 import ProfileView from "../views/ProfileView.vue";
 import FavoritesView from "../views/FavoritesView.vue";
-import FeedbackView from "../views/FeedbackView.vue";
+import ForumView from "../views/ForumView.vue";
 import VipView from "../views/VipView.vue";
 
 const routes = [
@@ -27,7 +27,7 @@ const routes = [
   { path: "/schedule", component: ScheduleView, meta: { auth: true } },
   { path: "/profile", component: ProfileView, meta: { auth: true } },
   { path: "/favorites", component: FavoritesView, meta: { auth: true } },
-  { path: "/feedback", component: FeedbackView, meta: { auth: true } },
+  { path: "/forum", component: ForumView, meta: { auth: true } },
   { path: "/vip", component: VipView, meta: { auth: true } }
 ];
 

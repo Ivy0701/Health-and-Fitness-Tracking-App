@@ -20,7 +20,7 @@ function logout() {
     <router-link to="/schedule">🗓 Schedule</router-link>
     <router-link to="/profile">👤 Profile</router-link>
     <router-link to="/favorites">⭐ Favorites</router-link>
-    <router-link to="/feedback">💬 Feedback</router-link>
+    <router-link to="/forum">💬 论坛</router-link>
     <router-link to="/vip">👑 VIP</router-link>
     <button class="logout" @click="logout">🚪 Logout</button>
   </nav>

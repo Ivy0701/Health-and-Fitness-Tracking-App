@@ -139,12 +139,11 @@ async function initDb() {
   );
 
   await run(
-    `CREATE TABLE IF NOT EXISTS feedback (
+    `CREATE TABLE IF NOT EXISTS forum_posts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
-      rating INTEGER NOT NULL,
+      title TEXT NOT NULL,
       content TEXT NOT NULL,
-      contact_email TEXT,
       status TEXT DEFAULT 'new',
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )`

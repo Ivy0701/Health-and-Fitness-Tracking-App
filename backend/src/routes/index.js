@@ -8,7 +8,7 @@ const workoutRoutes = require("../modules/workouts/workouts.routes");
 const dietRoutes = require("../modules/diets/diets.routes");
 const scheduleRoutes = require("../modules/schedules/schedules.routes");
 const favoriteRoutes = require("../modules/favorites/favorites.routes");
-const feedbackRoutes = require("../modules/feedback/feedback.routes");
+const forumRoutes = require("../modules/forum/forum.routes");
 const vipRoutes = require("../modules/vip/vip.routes");
 
 const router = express.Router();
@@ -22,7 +22,7 @@ router.use("/workouts", workoutRoutes);
 router.use("/diets", dietRoutes);
 router.use("/schedules", scheduleRoutes);
 router.use("/favorites", favoriteRoutes);
-router.use("/feedback", feedbackRoutes);
+router.use("/forum", forumRoutes);
 router.use("/vip", vipRoutes);
 
 module.exports = router;
