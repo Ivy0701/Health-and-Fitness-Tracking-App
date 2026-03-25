@@ -111,7 +111,7 @@ async function submit() {
     <section class="panel form-wrap">
       <h2 class="title">🩺 Health Assessment</h2>
 
-      <form @submit.prevent="submit">
+      <form novalidate @submit.prevent="submit">
         <div class="field">
           <label class="label" for="gender">Gender</label>
           <select id="gender" v-model="form.gender">

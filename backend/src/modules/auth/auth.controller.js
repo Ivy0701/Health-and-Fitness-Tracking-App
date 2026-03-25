@@ -10,19 +10,20 @@ const register = asyncHandler(async (req, res) => {
   if (!emailRegex.test(email)) {
     return res.status(400).json({ message: "Please input a valid email address" });
   }
-  if (String(password).length < 6) {
-    return res.status(400).json({ message: "Password must be at least 6 characters" });
+  if (String(password).length < 8) {
+    return res.status(400).json({ message: "Password must be at least 8 characters" });
   }
   const data = await authService.register({ email, password, username });
   res.status(201).json(data);
 });
 
 const login = asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) {
-    return res.status(400).json({ message: "email and password are required" });
+  const { identifier, email, username, password } = req.body;
+  const loginId = identifier || email || username;
+  if (!loginId || !password) {
+    return res.status(400).json({ message: "identifier (email/username) and password are required" });
   }
-  const data = await authService.login(email, password);
+  const data = await authService.login(loginId, password);
   res.json(data);
 });
 

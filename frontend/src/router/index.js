@@ -22,13 +22,13 @@ const routes = [
   { path: "/assessment", component: AssessmentView, meta: { auth: true } },
   { path: "/dashboard", component: DashboardView, meta: { auth: true } },
   { path: "/courses", component: CoursesView, meta: { auth: true } },
-  { path: "/workouts", component: WorkoutView, meta: { auth: true } },
+  { path: "/workout", component: WorkoutView, meta: { auth: true } },
   { path: "/diet", component: DietView, meta: { auth: true } },
   { path: "/schedule", component: ScheduleView, meta: { auth: true } },
   { path: "/profile", component: ProfileView, meta: { auth: true } },
   { path: "/favorites", component: FavoritesView, meta: { auth: true } },
   { path: "/forum", component: ForumView, meta: { auth: true } },
-  { path: "/vip", component: VipView, meta: { auth: true } }
+  { path: "/vip", component: VipView, meta: { auth: true } },
 ];
 
 const router = createRouter({

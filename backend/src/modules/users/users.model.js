@@ -1,30 +1,55 @@
-const db = require("../../config/db");
+const User = require("../../models/User");
+
+function toProfile(user) {
+  if (!user) return null;
+  return {
+    id: String(user._id),
+    username: user.username,
+    email: user.email,
+    gender: user.gender,
+    age: user.age,
+    height: user.height,
+    weight: user.weight,
+    targetWeight: user.targetWeight,
+    bmi: user.bmi,
+    heartRate: user.heartRate,
+    goal: user.goal,
+    activityLevel: user.activityLevel,
+    avatar: user.avatar,
+    isVip: user.isVip,
+    vipSince: user.vipSince,
+    vipPlan: user.vipPlan,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+  };
+}
 
 async function getMe(userId) {
-  return db.get(
-    `SELECT id, email, username, gender, height_cm, weight_kg, age, target_weight_kg
-     FROM users
-     WHERE id = ?`,
-    [userId]
-  );
+  const user = await User.findById(userId);
+  return toProfile(user);
 }
 
 async function updateMe(userId, payload) {
-  await db.run(
-    `UPDATE users
-     SET username = ?, gender = ?, height_cm = ?, weight_kg = ?, age = ?, target_weight_kg = ?
-     WHERE id = ?`,
-    [
-      payload.username,
-      payload.gender,
-      payload.height_cm,
-      payload.weight_kg,
-      payload.age,
-      payload.target_weight_kg,
-      userId
-    ]
-  );
-  return getMe(userId);
+  const allowed = [
+    "gender",
+    "age",
+    "height",
+    "weight",
+    "targetWeight",
+    "goal",
+    "activityLevel",
+    "heartRate",
+    "avatar",
+    "username",
+  ];
+
+  const update = {};
+  allowed.forEach((key) => {
+    if (payload[key] !== undefined) update[key] = payload[key];
+  });
+
+  const user = await User.findByIdAndUpdate(userId, { $set: update }, { new: true, runValidators: true });
+  return toProfile(user);
 }
 
-module.exports = { getMe, updateMe };
+module.exports = { getMe, updateMe, toProfile };

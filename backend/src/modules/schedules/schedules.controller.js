@@ -1,19 +1,29 @@
 const asyncHandler = require("../../utils/asyncHandler");
-const db = require("../../config/db");
+const ScheduleItem = require("../../models/ScheduleItem");
 
 const list = asyncHandler(async (req, res) => {
-  const rows = await db.all("SELECT * FROM schedules WHERE user_id = ? ORDER BY start_time ASC", [req.user.id]);
+  const userId = req.params.userId;
+  if (String(userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  const rows = await ScheduleItem.find({ userId }).sort({ date: 1, time: 1, createdAt: -1 });
   res.json(rows);
 });
 
 const create = asyncHandler(async (req, res) => {
-  const { title, schedule_type, start_time, end_time, status, remark } = req.body;
-  const result = await db.run(
-    `INSERT INTO schedules (user_id, title, schedule_type, start_time, end_time, status, remark)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [req.user.id, title, schedule_type, start_time, end_time, status || "planned", remark || null]
-  );
-  res.status(201).json({ id: result.id });
+  const { userId, title, date, time, note } = req.body;
+  const uid = userId || req.user.id;
+  if (String(uid) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  if (!title || !date || !time) return res.status(400).json({ message: "title, date and time are required" });
+  const row = await ScheduleItem.create({ userId: uid, title, date, time, note });
+  res.status(201).json(row);
 });
 
-module.exports = { list, create };
+const remove = asyncHandler(async (req, res) => {
+  const row = await ScheduleItem.findById(req.params.id);
+  if (!row) return res.status(404).json({ message: "Schedule item not found" });
+  if (String(row.userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  await row.deleteOne();
+  res.json({ success: true });
+});
+
+module.exports = { list, create, remove };
+

@@ -1,19 +1,29 @@
 const asyncHandler = require("../../utils/asyncHandler");
-const db = require("../../config/db");
+const Workout = require("../../models/Workout");
 
 const list = asyncHandler(async (req, res) => {
-  const rows = await db.all("SELECT * FROM workouts ORDER BY created_at DESC");
+  const userId = req.params.userId;
+  if (String(userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  const rows = await Workout.find({ userId }).sort({ date: -1, createdAt: -1 });
   res.json(rows);
 });
 
-const createRecord = asyncHandler(async (req, res) => {
-  const { workout_id, duration_min, calories_burned, record_date, note } = req.body;
-  const result = await db.run(
-    `INSERT INTO workout_records (user_id, workout_id, duration_min, calories_burned, record_date, note)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [req.user.id, workout_id, duration_min, calories_burned || null, record_date, note || null]
-  );
-  res.status(201).json({ id: result.id });
+const create = asyncHandler(async (req, res) => {
+  const { userId, type, duration, caloriesBurned, date, note } = req.body;
+  const uid = userId || req.user.id;
+  if (String(uid) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  if (!type || !duration) return res.status(400).json({ message: "type and duration are required" });
+  const row = await Workout.create({ userId: uid, type, duration, caloriesBurned, date, note });
+  res.status(201).json(row);
 });
 
-module.exports = { list, createRecord };
+const remove = asyncHandler(async (req, res) => {
+  const row = await Workout.findById(req.params.id);
+  if (!row) return res.status(404).json({ message: "Workout not found" });
+  if (String(row.userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  await row.deleteOne();
+  res.json({ success: true });
+});
+
+module.exports = { list, create, remove };
+

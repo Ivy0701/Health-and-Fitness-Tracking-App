@@ -1,40 +1,19 @@
-const path = require("path");
-const sqlite3 = require("sqlite3").verbose();
+const mongoose = require("mongoose");
 
-const dbPath = process.env.SQLITE_PATH || path.join(process.cwd(), "database.sqlite");
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error("SQLite connect error:", err.message);
-  } else {
-    console.log(`SQLite connected: ${dbPath}`);
+async function connectDB() {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    throw new Error("MONGODB_URI is required in environment variables");
   }
-});
 
-function run(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function onRun(err) {
-      if (err) return reject(err);
-      resolve({ id: this.lastID, changes: this.changes });
-    });
+  const dbName = process.env.MONGODB_DB_NAME || "health&fitness";
+
+  await mongoose.connect(uri, {
+    dbName,
+    autoIndex: true,
   });
+
+  console.log(`MongoDB connected: ${mongoose.connection.host}/${dbName}`);
 }
 
-function get(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) return reject(err);
-      resolve(row || null);
-    });
-  });
-}
-
-function all(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) return reject(err);
-      resolve(rows);
-    });
-  });
-}
-
-module.exports = { db, run, get, all };
+module.exports = { connectDB, mongoose };

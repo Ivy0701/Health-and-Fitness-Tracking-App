@@ -5,7 +5,7 @@ import api from "../services/api";
 
 const data = ref(null);
 onMounted(async () => {
-  const res = await api.get("/dashboard");
+  const res = await api.get("/dashboard/overview");
   data.value = res.data;
 });
 </script>
@@ -16,7 +16,7 @@ onMounted(async () => {
     <h2 class="title">📊 Dashboard Overview</h2>
     <div v-if="data" class="grid grid-2">
       <article class="card">💪 Today Workout: <strong>{{ data.todayWorkoutMinutes }}</strong> min</article>
-      <article class="card">📚 Today Courses: <strong>{{ data.todayCourses }}</strong></article>
+      <article class="card">📚 Available Courses: <strong>{{ data.todayCoursesCount }}</strong></article>
       <article class="card">🔥 Today Calories: <strong>{{ data.todayCalories }}</strong> kcal</article>
       <article class="card">⚖️ Latest BMI: <strong>{{ data.latestBmi?.bmi || "-" }}</strong></article>
     </div>

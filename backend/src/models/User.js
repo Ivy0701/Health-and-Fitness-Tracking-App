@@ -1,0 +1,60 @@
+const mongoose = require("mongoose");
+
+const userSchema = new mongoose.Schema(
+  {
+    username: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 2,
+      maxlength: 40,
+    },
+    email: {
+      type: String,
+      required: true,
+      unique: true,
+      lowercase: true,
+      trim: true,
+    },
+    password: {
+      type: String,
+      required: true,
+      minlength: 8,
+    },
+    gender: {
+      type: String,
+      enum: ["male", "female", "other", "prefer_not_to_say"],
+      default: "prefer_not_to_say",
+    },
+    age: { type: Number, min: 1, max: 130 },
+    height: { type: Number, min: 30, max: 300 },
+    weight: { type: Number, min: 1, max: 600 },
+    targetWeight: { type: Number, min: 1, max: 600 },
+    bmi: { type: Number, min: 0, max: 100 },
+    heartRate: { type: Number, min: 20, max: 260 },
+    goal: { type: String, trim: true, maxlength: 200 },
+    activityLevel: {
+      type: String,
+      enum: ["sedentary", "light", "moderate", "active", "very_active"],
+      default: "moderate",
+    },
+    avatar: { type: String, trim: true },
+    isVip: { type: Boolean, default: false },
+    vipSince: { type: Date },
+    vipPlan: { type: String, enum: ["none", "monthly", "yearly"], default: "none" },
+    bodyFat: { type: Number, min: 0, max: 80 },
+    bloodPressure: { type: String, trim: true, maxlength: 20 },
+    sleepHours: { type: Number, min: 0, max: 24 },
+    calorieGoal: { type: Number, min: 0, max: 20000 },
+    workoutFrequency: { type: Number, min: 0, max: 14 },
+  },
+  {
+    timestamps: true,
+    versionKey: false,
+  }
+);
+
+userSchema.index({ username: 1 });
+
+module.exports = mongoose.model("User", userSchema);
+

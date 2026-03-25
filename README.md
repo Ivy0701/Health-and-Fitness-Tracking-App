@@ -1,26 +1,25 @@
 # Health and Fitness Tracking Web App (MVP)
 
-Vue 3 + Vite + Pinia + Axios frontend, Node.js + Express backend, SQLite database.
+Vue 3 + Vite + Pinia + Axios frontend, Node.js + Express + Mongoose backend, MongoDB Atlas database.
 
 ## Project Structure
 
 - `frontend`: Vue app
 - `backend`: Express API
-- `backend/sql/schema.sql`: database schema
-- `backend/sql/seed.sql`: seed data
+- `backend/src/models`: Mongoose models
+- `backend/src/config/db.js`: MongoDB connection
 
 ## Quick Start
 
 ### 1) Database
 
-- Backend uses SQLite file database (`backend/database.sqlite`)
-- Tables are auto-initialized when backend starts (`src/config/initDb.js`)
-- Optional schema file: `backend/sql/schema.sql`
+- Backend uses MongoDB Atlas.
+- Configure `MONGODB_URI` and `MONGODB_DB_NAME` in `backend/.env`.
 
 ### 2) Backend
 
 1. Copy `backend/.env.example` to `backend/.env`
-2. Fill your SQLite and JWT values
+2. Fill your MongoDB and JWT values
 3. Install dependencies:
    - `cd backend`
    - `npm install`
@@ -44,13 +43,11 @@ Frontend default URL: `http://localhost:5173`
 
 - `POST /api/auth/register`
 - `POST /api/auth/login`
-- `GET /api/users/me`
-- `POST /api/assessments`
+- `GET /api/user/profile`
+- `PUT /api/user/profile`
+- `POST /api/health/save`
+- `GET /api/health/history/:userId`
 - `GET /api/dashboard`
-- `GET /api/courses`
-- `POST /api/workouts/records`
-- `GET /api/schedules`
-- `POST /api/favorites`
 
 ## Notes
 

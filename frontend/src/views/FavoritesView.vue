@@ -3,20 +3,35 @@ import { onMounted, ref } from "vue";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
 
-const favorites = ref([]);
-onMounted(async () => {
-  const { data } = await api.get("/favorites");
-  favorites.value = data;
-});
+const me = ref(null);
+const list = ref([]);
+
+async function load() {
+  me.value = await api.get("/users/me").then((r) => r.data);
+  list.value = await api.get(`/favorites/${me.value.id}`).then((r) => r.data);
+}
+
+async function removeFavorite(id) {
+  await api.delete(`/favorites/${id}`);
+  await load();
+}
+
+onMounted(load);
 </script>
 
 <template>
   <AppNavbar />
   <main class="page">
     <h2 class="title">⭐ Favorites</h2>
-    <div class="card" v-if="favorites.length">
-      <p v-for="f in favorites" :key="f.id">💚 {{ f.type }} #{{ f.item_id }}</p>
+    <div v-if="list.length" class="grid">
+      <article v-for="f in list" :key="f._id" class="card">
+        <h3>{{ f.title || "Untitled item" }}</h3>
+        <p>Type: {{ f.itemType }}</p>
+        <p class="muted">Item ID: {{ f.itemId }}</p>
+        <button @click="removeFavorite(f._id)">Remove</button>
+      </article>
     </div>
-    <p class="muted" v-else>还没有收藏内容，快去添加吧。</p>
+    <p v-else class="muted">No favorites yet.</p>
   </main>
 </template>
+

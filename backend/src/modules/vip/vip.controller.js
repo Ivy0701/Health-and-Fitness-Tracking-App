@@ -1,30 +1,25 @@
 const asyncHandler = require("../../utils/asyncHandler");
-const db = require("../../config/db");
-
-const plans = asyncHandler(async (req, res) => {
-  res.json([
-    { plan: "monthly", price: 19, benefits: ["Advanced analytics", "Priority feedback"] },
-    { plan: "quarterly", price: 49, benefits: ["Advanced analytics", "Custom goals"] },
-    { plan: "yearly", price: 169, benefits: ["All features", "Coach consultation"] }
-  ]);
-});
+const User = require("../../models/User");
 
 const status = asyncHandler(async (req, res) => {
-  const row = await db.get(
-    "SELECT * FROM vip_subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
-    [req.user.id]
-  );
-  res.json(row || null);
+  const userId = req.params.userId;
+  if (String(userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  const user = await User.findById(userId).select("isVip vipSince vipPlan").lean();
+  if (!user) return res.status(404).json({ message: "User not found" });
+  res.json(user);
 });
 
 const upgrade = asyncHandler(async (req, res) => {
-  const { plan_name } = req.body;
-  const result = await db.run(
-    `INSERT INTO vip_subscriptions (user_id, plan_name, start_date, end_date, status)
-     VALUES (?, ?, date('now'), date('now', '+30 day'), 'active')`,
-    [req.user.id, plan_name || "monthly"]
-  );
-  res.status(201).json({ id: result.id, message: "VIP upgraded (mock)" });
+  const { userId, vipPlan } = req.body;
+  const uid = userId || req.user.id;
+  if (String(uid) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  const user = await User.findByIdAndUpdate(
+    uid,
+    { $set: { isVip: true, vipSince: new Date(), vipPlan: vipPlan || "monthly" } },
+    { new: true }
+  ).select("isVip vipSince vipPlan");
+  res.json(user);
 });
 
-module.exports = { plans, status, upgrade };
+module.exports = { status, upgrade };
+

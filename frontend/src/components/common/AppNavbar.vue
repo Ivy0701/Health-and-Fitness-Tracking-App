@@ -15,12 +15,12 @@ function logout() {
   <nav class="nav">
     <router-link to="/dashboard">🏠 Dashboard</router-link>
     <router-link to="/courses">📚 Courses</router-link>
-    <router-link to="/workouts">💪 Workout</router-link>
+    <router-link to="/workout">💪 Workout</router-link>
     <router-link to="/diet">🥗 Diet</router-link>
     <router-link to="/schedule">🗓 Schedule</router-link>
     <router-link to="/profile">👤 Profile</router-link>
     <router-link to="/favorites">⭐ Favorites</router-link>
-    <router-link to="/forum">💬 论坛</router-link>
+    <router-link to="/forum">💬 Forum</router-link>
     <router-link to="/vip">👑 VIP</router-link>
     <button class="logout" @click="logout">🚪 Logout</button>
   </nav>

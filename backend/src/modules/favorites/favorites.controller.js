@@ -1,26 +1,34 @@
 const asyncHandler = require("../../utils/asyncHandler");
-const db = require("../../config/db");
+const Favorite = require("../../models/Favorite");
 
 const list = asyncHandler(async (req, res) => {
-  const rows = await db.all("SELECT * FROM favorites WHERE user_id = ? ORDER BY created_at DESC", [req.user.id]);
+  const userId = req.params.userId;
+  if (String(userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  const rows = await Favorite.find({ userId }).sort({ createdAt: -1 });
   res.json(rows);
 });
 
 const create = asyncHandler(async (req, res) => {
-  const type = req.body.type || req.body.fav_type;
-  const itemId = req.body.item_id || req.body.target_id;
-  const existing = await db.get(
-    "SELECT id FROM favorites WHERE user_id = ? AND type = ? AND item_id = ?",
-    [req.user.id, type, itemId]
+  const { userId, itemType, itemId, title } = req.body;
+  const uid = userId || req.user.id;
+  if (String(uid) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  if (!itemType || !itemId) return res.status(400).json({ message: "itemType and itemId are required" });
+
+  const row = await Favorite.findOneAndUpdate(
+    { userId: uid, itemType, itemId },
+    { $setOnInsert: { userId: uid, itemType, itemId, title } },
+    { new: true, upsert: true }
   );
-  if (existing) {
-    return res.status(201).json({ id: existing.id, success: true });
-  }
-  const result = await db.run(
-    "INSERT INTO favorites (user_id, type, item_id) VALUES (?, ?, ?)",
-    [req.user.id, type, itemId]
-  );
-  res.status(201).json({ id: result.id, success: true });
+  res.status(201).json(row);
 });
 
-module.exports = { list, create };
+const remove = asyncHandler(async (req, res) => {
+  const row = await Favorite.findById(req.params.id);
+  if (!row) return res.status(404).json({ message: "Favorite not found" });
+  if (String(row.userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  await row.deleteOne();
+  res.json({ success: true });
+});
+
+module.exports = { list, create, remove };
+

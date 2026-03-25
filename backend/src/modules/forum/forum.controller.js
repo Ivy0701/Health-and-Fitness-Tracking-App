@@ -1,31 +1,38 @@
 const asyncHandler = require("../../utils/asyncHandler");
-const db = require("../../config/db");
+const ForumPost = require("../../models/ForumPost");
+const User = require("../../models/User");
 
-const create = asyncHandler(async (req, res) => {
-  const { title, content } = req.body;
-
-  const t = String(title || "").trim();
-  const c = String(content || "").trim();
-
-  if (!t || !c) {
-    return res.status(400).json({ message: "title and content are required" });
-  }
-
-  const result = await db.run(
-    "INSERT INTO forum_posts (user_id, title, content) VALUES (?, ?, ?)",
-    [req.user.id, t, c]
-  );
-
-  res.status(201).json({ id: result.id });
-});
-
-const mine = asyncHandler(async (req, res) => {
-  const rows = await db.all(
-    "SELECT * FROM forum_posts WHERE user_id = ? ORDER BY created_at DESC",
-    [req.user.id]
-  );
+const list = asyncHandler(async (req, res) => {
+  const rows = await ForumPost.find().sort({ createdAt: -1 });
   res.json(rows);
 });
 
-module.exports = { create, mine };
+const create = asyncHandler(async (req, res) => {
+  const { title, content } = req.body;
+  if (!title || !content) return res.status(400).json({ message: "title and content are required" });
+  const user = await User.findById(req.user.id).select("username").lean();
+  const row = await ForumPost.create({
+    userId: req.user.id,
+    authorName: user?.username || "User",
+    title,
+    content,
+  });
+  res.status(201).json(row);
+});
+
+const detail = asyncHandler(async (req, res) => {
+  const row = await ForumPost.findById(req.params.id);
+  if (!row) return res.status(404).json({ message: "Post not found" });
+  res.json(row);
+});
+
+const remove = asyncHandler(async (req, res) => {
+  const row = await ForumPost.findById(req.params.id);
+  if (!row) return res.status(404).json({ message: "Post not found" });
+  if (String(row.userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  await row.deleteOne();
+  res.json({ success: true });
+});
+
+module.exports = { list, create, detail, remove };
 
