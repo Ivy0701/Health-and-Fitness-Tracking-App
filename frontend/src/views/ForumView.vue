@@ -10,19 +10,32 @@ const form = reactive({
 
 const posts = ref([]);
 const loading = ref(false);
+const submitError = ref("");
 
 async function loadMyPosts() {
   loading.value = true;
+  submitError.value = "";
   try {
-    posts.value = await api.get("/forum/me").then((r) => r.data);
+    const res = await api.get("/forum/me");
+    posts.value = res.data || [];
+  } catch (e) {
+    submitError.value = e?.response?.data?.message || "Failed to load posts.";
   } finally {
     loading.value = false;
   }
 }
 
 async function submit() {
-  await api.post("/forum", form);
-  alert("Posted");
+  submitError.value = "";
+
+  const title = String(form.title || "").trim();
+  const content = String(form.content || "").trim();
+  if (!title || !content) {
+    submitError.value = "Title and content are required.";
+    return;
+  }
+
+  await api.post("/forum", { title, content });
   form.title = "";
   form.content = "";
   await loadMyPosts();
@@ -36,10 +49,33 @@ onMounted(loadMyPosts);
   <main class="page">
     <section class="panel forum">
       <h2 class="title">💬 论坛</h2>
-      <form @submit.prevent="submit">
-        <input v-model.trim="form.title" type="text" placeholder="帖子标题" required />
-        <textarea v-model="form.content" placeholder="发表你的内容" required />
+
+      <form @submit.prevent="submit" class="grid">
+        <div class="field">
+          <label class="label" for="forum-title">帖子标题</label>
+          <input
+            id="forum-title"
+            v-model.trim="form.title"
+            type="text"
+            placeholder="Enter a title"
+            required
+          />
+        </div>
+
+        <div class="field">
+          <label class="label" for="forum-content">内容</label>
+          <textarea
+            id="forum-content"
+            v-model.trim="form.content"
+            placeholder="Write your post..."
+            rows="5"
+            required
+          />
+        </div>
+
         <button type="submit">🚀 发布</button>
+
+        <div v-if="submitError" class="error">{{ submitError }}</div>
       </form>
     </section>
 
@@ -71,7 +107,24 @@ onMounted(loadMyPosts);
 .subtitle {
   margin: 0 0 12px;
   font-size: 16px;
-  color: #2f4858;
+  color: var(--c6);
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+}
+
+.label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--c5);
+}
+
+.error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #c0392b;
 }
 
 .post {
