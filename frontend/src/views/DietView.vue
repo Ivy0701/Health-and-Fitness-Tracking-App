@@ -68,6 +68,9 @@ onMounted(load);
 </template>
 
 <style scoped>
-.list { margin-top: 16px; display: grid; gap: 12px; }
+.list {
+  margin-top: 16px;
+  display: grid;
+  gap: 12px;
+}
 </style>
-

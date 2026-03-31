@@ -2,8 +2,11 @@
 import { computed, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import api from "../services/api";
+import { useBmiStore } from "../stores/bmi";
+import { calculateBmiValue, formatBmi, getBmiCategoryLabel } from "../utils/bmi";
 
 const router = useRouter();
+const bmiStore = useBmiStore();
 
 const bmi = ref(null);
 const submitError = ref("");
@@ -24,14 +27,7 @@ const errors = reactive({
   target_weight_kg: "",
 });
 
-const bmiCategory = computed(() => {
-  const v = Number(bmi.value);
-  if (!Number.isFinite(v)) return "";
-  if (v < 18.5) return "Underweight";
-  if (v < 25) return "Normal";
-  if (v < 30) return "Overweight";
-  return "Obesity";
-});
+const bmiCategory = computed(() => getBmiCategoryLabel(bmi.value));
 
 function setError(key, message) {
   errors[key] = message;
@@ -77,9 +73,10 @@ function validate() {
 
 function calc() {
   if (!validate()) return false;
-  const h = Number(form.height_cm) / 100;
-  const next = Number(form.weight_kg) / (h * h);
-  bmi.value = next.toFixed(2);
+  const next = calculateBmiValue(form.weight_kg, form.height_cm);
+  const formatted = formatBmi(next);
+  bmi.value = formatted;
+  bmiStore.setSessionBmi(formatted, getBmiCategoryLabel(next));
   return true;
 }
 
@@ -99,6 +96,7 @@ async function submit() {
 
   try {
     await api.post("/assessments", payload);
+    bmiStore.clearSession();
     router.push("/dashboard");
   } catch (e) {
     submitError.value = e?.response?.data?.message || "Failed to save assessment.";

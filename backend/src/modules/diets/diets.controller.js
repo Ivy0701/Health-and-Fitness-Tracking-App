@@ -26,4 +26,3 @@ const remove = asyncHandler(async (req, res) => {
 });
 
 module.exports = { list, create, remove };
-
