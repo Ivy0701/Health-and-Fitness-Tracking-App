@@ -14,6 +14,8 @@ import ProfileView from "../views/ProfileView.vue";
 import FavoritesView from "../views/FavoritesView.vue";
 import ForumView from "../views/ForumView.vue";
 import VipView from "../views/VipView.vue";
+import PremiumCoursePage from "../views/PremiumCoursePage.vue";
+import CourseLearningView from "../views/CourseLearningView.vue";
 
 const routes = [
   { path: "/", component: LandingView },
@@ -22,6 +24,7 @@ const routes = [
   { path: "/assessment", component: AssessmentView, meta: { auth: true } },
   { path: "/dashboard", component: DashboardView, meta: { auth: true } },
   { path: "/courses", component: CoursesView, meta: { auth: true } },
+  { path: "/courses/:id/learn", component: CourseLearningView, meta: { auth: true } },
   { path: "/workout", component: WorkoutView, meta: { auth: true } },
   { path: "/diet", component: DietView, meta: { auth: true } },
   { path: "/schedule", component: ScheduleView, meta: { auth: true } },
@@ -29,6 +32,7 @@ const routes = [
   { path: "/favorites", component: FavoritesView, meta: { auth: true } },
   { path: "/forum", component: ForumView, meta: { auth: true } },
   { path: "/vip", component: VipView, meta: { auth: true } },
+  { path: "/premium-course", component: PremiumCoursePage, meta: { auth: true, vip: true } },
 ];
 
 const router = createRouter({
@@ -40,6 +44,9 @@ router.beforeEach((to) => {
   const auth = useAuthStore();
   if (to.meta.auth && !auth.isLoggedIn) {
     return "/login";
+  }
+  if (to.meta.vip && !auth.vipStatus) {
+    return "/vip";
   }
   return true;
 });

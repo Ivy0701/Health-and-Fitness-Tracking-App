@@ -40,6 +40,14 @@ const DEFAULT_SLOTS_BY_TITLE = {
     { weekday: 2, startTime: "07:00" },
     { weekday: 4, startTime: "07:00" },
   ],
+  "VIP: Elite HIIT Performance": [
+    { weekday: 1, startTime: "21:15" },
+    { weekday: 4, startTime: "21:15" },
+  ],
+  "VIP: Premium Yoga Mastery": [
+    { weekday: 2, startTime: "14:20" },
+    { weekday: 5, startTime: "14:20" },
+  ],
 };
 
 async function patchCourseWeeklySlots() {
@@ -47,6 +55,11 @@ async function patchCourseWeeklySlots() {
   for (const c of courses) {
     const slots = DEFAULT_SLOTS_BY_TITLE[c.title];
     if (!slots?.length) continue;
+    const forceRefreshTitles = new Set(["VIP: Elite HIIT Performance", "VIP: Premium Yoga Mastery"]);
+    if (forceRefreshTitles.has(c.title)) {
+      await Course.updateOne({ _id: c._id }, { $set: { weeklySlots: slots } });
+      continue;
+    }
     const has = Array.isArray(c.weeklySlots) && c.weeklySlots.length > 0;
     if (!has) {
       await Course.updateOne({ _id: c._id }, { $set: { weeklySlots: slots } });
@@ -124,6 +137,25 @@ async function seedDemoData() {
         category: "swim",
         weeklySlots: DEFAULT_SLOTS_BY_TITLE["Swim Technique (Pool)"],
       },
+      {
+        title: "VIP: Elite HIIT Performance",
+        description: "VIP-only: pro-level interval programming and performance tracking.",
+        difficulty: "advanced",
+        duration: 40,
+        category: "fitness",
+        isPremium: true,
+        isFeatured: true,
+        weeklySlots: DEFAULT_SLOTS_BY_TITLE["VIP: Elite HIIT Performance"],
+      },
+      {
+        title: "VIP: Premium Yoga Mastery",
+        description: "VIP-only: advanced flexibility, breathwork, and deep recovery routines.",
+        difficulty: "advanced",
+        duration: 50,
+        category: "mind-body",
+        isPremium: true,
+        weeklySlots: DEFAULT_SLOTS_BY_TITLE["VIP: Premium Yoga Mastery"],
+      },
     ]);
   } else {
     await patchCourseWeeklySlots();
@@ -168,6 +200,25 @@ async function seedDemoData() {
         duration: 60,
         category: "swim",
         weeklySlots: DEFAULT_SLOTS_BY_TITLE["Swim Technique (Pool)"],
+      },
+      {
+        title: "VIP: Elite HIIT Performance",
+        description: "VIP-only: pro-level interval programming and performance tracking.",
+        difficulty: "advanced",
+        duration: 40,
+        category: "fitness",
+        isPremium: true,
+        isFeatured: true,
+        weeklySlots: DEFAULT_SLOTS_BY_TITLE["VIP: Elite HIIT Performance"],
+      },
+      {
+        title: "VIP: Premium Yoga Mastery",
+        description: "VIP-only: advanced flexibility, breathwork, and deep recovery routines.",
+        difficulty: "advanced",
+        duration: 50,
+        category: "mind-body",
+        isPremium: true,
+        weeklySlots: DEFAULT_SLOTS_BY_TITLE["VIP: Premium Yoga Mastery"],
       },
     ];
     for (const doc of extras) {

@@ -1,6 +1,26 @@
 const mongoose = require("mongoose");
 const asyncHandler = require("../../utils/asyncHandler");
 const ScheduleItem = require("../../models/ScheduleItem");
+const Course = require("../../models/Course");
+const User = require("../../models/User");
+
+async function isVipUser(userId) {
+  const u = await User.findById(userId).select("vip_status isVip").lean();
+  return Boolean(u?.vip_status ?? u?.isVip);
+}
+
+async function assertNotJoiningPremiumCourse({ userId, courseIds }) {
+  if (!courseIds?.length) return;
+  const vip = await isVipUser(userId);
+  if (vip) return;
+
+  const rows = await Course.find({ _id: { $in: courseIds } }).select("title isPremium").lean();
+  const premiumTitles = rows.filter((c) => c.isPremium).map((c) => c.title);
+  if (premiumTitles.length) {
+    return { ok: false, premiumTitles };
+  }
+  return { ok: true };
+}
 
 const list = asyncHandler(async (req, res) => {
   const userId = req.params.userId;
@@ -14,6 +34,17 @@ const create = asyncHandler(async (req, res) => {
   const uid = userId || req.user.id;
   if (String(uid) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
   if (!title || !date || !time) return res.status(400).json({ message: "title, date and time are required" });
+
+  if (courseId && mongoose.isValidObjectId(courseId)) {
+    const r = await assertNotJoiningPremiumCourse({ userId: uid, courseIds: [courseId] });
+    if (r && r.ok === false) {
+      return res.status(403).json({
+        message: "This content is for VIP members only",
+        premiumCourses: r.premiumTitles,
+      });
+    }
+  }
+
   const row = await ScheduleItem.create({
     userId: uid,
     title,
@@ -44,6 +75,23 @@ const batchCreate = asyncHandler(async (req, res) => {
   }
   const LIMIT = 400;
   const slice = items.slice(0, LIMIT);
+
+  const courseIds = Array.from(
+    new Set(
+      slice
+        .map((x) => x?.courseId)
+        .filter((id) => id && mongoose.isValidObjectId(id))
+        .map(String)
+    )
+  );
+  const r = await assertNotJoiningPremiumCourse({ userId: uid, courseIds });
+  if (r && r.ok === false) {
+    return res.status(403).json({
+      message: "This content is for VIP members only",
+      premiumCourses: r.premiumTitles,
+    });
+  }
+
   const docs = [];
   for (const it of slice) {
     if (!it.title || !it.date || !it.time) {

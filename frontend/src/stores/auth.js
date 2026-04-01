@@ -7,19 +7,27 @@ export const useAuthStore = defineStore("auth", {
     user: null
   }),
   getters: {
-    isLoggedIn: (state) => !!state.token
+    isLoggedIn: (state) => !!state.token,
+    vipStatus: (state) => Boolean(state.user?.vip_status)
   },
   actions: {
+    normalizeUser(user) {
+      if (!user) return null;
+      return {
+        ...user,
+        vip_status: Boolean(user.vip_status ?? user.isVip)
+      };
+    },
     async login(payload) {
       const { data } = await api.post("/auth/login", payload);
       this.token = data.token;
-      this.user = data.user;
+      this.user = this.normalizeUser(data.user);
       localStorage.setItem("token", data.token);
     },
     async register(payload) {
       const { data } = await api.post("/auth/register", payload);
       this.token = data.token;
-      this.user = data.user;
+      this.user = this.normalizeUser(data.user);
       localStorage.setItem("token", data.token);
     },
     logout() {
@@ -30,7 +38,15 @@ export const useAuthStore = defineStore("auth", {
     async fetchMe() {
       if (!this.token) return;
       const { data } = await api.get("/users/me");
-      this.user = data;
+      this.user = this.normalizeUser(data);
+    },
+    setVipStatus(vipStatus) {
+      if (!this.user) return;
+      this.user = {
+        ...this.user,
+        vip_status: Boolean(vipStatus),
+        isVip: Boolean(vipStatus)
+      };
     }
   }
 });
