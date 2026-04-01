@@ -2,7 +2,10 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
+import CourseCard from "../components/CourseCard.vue";
 import api from "../services/api";
+import { useAuthStore } from "../stores/auth";
+import { createCourse as createCourseApi, fetchCourses } from "../services/courses";
 import {
   DEFAULT_TERM_START_ISO,
   WEEKDAY_LABELS,
@@ -12,6 +15,7 @@ import {
 } from "../utils/weekSchedule";
 
 const router = useRouter();
+const auth = useAuthStore();
 const courses = ref([]);
 const favorites = ref(new Set());
 const enrolledCourseIds = ref(new Set());
@@ -38,6 +42,11 @@ const conflictModal = ref({
   periodLabel: "",
 });
 
+const vipLockedModal = ref({
+  open: false,
+  courseTitle: "",
+});
+
 function addSlotRow() {
   form.weeklySlots.push({ weekday: 2, startTime: "10:00" });
 }
@@ -54,8 +63,8 @@ async function refreshEnrolled() {
 }
 
 async function loadCourses() {
-  const { data } = await api.get("/courses");
-  courses.value = data;
+  const rows = await fetchCourses();
+  courses.value = rows;
 }
 
 async function loadFavorites() {
@@ -84,7 +93,7 @@ async function dropCourseEnrollment(course) {
 async function createCourse() {
   state.value.error = "";
   try {
-    await api.post("/courses", {
+    await createCourseApi({
       title: form.title,
       description: form.description,
       difficulty: form.difficulty,
@@ -105,6 +114,25 @@ async function createCourse() {
   } catch (e) {
     state.value.error = e?.response?.data?.message || "Failed to create course.";
   }
+}
+
+function handleStartLearning(course) {
+  if (!course.isPremium) {
+    router.push(`/courses/${course._id}/learn`);
+    return;
+  }
+  if (auth.vipStatus) {
+    router.push(`/courses/${course._id}/learn`);
+    return;
+  }
+  vipLockedModal.value = {
+    open: true,
+    courseTitle: course.title,
+  };
+}
+
+function closeVipLockedModal() {
+  vipLockedModal.value = { open: false, courseTitle: "" };
 }
 
 function slotLabel(slot) {
@@ -288,28 +316,19 @@ onMounted(async () => {
     </section>
 
     <section class="grid grid-2 list">
-      <article v-for="c in courses" :key="c._id" class="card">
-        <h3>{{ c.title }}</h3>
-        <p class="muted">{{ c.description }}</p>
-        <p>Difficulty: <strong>{{ c.difficulty }}</strong></p>
-        <p>Duration: <strong>{{ c.duration }}</strong> min</p>
-        <p>Category: <strong>{{ c.category }}</strong></p>
-        <p class="schedule-line"><span class="sched-icon">🗓</span> {{ courseSlotsText(c) }}</p>
-        <div class="card-actions">
-          <button type="button" class="btn-schedule" @click="openAddToSchedule(c)">Enroll — add full term to Schedule</button>
-          <button
-            v-if="enrolledCourseIds.has(String(c._id))"
-            type="button"
-            class="btn-drop"
-            @click="dropCourseEnrollment(c)"
-          >
-            Drop course (remove all sessions)
-          </button>
-          <button :disabled="favorites.has(c._id)" @click="addFavorite(c)">
-            {{ favorites.has(c._id) ? "Favorited" : "Add to Favorites" }}
-          </button>
-        </div>
-      </article>
+      <CourseCard
+        v-for="c in courses"
+        :key="c._id"
+        :course="c"
+        :slot-text="courseSlotsText(c)"
+        :is-vip-user="auth.vipStatus"
+        :is-favorited="favorites.has(c._id)"
+        :is-enrolled="enrolledCourseIds.has(String(c._id))"
+        @start="handleStartLearning"
+        @enroll="openAddToSchedule"
+        @drop="dropCourseEnrollment"
+        @favorite="addFavorite"
+      />
     </section>
 
     <Teleport to="body">
@@ -331,6 +350,22 @@ onMounted(async () => {
               <button type="button" class="btn-warn" @click="submitScheduleEnroll('stack')">Add all (stacked)</button>
             </template>
             <button v-else type="button" class="btn-primary" @click="submitScheduleEnroll('all')">Add to schedule</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div v-if="vipLockedModal.open" class="modal-backdrop" @click.self="closeVipLockedModal">
+        <div class="modal panel">
+          <h3>VIP Members Only</h3>
+          <p class="muted">
+            “{{ vipLockedModal.courseTitle }}” is for VIP members only.
+          </p>
+          <p>Please upgrade to unlock this premium content.</p>
+          <div class="modal-actions">
+            <button type="button" class="btn-muted" @click="closeVipLockedModal">Not now</button>
+            <button type="button" class="btn-primary" @click="router.push('/vip')">Go to VIP Page</button>
           </div>
         </div>
       </div>
@@ -406,38 +441,6 @@ onMounted(async () => {
   margin: 12px 0 0;
   font-size: 14px;
   color: var(--c6);
-}
-.schedule-line {
-  font-size: 13px;
-  color: var(--c5);
-  margin: 8px 0;
-}
-.sched-icon {
-  margin-right: 4px;
-}
-.card-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 10px;
-}
-.btn-schedule {
-  background: linear-gradient(90deg, var(--c3), var(--c4));
-  color: #fff;
-  border: none;
-  border-radius: 10px;
-  padding: 10px 12px;
-  cursor: pointer;
-  font-weight: 600;
-}
-.btn-drop {
-  background: #fff5f5;
-  color: #9b2c2c;
-  border: 1px solid #e8a09e;
-  border-radius: 10px;
-  padding: 10px 12px;
-  cursor: pointer;
-  font-weight: 600;
 }
 .modal-backdrop {
   position: fixed;

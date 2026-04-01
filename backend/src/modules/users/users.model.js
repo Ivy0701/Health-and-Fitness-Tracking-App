@@ -16,6 +16,7 @@ function toProfile(user) {
     goal: user.goal,
     activityLevel: user.activityLevel,
     avatar: user.avatar,
+    vip_status: user.vip_status,
     isVip: user.isVip,
     vipSince: user.vipSince,
     vipPlan: user.vipPlan,

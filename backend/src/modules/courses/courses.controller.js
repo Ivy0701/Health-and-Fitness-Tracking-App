@@ -26,7 +26,7 @@ const list = asyncHandler(async (req, res) => {
 });
 
 const create = asyncHandler(async (req, res) => {
-  const { title, description, difficulty, duration, category, isFeatured, weeklySlots } = req.body;
+  const { title, description, difficulty, duration, category, isFeatured, isPremium, weeklySlots } = req.body;
   if (!title) return res.status(400).json({ message: "title is required" });
   const slots = normalizeWeeklySlots(weeklySlots);
   const row = await Course.create({
@@ -36,6 +36,7 @@ const create = asyncHandler(async (req, res) => {
     duration,
     category,
     isFeatured,
+    isPremium,
     weeklySlots: slots,
   });
   res.status(201).json(row);
