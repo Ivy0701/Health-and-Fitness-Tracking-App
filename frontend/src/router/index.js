@@ -16,6 +16,7 @@ import ForumView from "../views/ForumView.vue";
 import VipView from "../views/VipView.vue";
 import PremiumCoursePage from "../views/PremiumCoursePage.vue";
 import CourseLearningView from "../views/CourseLearningView.vue";
+import api from "../services/api";
 
 const routes = [
   { path: "/", component: LandingView },
@@ -24,7 +25,25 @@ const routes = [
   { path: "/assessment", component: AssessmentView, meta: { auth: true } },
   { path: "/dashboard", component: DashboardView, meta: { auth: true } },
   { path: "/courses", component: CoursesView, meta: { auth: true } },
-  { path: "/courses/:id/learn", component: CourseLearningView, meta: { auth: true } },
+  {
+    path: "/courses/:id/learn",
+    component: CourseLearningView,
+    meta: { auth: true },
+    beforeEnter: async (to) => {
+      const auth = useAuthStore();
+      const courseId = to.params.id;
+      if (!courseId) return "/courses";
+      try {
+        const { data } = await api.get(`/courses/${courseId}`);
+        if (data?.isPremium && !auth.vipStatus) {
+          return "/vip";
+        }
+        return true;
+      } catch {
+        return "/courses";
+      }
+    },
+  },
   { path: "/workout", component: WorkoutView, meta: { auth: true } },
   { path: "/diet", component: DietView, meta: { auth: true } },
   { path: "/schedule", component: ScheduleView, meta: { auth: true } },
