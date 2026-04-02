@@ -12,6 +12,7 @@ function sanitizeUser(user) {
     weight: user.weight,
     targetWeight: user.targetWeight,
     bmi: user.bmi,
+    assessment_completed: user.assessment_completed,
     heartRate: user.heartRate,
     goal: user.goal,
     activityLevel: user.activityLevel,

@@ -73,6 +73,10 @@ onMounted(async () => {
     <h2 class="title">👤 Profile</h2>
     <section v-if="profile" class="panel">
       <p>📧 Email: <strong>{{ profile.email }}</strong></p>
+      <p>Gender: <strong>{{ profile.gender || "-" }}</strong></p>
+      <p>Age: <strong>{{ profile.age || "-" }}</strong></p>
+      <p>Height: <strong>{{ profile.height ? `${profile.height} cm` : "-" }}</strong></p>
+      <p>Weight: <strong>{{ profile.weight ? `${profile.weight} kg` : "-" }}</strong></p>
       <p>📈 Current BMI: <strong>{{ profile.bmi || "-" }}</strong></p>
       <form novalidate @submit.prevent="save">
         <input v-model="form.username" placeholder="Username" />

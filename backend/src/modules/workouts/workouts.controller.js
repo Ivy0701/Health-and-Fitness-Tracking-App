@@ -1,29 +1,31 @@
 const asyncHandler = require("../../utils/asyncHandler");
-const Workout = require("../../models/Workout");
+const WorkoutPlan = require("../../models/WorkoutPlan");
 
-const list = asyncHandler(async (req, res) => {
-  const userId = req.params.userId;
-  if (String(userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
-  const rows = await Workout.find({ userId }).sort({ date: -1, createdAt: -1 });
+const listPlans = asyncHandler(async (req, res) => {
+  const rows = await WorkoutPlan.find({ user_id: req.user.id }).sort({ created_at: -1 });
   res.json(rows);
 });
 
-const create = asyncHandler(async (req, res) => {
-  const { userId, type, duration, caloriesBurned, date, note } = req.body;
-  const uid = userId || req.user.id;
-  if (String(uid) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
-  if (!type || !duration) return res.status(400).json({ message: "type and duration are required" });
-  const row = await Workout.create({ userId: uid, type, duration, caloriesBurned, date, note });
+const createPlan = asyncHandler(async (req, res) => {
+  const { exerciseName, category, durationPerDay, days, isCustom } = req.body;
+  if (!exerciseName || !category || !durationPerDay || !days) {
+    return res.status(400).json({ message: "exerciseName, category, durationPerDay and days are required" });
+  }
+  if (Number(days) < 1 || Number(days) > 30) {
+    return res.status(400).json({ message: "days must be between 1 and 30" });
+  }
+
+  const row = await WorkoutPlan.create({
+    user_id: req.user.id,
+    exercise_name: String(exerciseName).trim(),
+    category: String(category).trim(),
+    duration_per_day: Number(durationPerDay),
+    days: Number(days),
+    is_custom: Boolean(isCustom),
+  });
+
   res.status(201).json(row);
 });
 
-const remove = asyncHandler(async (req, res) => {
-  const row = await Workout.findById(req.params.id);
-  if (!row) return res.status(404).json({ message: "Workout not found" });
-  if (String(row.userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
-  await row.deleteOne();
-  res.json({ success: true });
-});
-
-module.exports = { list, create, remove };
+module.exports = { listPlans, createPlan };
 

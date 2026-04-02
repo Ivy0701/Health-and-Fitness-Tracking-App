@@ -36,11 +36,37 @@ const router = createRouter({
   routes
 });
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   const auth = useAuthStore();
   if (to.meta.auth && !auth.isLoggedIn) {
     return "/login";
   }
+
+  if (auth.isLoggedIn && !auth.user) {
+    try {
+      await auth.fetchMe();
+    } catch (error) {
+      auth.logout();
+      return "/login";
+    }
+  }
+
+  if (auth.isLoggedIn && auth.user) {
+    const completed = !!auth.user.assessment_completed;
+    if (!completed && to.path !== "/assessment") {
+      return "/assessment";
+    }
+    if (completed && to.path === "/assessment") {
+      return "/dashboard";
+    }
+    if ((to.path === "/login" || to.path === "/register") && completed) {
+      return "/dashboard";
+    }
+    if ((to.path === "/login" || to.path === "/register") && !completed) {
+      return "/assessment";
+    }
+  }
+
   return true;
 });
 

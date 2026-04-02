@@ -1,4 +1,5 @@
 const User = require("../../models/User");
+const { calculateBmi } = require("../../utils/bmi.util");
 
 function toProfile(user) {
   if (!user) return null;
@@ -12,6 +13,7 @@ function toProfile(user) {
     weight: user.weight,
     targetWeight: user.targetWeight,
     bmi: user.bmi,
+    assessment_completed: user.assessment_completed,
     heartRate: user.heartRate,
     goal: user.goal,
     activityLevel: user.activityLevel,
@@ -52,4 +54,27 @@ async function updateMe(userId, payload) {
   return toProfile(user);
 }
 
-module.exports = { getMe, updateMe, toProfile };
+async function saveBasicAssessment(userId, payload) {
+  const height = Number(payload.height);
+  const weight = Number(payload.weight);
+  const bmi = payload.bmi != null ? Number(payload.bmi) : calculateBmi(weight, height);
+
+  const user = await User.findByIdAndUpdate(
+    userId,
+    {
+      $set: {
+        gender: payload.gender,
+        age: Number(payload.age),
+        height,
+        weight,
+        bmi: Number(bmi.toFixed(1)),
+        assessment_completed: true,
+      },
+    },
+    { new: true, runValidators: true }
+  );
+
+  return toProfile(user);
+}
+
+module.exports = { getMe, updateMe, saveBasicAssessment, toProfile };

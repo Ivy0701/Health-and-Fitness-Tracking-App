@@ -75,7 +75,7 @@ async function submit() {
   if (!validateForm()) return;
   try {
     await auth.login({ email: form.email, password: form.password });
-    router.push("/dashboard");
+    router.push(auth.user?.assessment_completed ? "/dashboard" : "/assessment");
   } catch (error) {
     state.error = error?.response?.data?.message || "Login failed";
     generateCaptcha();

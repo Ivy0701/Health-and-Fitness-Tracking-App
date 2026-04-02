@@ -7,5 +7,6 @@ router.get("/me", authMiddleware, controller.me);
 router.put("/me", authMiddleware, controller.updateMe);
 router.get("/profile", authMiddleware, controller.me);
 router.put("/profile", authMiddleware, controller.updateMe);
+router.post("/assessment", authMiddleware, controller.saveAssessment);
 
 module.exports = router;

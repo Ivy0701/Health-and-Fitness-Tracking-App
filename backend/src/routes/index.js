@@ -22,6 +22,7 @@ router.use("/assessments", assessmentRoutes);
 router.use("/dashboard", dashboardRoutes);
 router.use("/courses", coursesRoutes);
 router.use("/workouts", workoutsRoutes);
+router.use("/workout", workoutsRoutes);
 router.use("/diets", dietsRoutes);
 router.use("/schedules", schedulesRoutes);
 router.use("/favorites", favoritesRoutes);

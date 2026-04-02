@@ -28,7 +28,7 @@ async function submit() {
       email: form.email,
       password: form.password
     });
-    router.push("/dashboard");
+    router.push(auth.user?.assessment_completed ? "/dashboard" : "/assessment");
   } catch (error) {
     state.error = error?.response?.data?.message || "Register failed";
   }
@@ -63,7 +63,7 @@ async function submit() {
         <button type="submit">Create Account ✨</button>
       </form>
       <p v-if="state.error" class="error">❌ {{ state.error }}</p>
-      <p class="muted">After registration, you will be redirected to your dashboard.</p>
+      <p class="muted">After registration, you will complete a basic assessment before entering the dashboard.</p>
       <p class="muted">
         Already have an account?
         <router-link to="/login" class="signin-link">Sign in here.</router-link>

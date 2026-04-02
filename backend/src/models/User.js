@@ -47,6 +47,7 @@ const userSchema = new mongoose.Schema(
     sleepHours: { type: Number, min: 0, max: 24 },
     calorieGoal: { type: Number, min: 0, max: 20000 },
     workoutFrequency: { type: Number, min: 0, max: 14 },
+    assessment_completed: { type: Boolean, default: false },
   },
   {
     timestamps: true,

@@ -1,243 +1,141 @@
 <script setup>
-import { computed, reactive, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import { useAuthStore } from "../stores/auth";
 import api from "../services/api";
+import AssessmentStepOne from "../components/assessment/AssessmentStepOne.vue";
+import AssessmentStepTwo from "../components/assessment/AssessmentStepTwo.vue";
 
+const DRAFT_KEY = "assessment_draft_v1";
 const router = useRouter();
+const auth = useAuthStore();
 
-const bmi = ref(null);
-const submitError = ref("");
+const step = ref(1);
+const saving = ref(false);
+const stepOneError = ref("");
+const stepTwoError = ref("");
 
 const form = reactive({
   gender: "male",
-  height_cm: "",
-  weight_kg: "",
-  age: "",
-  target_weight_kg: "",
+  age: 18,
+  height: 170,
+  weight: 60,
 });
 
-const errors = reactive({
-  gender: "",
-  height_cm: "",
-  weight_kg: "",
-  age: "",
-  target_weight_kg: "",
+function updateForm(nextValue) {
+  Object.assign(form, nextValue);
+}
+
+function hydrateDraft() {
+  const raw = localStorage.getItem(DRAFT_KEY);
+  if (!raw) return;
+  try {
+    const data = JSON.parse(raw);
+    if (data?.form) {
+      form.gender = data.form.gender || form.gender;
+      form.age = Number(data.form.age) || form.age;
+      form.height = Number(data.form.height) || form.height;
+      form.weight = Number(data.form.weight) || form.weight;
+    }
+    if (data?.step === 1 || data?.step === 2) step.value = data.step;
+  } catch {
+    localStorage.removeItem(DRAFT_KEY);
+  }
+}
+
+watch(
+  () => ({ step: step.value, form: { ...form } }),
+  (value) => localStorage.setItem(DRAFT_KEY, JSON.stringify(value)),
+  { deep: true }
+);
+
+const bmi = computed(() => {
+  const heightM = Number(form.height) / 100;
+  const weight = Number(form.weight);
+  if (!heightM || !Number.isFinite(heightM) || !Number.isFinite(weight)) return 0;
+  return weight / (heightM * heightM);
 });
 
 const bmiCategory = computed(() => {
-  const v = Number(bmi.value);
-  if (!Number.isFinite(v)) return "";
-  if (v < 18.5) return "Underweight";
-  if (v < 25) return "Normal";
-  if (v < 30) return "Overweight";
-  return "Obesity";
+  if (bmi.value < 18.5) return "Underweight";
+  if (bmi.value < 25) return "Normal";
+  if (bmi.value < 30) return "Overweight";
+  return "Obese";
 });
 
-function setError(key, message) {
-  errors[key] = message;
-}
-
-function clearErrors() {
-  Object.keys(errors).forEach((k) => (errors[k] = ""));
-}
-
-function validate() {
-  clearErrors();
-  let ok = true;
-
-  if (!form.gender) {
-    setError("gender", "Gender is required.");
-    ok = false;
+function validateStepOne() {
+  if (!["male", "female"].includes(form.gender)) {
+    stepOneError.value = "Please select your gender.";
+    return false;
   }
-
-  const height = Number(form.height_cm);
-  const weight = Number(form.weight_kg);
   const age = Number(form.age);
-  const targetWeight = Number(form.target_weight_kg);
-
-  if (!Number.isFinite(height) || height < 50 || height > 250) {
-    setError("height_cm", "Enter a valid height (50-250 cm).");
-    ok = false;
+  if (!Number.isInteger(age) || age < 5 || age > 100) {
+    stepOneError.value = "Please enter a valid age between 5 and 100.";
+    return false;
   }
-  if (!Number.isFinite(weight) || weight < 20 || weight > 300) {
-    setError("weight_kg", "Enter a valid weight (20-300 kg).");
-    ok = false;
-  }
-  if (!Number.isFinite(age) || age < 10 || age > 120) {
-    setError("age", "Enter a valid age (10-120 years).");
-    ok = false;
-  }
-  if (!Number.isFinite(targetWeight) || targetWeight < 20 || targetWeight > 300) {
-    setError("target_weight_kg", "Enter a valid target weight (20-300 kg).");
-    ok = false;
-  }
-
-  return ok;
-}
-
-function calc() {
-  if (!validate()) return false;
-  const h = Number(form.height_cm) / 100;
-  const next = Number(form.weight_kg) / (h * h);
-  bmi.value = next.toFixed(2);
+  stepOneError.value = "";
   return true;
 }
 
-async function submit() {
-  submitError.value = "";
-  const ok = calc();
-  if (!ok) return;
+function validateStepTwo() {
+  const height = Number(form.height);
+  const weight = Number(form.weight);
+  if (!Number.isFinite(height) || height < 120 || height > 220) {
+    stepTwoError.value = "Height must be between 120 and 220 cm.";
+    return false;
+  }
+  if (!Number.isFinite(weight) || weight < 30 || weight > 150) {
+    stepTwoError.value = "Weight must be between 30 and 150 kg.";
+    return false;
+  }
+  stepTwoError.value = "";
+  return true;
+}
 
-  // Backend currently requires `target_weight_kg` (NOT NULL).
-  const payload = {
-    gender: form.gender,
-    height_cm: Number(form.height_cm),
-    weight_kg: Number(form.weight_kg),
-    age: Number(form.age),
-    target_weight_kg: Number(form.target_weight_kg),
-  };
+function goNext() {
+  if (!validateStepOne()) return;
+  step.value = 2;
+}
 
+async function finish() {
+  if (!validateStepTwo()) return;
+  saving.value = true;
+  stepTwoError.value = "";
   try {
-    await api.post("/assessments", payload);
-    router.push("/dashboard");
-  } catch (e) {
-    submitError.value = e?.response?.data?.message || "Failed to save assessment.";
+    const payload = {
+      gender: form.gender,
+      age: Number(form.age),
+      height: Number(form.height),
+      weight: Number(form.weight),
+      bmi: Number(bmi.value.toFixed(1)),
+    };
+    const { data } = await api.post("/user/assessment", payload);
+    auth.user = data.user;
+    localStorage.removeItem(DRAFT_KEY);
+    router.replace("/dashboard");
+  } catch (error) {
+    stepTwoError.value = error?.response?.data?.message || "Failed to save assessment. Please try again.";
+  } finally {
+    saving.value = false;
   }
 }
+
+hydrateDraft();
 </script>
 
 <template>
   <main class="page">
-    <section class="panel form-wrap">
-      <h2 class="title">🩺 Health Assessment</h2>
-
-      <form novalidate @submit.prevent="submit">
-        <div class="field">
-          <label class="label" for="gender">Gender</label>
-          <select id="gender" v-model="form.gender">
-            <option value="male">Male</option>
-            <option value="female">Female</option>
-            <option value="other">Other</option>
-          </select>
-          <div v-if="errors.gender" class="error">{{ errors.gender }}</div>
-        </div>
-
-        <div class="field">
-          <label class="label" for="height_cm">Height</label>
-          <input
-            id="height_cm"
-            v-model="form.height_cm"
-            class="input"
-            type="number"
-            inputmode="decimal"
-            min="50"
-            max="250"
-            step="1"
-            placeholder="Please enter your height (cm)"
-          />
-          <div v-if="errors.height_cm" class="error">{{ errors.height_cm }}</div>
-        </div>
-
-        <div class="field">
-          <label class="label" for="weight_kg">Weight</label>
-          <input
-            id="weight_kg"
-            v-model="form.weight_kg"
-            class="input"
-            type="number"
-            inputmode="decimal"
-            min="20"
-            max="300"
-            step="1"
-            placeholder="Please enter your weight (kg)"
-          />
-          <div v-if="errors.weight_kg" class="error">{{ errors.weight_kg }}</div>
-        </div>
-
-        <div class="field">
-          <label class="label" for="age">Age</label>
-          <input
-            id="age"
-            v-model="form.age"
-            class="input"
-            type="number"
-            inputmode="numeric"
-            min="10"
-            max="120"
-            step="1"
-            placeholder="Please enter your age (years)"
-          />
-          <div v-if="errors.age" class="error">{{ errors.age }}</div>
-        </div>
-
-        <div class="field">
-          <label class="label" for="target_weight_kg">Target Weight</label>
-          <input
-            id="target_weight_kg"
-            v-model="form.target_weight_kg"
-            class="input"
-            type="number"
-            inputmode="numeric"
-            min="20"
-            max="300"
-            step="1"
-            placeholder="Please enter your target weight (kg)"
-          />
-          <div v-if="errors.target_weight_kg" class="error">{{ errors.target_weight_kg }}</div>
-        </div>
-
-        <button type="button" @click="calc">Calculate BMI</button>
-
-        <p v-if="bmi" class="bmi">
-          BMI Result: <strong>{{ bmi }}</strong>
-          <span v-if="bmiCategory"> ({{ bmiCategory }})</span>
-        </p>
-
-        <div v-if="submitError" class="error submit-error">{{ submitError }}</div>
-
-        <button type="submit">Save Assessment</button>
-      </form>
-    </section>
+    <AssessmentStepOne v-if="step === 1" :model-value="form" :error="stepOneError" @update:model-value="updateForm" @next="goNext" />
+    <AssessmentStepTwo
+      v-else
+      :model-value="form"
+      @update:model-value="updateForm"
+      :bmi="bmi"
+      :bmi-category="bmiCategory"
+      :saving="saving"
+      :error="stepTwoError"
+      @back="step = 1"
+      @finish="finish"
+    />
   </main>
 </template>
-
-<style scoped>
-.form-wrap {
-  max-width: 560px;
-  margin: 20px auto;
-}
-
-.field {
-  display: grid;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-
-.label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--c5);
-}
-
-.input {
-  border-radius: 10px;
-  padding: 10px;
-}
-
-.bmi {
-  background: #e8f8f5;
-  border: 1px solid #bfe2db;
-  border-radius: 10px;
-  padding: 10px;
-  margin: 0;
-}
-
-.error {
-  font-size: 12px;
-  color: #c0392b;
-}
-
-.submit-error {
-  margin-top: -6px;
-}
-</style>
