@@ -7,9 +7,11 @@ const scheduleItemSchema = new mongoose.Schema(
     date: { type: String, required: true, trim: true },
     time: { type: String, required: true, trim: true },
     note: { type: String, trim: true, default: "" },
+    courseId: { type: mongoose.Schema.Types.ObjectId, ref: "Course", default: null },
+    durationMinutes: { type: Number, min: 1, default: 60 },
+    overlapAccepted: { type: Boolean, default: false },
   },
   { timestamps: true, versionKey: false }
 );
 
 module.exports = mongoose.model("ScheduleItem", scheduleItemSchema);
-

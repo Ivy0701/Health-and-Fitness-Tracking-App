@@ -1,7 +1,12 @@
 <script setup>
-import { onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import AppNavbar from "../components/common/AppNavbar.vue";
+import BmiCalculatorPanel from "../components/BmiCalculatorPanel.vue";
 import api from "../services/api";
+import { useBmiStore } from "../stores/bmi";
+import { formatBmiForDisplay } from "../utils/bmi";
+
+const bmiStore = useBmiStore();
 
 const profile = ref(null);
 const state = reactive({ error: "", success: "" });
@@ -52,11 +57,18 @@ async function save() {
     });
     profile.value = data;
     fillForm(data);
+    bmiStore.clearSession();
     state.success = "Profile updated successfully.";
   } catch (error) {
     state.error = error?.response?.data?.message || "Failed to update profile.";
   }
 }
+
+const profileBmiDisplay = computed(() => {
+  if (bmiStore.sessionBmi) return bmiStore.sessionBmi;
+  const formatted = formatBmiForDisplay(profile.value?.bmi);
+  return formatted ?? "-";
+});
 
 onMounted(async () => {
   try {

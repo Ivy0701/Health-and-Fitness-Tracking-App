@@ -1,11 +1,14 @@
 <script setup>
 import { useRouter } from "vue-router";
 import { useAuthStore } from "../../stores/auth";
+import { useBmiStore } from "../../stores/bmi";
 
 const router = useRouter();
 const auth = useAuthStore();
+const bmiStore = useBmiStore();
 
 function logout() {
+  bmiStore.clearSession();
   auth.logout();
   router.push("/login");
 }
