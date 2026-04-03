@@ -8,6 +8,7 @@ import AssessmentView from "../views/AssessmentView.vue";
 import DashboardView from "../views/DashboardView.vue";
 import CoursesView from "../views/CoursesView.vue";
 import WorkoutView from "../views/WorkoutView.vue";
+import WorkoutSessionView from "../views/WorkoutSessionView.vue";
 import DietView from "../views/DietView.vue";
 import ScheduleView from "../views/ScheduleView.vue";
 import ProfileView from "../views/ProfileView.vue";
@@ -45,6 +46,7 @@ const routes = [
     },
   },
   { path: "/workout", component: WorkoutView, meta: { auth: true } },
+  { path: "/workout/session", component: WorkoutSessionView, meta: { auth: true } },
   { path: "/diet", component: DietView, meta: { auth: true } },
   { path: "/schedule", component: ScheduleView, meta: { auth: true } },
   { path: "/profile", component: ProfileView, meta: { auth: true } },

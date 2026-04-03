@@ -5,7 +5,12 @@ import AppNavbar from "../components/common/AppNavbar.vue";
 import CourseCard from "../components/CourseCard.vue";
 import api from "../services/api";
 import { useAuthStore } from "../stores/auth";
-import { createCourse as createCourseApi, fetchCourses } from "../services/courses";
+import {
+  createCourse as createCourseApi,
+  enrollCourse as enrollCourseApi,
+  fetchCourses,
+  fetchEnrolledCourses,
+} from "../services/courses";
 import {
   DEFAULT_TERM_START_ISO,
   WEEKDAY_LABELS,
@@ -25,6 +30,7 @@ const form = reactive({
   description: "",
   difficulty: "beginner",
   duration: 30,
+  durationDays: 7,
   category: "fitness",
   weeklySlots: [{ weekday: 1, startTime: "09:00" }],
 });
@@ -57,9 +63,8 @@ function removeSlotRow(i) {
 }
 
 async function refreshEnrolled() {
-  const me = await api.get("/users/me").then((r) => r.data);
-  const { data } = await api.get(`/schedules/${me.id}`);
-  enrolledCourseIds.value = new Set(data.filter((s) => s.courseId).map((s) => String(s.courseId)));
+  const rows = await fetchEnrolledCourses();
+  enrolledCourseIds.value = new Set(rows.map((item) => String(item.course_id?._id || item.course_id)));
 }
 
 async function loadCourses() {
@@ -98,6 +103,7 @@ async function createCourse() {
       description: form.description,
       difficulty: form.difficulty,
       duration: form.duration,
+      duration_days: Number(form.durationDays),
       category: form.category,
       weeklySlots: form.weeklySlots.map((s) => ({
         weekday: Number(s.weekday),
@@ -108,11 +114,22 @@ async function createCourse() {
     form.description = "";
     form.difficulty = "beginner";
     form.duration = 30;
+    form.durationDays = 7;
     form.category = "fitness";
     form.weeklySlots = [{ weekday: 1, startTime: "09:00" }];
     await loadCourses();
   } catch (e) {
     state.value.error = e?.response?.data?.message || "Failed to create course.";
+  }
+}
+
+async function enrollCourse(course) {
+  state.value.error = "";
+  try {
+    await enrollCourseApi(course._id);
+    await refreshEnrolled();
+  } catch (e) {
+    state.value.error = e?.response?.data?.message || "Failed to enroll this course.";
   }
 }
 
@@ -271,6 +288,7 @@ onMounted(async () => {
           </select>
           <input v-model.number="form.duration" type="number" min="1" placeholder="Duration (minutes)" />
         </div>
+        <input v-model.number="form.durationDays" type="number" min="1" placeholder="Program duration (days)" />
         <input v-model="form.category" placeholder="Category" />
 
         <div class="slots-panel">
@@ -325,7 +343,7 @@ onMounted(async () => {
         :is-favorited="favorites.has(c._id)"
         :is-enrolled="enrolledCourseIds.has(String(c._id))"
         @start="handleStartLearning"
-        @enroll="openAddToSchedule"
+        @enroll="enrollCourse"
         @drop="dropCourseEnrollment"
         @favorite="addFavorite"
       />

@@ -5,6 +5,9 @@ const auth = require("../../middlewares/auth.middleware");
 const router = express.Router();
 router.get("/", auth, controller.list);
 router.post("/", auth, controller.create);
+router.get("/enrolled", auth, controller.listEnrolled);
+router.post("/enroll", auth, controller.enroll);
+router.post("/progress", auth, controller.updateProgress);
 router.get("/:id", auth, controller.detail);
 
 module.exports = router;

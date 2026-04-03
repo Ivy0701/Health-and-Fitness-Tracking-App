@@ -1,5 +1,14 @@
 const asyncHandler = require("../../utils/asyncHandler");
 const Course = require("../../models/Course");
+const EnrolledCourse = require("../../models/EnrolledCourse");
+const CourseDailyProgress = require("../../models/CourseDailyProgress");
+
+function toDateKey(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
 
 function normalizeWeeklySlots(raw) {
   if (!Array.isArray(raw)) return [];
@@ -26,7 +35,7 @@ const list = asyncHandler(async (req, res) => {
 });
 
 const create = asyncHandler(async (req, res) => {
-  const { title, description, difficulty, duration, category, isFeatured, isPremium, weeklySlots } = req.body;
+  const { title, description, difficulty, duration, duration_days, category, isFeatured, isPremium, weeklySlots } = req.body;
   if (!title) return res.status(400).json({ message: "title is required" });
   const slots = normalizeWeeklySlots(weeklySlots);
   const row = await Course.create({
@@ -34,6 +43,7 @@ const create = asyncHandler(async (req, res) => {
     description,
     difficulty,
     duration,
+    duration_days: Number(duration_days) > 0 ? Number(duration_days) : 7,
     category,
     isFeatured,
     isPremium,
@@ -48,5 +58,64 @@ const detail = asyncHandler(async (req, res) => {
   res.json(row);
 });
 
-module.exports = { list, create, detail };
+const listEnrolled = asyncHandler(async (req, res) => {
+  const rows = await EnrolledCourse.find({
+    user_id: req.user.id,
+    status: { $in: ["active", "completed"] },
+  })
+    .populate("course_id")
+    .sort({ enrolled_at: -1 });
+  res.json(rows);
+});
+
+const enroll = asyncHandler(async (req, res) => {
+  const { course_id } = req.body;
+  if (!course_id) return res.status(400).json({ message: "course_id is required" });
+  const course = await Course.findById(course_id);
+  if (!course) return res.status(404).json({ message: "Course not found" });
+
+  const today = toDateKey(new Date());
+  const existing = await EnrolledCourse.findOne({ user_id: req.user.id, course_id });
+  if (existing) {
+    if (existing.status === "cancelled") {
+      existing.status = "active";
+      existing.is_completed = false;
+      existing.start_date = today;
+      existing.current_day = 1;
+      await existing.save();
+      return res.json(existing);
+    }
+    return res.json(existing);
+  }
+
+  const row = await EnrolledCourse.create({
+    user_id: req.user.id,
+    course_id,
+    enrolled_at: new Date(),
+    start_date: today,
+    current_day: 1,
+    is_completed: false,
+    status: "active",
+  });
+  res.status(201).json(row);
+});
+
+const updateProgress = asyncHandler(async (req, res) => {
+  const { enrolled_course_id, date, is_completed } = req.body;
+  if (!enrolled_course_id || typeof is_completed !== "boolean") {
+    return res.status(400).json({ message: "enrolled_course_id and is_completed are required" });
+  }
+  const enrolled = await EnrolledCourse.findOne({ _id: enrolled_course_id, user_id: req.user.id });
+  if (!enrolled) return res.status(404).json({ message: "Enrolled course not found" });
+
+  const targetDate = date || toDateKey(new Date());
+  const row = await CourseDailyProgress.findOneAndUpdate(
+    { user_id: req.user.id, enrolled_course_id, date: targetDate },
+    { $set: { is_completed, completed_at: is_completed ? new Date() : null } },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+  res.json(row);
+});
+
+module.exports = { list, create, detail, listEnrolled, enroll, updateProgress };
 

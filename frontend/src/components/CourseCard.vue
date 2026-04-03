@@ -19,6 +19,7 @@ const emit = defineEmits(["start", "favorite", "drop", "enroll"]);
     <p class="muted">{{ props.course.description }}</p>
     <p>Difficulty: <strong>{{ props.course.difficulty }}</strong></p>
     <p>Duration: <strong>{{ props.course.duration }}</strong> min</p>
+    <p>Program: <strong>{{ props.course.duration_days || 7 }} days</strong></p>
     <p>Category: <strong>{{ props.course.category }}</strong></p>
     <p class="schedule-line"><span class="sched-icon">🗓</span> {{ props.slotText }}</p>
     <div class="card-actions">
@@ -39,16 +40,13 @@ const emit = defineEmits(["start", "favorite", "drop", "enroll"]);
         🔒 Upgrade to Join
       </button>
 
-      <button type="button" class="btn-schedule" @click="emit('enroll', props.course)">
-        Enroll — add full term to Schedule
-      </button>
       <button
-        v-if="props.isEnrolled"
         type="button"
-        class="btn-drop"
-        @click="emit('drop', props.course)"
+        class="btn-schedule"
+        :disabled="props.isEnrolled"
+        @click="emit('enroll', props.course)"
       >
-        Drop course (remove all sessions)
+        {{ props.isEnrolled ? "Enrolled" : "Enroll / Join" }}
       </button>
       <button :disabled="props.isFavorited" @click="emit('favorite', props.course)">
         {{ props.isFavorited ? "Favorited" : "Add to Favorites" }}
