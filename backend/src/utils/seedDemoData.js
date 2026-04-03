@@ -277,12 +277,18 @@ async function seedDemoData() {
           authorName: anyUser.username,
           title: "Best post-workout meals?",
           content: "What meals do you usually eat after evening training?",
+          tags: ["饮食"],
+          likeCount: 12,
+          commentCount: 5,
         },
         {
           userId: anyUser._id,
           authorName: anyUser.username,
           title: "How to stay consistent?",
           content: "Share your routine tips for keeping healthy habits during busy weeks.",
+          tags: ["训练", "心得"],
+          likeCount: 28,
+          commentCount: 9,
         },
       ]);
     }

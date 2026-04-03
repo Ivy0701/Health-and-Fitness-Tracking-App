@@ -6,6 +6,9 @@ const forumPostSchema = new mongoose.Schema(
     authorName: { type: String, required: true, trim: true },
     title: { type: String, required: true, trim: true },
     content: { type: String, required: true, trim: true },
+    tags: { type: [String], default: [] },
+    likeCount: { type: Number, default: 0, min: 0 },
+    commentCount: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true, versionKey: false }
 );
