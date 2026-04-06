@@ -1,7 +1,7 @@
-/** Weekday 0 = Monday … 6 = Sunday (课表常用) */
+/** Weekday 0 = Monday … 6 = Sunday (timetable convention) */
 export const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-/** 学期默认起点（与产品约定一致，可在选课区改） */
+/** Default term start (aligned with Courses enrollment; user can override) */
 export const DEFAULT_TERM_START_ISO = "2026-05-01";
 
 export function mondayOfDate(d) {
@@ -41,7 +41,7 @@ export function parseLocalDateISO(iso) {
   return d;
 }
 
-/** 从起始日算起连续 `months` 个「整月」的末日（例：5/1 + 6 个月 → 10/31） */
+/** Last calendar day of the span of `months` full months from startISO (e.g. May 1 + 6 → Oct 31) */
 export function inclusiveEndDateAfterMonths(startISO, months) {
   const s = parseLocalDateISO(startISO);
   if (!s) return null;
@@ -74,7 +74,7 @@ export function itemEndMinutes(item) {
   return s + dur;
 }
 
-/** 单周展开（保留给调试或特殊用途） */
+/** Expand a single week (debug / special cases) */
 export function expandCourseToPlannedItems(course, weekMonday) {
   const slots = course.weeklySlots || [];
   const dur = Number(course.duration) > 0 ? Number(course.duration) : 30;
@@ -88,7 +88,7 @@ export function expandCourseToPlannedItems(course, weekMonday) {
   }));
 }
 
-/** 从 startISO 到 endISO（含）每个日历日，按课程的 weeklySlots 生成全部课次 */
+/** For each day from startISO through endISO (inclusive), generate sessions from weeklySlots */
 export function expandCourseToPlannedItemsInRange(course, startISO, endISO) {
   const start = parseLocalDateISO(startISO);
   const end = parseLocalDateISO(endISO);
@@ -135,7 +135,7 @@ export function itemsTimeOverlap(a, b) {
   return rangesOverlap(sa, ea, sb, eb);
 }
 
-/** 仅与「真实占用时段」的日程比较，避免空时间/脏数据误报冲突 */
+/** Only count existing rows with a real time slot (ignore empty / bad data when detecting conflicts) */
 export function isExistingBlockCountable(e) {
   if (!e || !String(e.title || "").trim()) return false;
   const d = String(e.date || "").trim();
@@ -191,7 +191,7 @@ export function timetableTotalMinutes() {
   return (TIMETABLE_END_HOUR - TIMETABLE_START_HOUR) * 60;
 }
 
-/** 课表主体高度 (px)：每分钟 1px，整点横线与时间块对齐 */
+/** Timetable body height in px: 1px per minute; grid lines align with blocks */
 export function timetableBodyHeightPx() {
   return timetableTotalMinutes();
 }
@@ -234,7 +234,7 @@ export function clusterEnvelopeStyle(cluster) {
   };
 }
 
-/** 多节叠放时按课时长比例分高（供 flex-grow 使用） */
+/** When stacked, flex weight scales with session duration */
 export function itemFlexWeight(item) {
   return Math.max(1, Number(item.durationMinutes) || 60);
 }

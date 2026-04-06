@@ -7,6 +7,7 @@ import api from "../services/api";
 import { useAuthStore } from "../stores/auth";
 import {
   createCourse as createCourseApi,
+  dropCourseEnrollment as dropCourseEnrollmentApi,
   enrollCourse as enrollCourseApi,
   fetchCourses,
   fetchEnrolledCourses,
@@ -36,7 +37,7 @@ const form = reactive({
 });
 const state = ref({ error: "" });
 
-/** 学期开课日与持续月数：生成从 start 起连续 `months` 个整月内的所有课次 */
+/** Term start date + month span: expand all sessions through the last day of that span */
 const enrollStartDate = ref(DEFAULT_TERM_START_ISO);
 const enrollMonths = ref(6);
 
@@ -52,6 +53,25 @@ const vipLockedModal = ref({
   open: false,
   courseTitle: "",
 });
+
+/** Matches CourseCard / API difficulty → star column */
+function difficultyToStars(difficulty) {
+  const k = String(difficulty || "").toLowerCase();
+  const map = { beginner: 1, easy: 2, intermediate: 3, hard: 4, expert: 5, advanced: 5 };
+  return map[k] ?? 3;
+}
+
+const starColumns = [1, 2, 3, 4, 5];
+
+const detailCourse = ref(null);
+
+function openCourseDetail(course) {
+  detailCourse.value = course;
+}
+
+function closeCourseDetail() {
+  detailCourse.value = null;
+}
 
 function addSlotRow() {
   form.weeklySlots.push({ weekday: 2, startTime: "10:00" });
@@ -85,10 +105,14 @@ async function addFavorite(course) {
 }
 
 async function dropCourseEnrollment(course) {
-  if (!enrolledCourseIds.value.has(String(course._id))) return;
+  const courseId = String(course?._id || "");
+  if (!courseId || !enrolledCourseIds.value.has(courseId)) return;
   if (!confirm(`Remove all scheduled sessions for “${course.title}” from your calendar?`)) return;
   try {
+    await dropCourseEnrollmentApi(courseId);
     await api.delete(`/schedules/course/${course._id}`);
+    enrolledCourseIds.value.delete(courseId);
+    enrolledCourseIds.value = new Set(enrolledCourseIds.value);
     await refreshEnrolled();
   } catch (e) {
     state.value.error = e?.response?.data?.message || "Could not drop this course.";
@@ -125,8 +149,44 @@ async function createCourse() {
 
 async function enrollCourse(course) {
   state.value.error = "";
+  const courseId = String(course?._id || "");
+  if (!courseId) {
+    state.value.error = "Invalid course.";
+    return;
+  }
+  if (enrolledCourseIds.value.has(courseId)) {
+    state.value.error = "You already enrolled in this course.";
+    return;
+  }
   try {
+    const slots = course.weeklySlots || [];
+    if (!slots.length) {
+      state.value.error = "This course has no weekly class times yet.";
+      return;
+    }
+    const endISO = inclusiveEndDateAfterMonths(enrollStartDate.value, enrollMonths.value);
+    if (!endISO) throw new Error("Invalid term start or duration.");
+    const me = await api.get("/users/me").then((r) => r.data);
+    const { data: existing } = await api.get(`/schedules/${me.id}`);
+    const planned = expandCourseToPlannedItemsInRange(course, enrollStartDate.value, endISO);
+    if (!planned.length) {
+      state.value.error = "No class dates fall in this date range (check weekdays vs term).";
+      return;
+    }
+    const pairs = findPlannedConflicts(planned, existing);
+    if (pairs.length) {
+      const goOn = window.confirm(
+        `This course has ${pairs.length} time conflict(s) with your current schedule. Continue anyway and stack overlaps?`
+      );
+      if (!goOn) return;
+    }
+
     await enrollCourseApi(course._id);
+    const mode = pairs.length ? "stack" : "all";
+    const batchItems = buildBatchItems(planned, mode, pairs);
+    if (batchItems.length) {
+      await api.post("/schedules/batch", { userId: me.id, items: batchItems });
+    }
     await refreshEnrolled();
   } catch (e) {
     state.value.error = e?.response?.data?.message || "Failed to enroll this course.";
@@ -261,6 +321,47 @@ const enrollPreview = computed(() => {
   return `${enrollStartDate.value} → ${end}`;
 });
 
+/** VIP first; within each tier sort easiest → hardest */
+function difficultySortKey(difficulty) {
+  const d = String(difficulty || "").toLowerCase();
+  const order = {
+    beginner: 0,
+    easy: 1,
+    intermediate: 2,
+    hard: 3,
+    advanced: 4,
+    expert: 5,
+  };
+  return order[d] ?? 2;
+}
+
+const sortedCourses = computed(() =>
+  [...courses.value].sort((a, b) => {
+    const pa = a.isPremium ? 0 : 1;
+    const pb = b.isPremium ? 0 : 1;
+    if (pa !== pb) return pa - pb;
+    return difficultySortKey(a.difficulty) - difficultySortKey(b.difficulty);
+  })
+);
+
+const freeCoursesList = computed(() => sortedCourses.value.filter((c) => !c.isPremium));
+const vipCoursesList = computed(() => sortedCourses.value.filter((c) => c.isPremium));
+
+function bucketCoursesByStars(list) {
+  const buckets = { 1: [], 2: [], 3: [], 4: [], 5: [] };
+  for (const c of list) {
+    const s = difficultyToStars(c.difficulty);
+    if (buckets[s]) buckets[s].push(c);
+  }
+  for (const k of Object.keys(buckets)) {
+    buckets[k].sort((a, b) => String(a.title || "").localeCompare(String(b.title || "")));
+  }
+  return buckets;
+}
+
+const vipByStars = computed(() => bucketCoursesByStars(vipCoursesList.value));
+const freeByStars = computed(() => bucketCoursesByStars(freeCoursesList.value));
+
 onMounted(async () => {
   await Promise.all([loadCourses(), loadFavorites(), refreshEnrolled()]);
 });
@@ -282,9 +383,11 @@ onMounted(async () => {
         <input v-model="form.description" placeholder="Description" />
         <div class="grid grid-2">
           <select v-model="form.difficulty">
-            <option value="beginner">Beginner</option>
-            <option value="intermediate">Intermediate</option>
-            <option value="advanced">Advanced</option>
+            <option value="beginner">Beginner (1🌟)</option>
+            <option value="easy">Easy (2🌟)</option>
+            <option value="intermediate">Intermediate (3🌟)</option>
+            <option value="hard">Hard (4🌟)</option>
+            <option value="expert">Expert (5🌟)</option>
           </select>
           <input v-model.number="form.duration" type="number" min="1" placeholder="Duration (minutes)" />
         </div>
@@ -333,21 +436,64 @@ onMounted(async () => {
       <p class="preview-line">Calendar span: <strong>{{ enrollPreview }}</strong></p>
     </section>
 
-    <section class="grid grid-2 list">
-      <CourseCard
-        v-for="c in courses"
-        :key="c._id"
-        :course="c"
-        :slot-text="courseSlotsText(c)"
-        :is-vip-user="auth.vipStatus"
-        :is-favorited="favorites.has(c._id)"
-        :is-enrolled="enrolledCourseIds.has(String(c._id))"
-        @start="handleStartLearning"
-        @enroll="enrollCourse"
-        @drop="dropCourseEnrollment"
-        @favorite="addFavorite"
-      />
+    <section class="panel catalog-panel">
+      <h3 class="catalog-title">👑 VIP courses</h3>
+      <p class="hint catalog-hint">
+        Columns by difficulty: 1🌟 easiest through 5🌟 hardest. Click a course name to open details and enroll.
+      </p>
+      <div class="star-board star-board-vip">
+        <div v-for="stars in starColumns" :key="'vip-' + stars" class="star-col">
+          <div class="star-col-head" :aria-label="stars + ' stars'">
+            <span class="stars-label">{{ "🌟".repeat(stars) }}</span>
+            <span class="stars-caption">({{ stars }}/5)</span>
+          </div>
+          <ul class="course-chip-list">
+            <li v-for="c in vipByStars[stars]" :key="c._id">
+              <button type="button" class="course-chip" @click="openCourseDetail(c)">{{ c.title }}</button>
+            </li>
+            <li v-if="!vipByStars[stars].length" class="col-empty">—</li>
+          </ul>
+        </div>
+      </div>
     </section>
+
+    <section class="panel catalog-panel">
+      <h3 class="catalog-title">📖 Standard courses</h3>
+      <p class="hint catalog-hint">Open to all members, also grouped in 1–5🌟 columns. Click a course to view details.</p>
+      <div class="star-board star-board-free">
+        <div v-for="stars in starColumns" :key="'free-' + stars" class="star-col">
+          <div class="star-col-head">
+            <span class="stars-label">{{ "🌟".repeat(stars) }}</span>
+            <span class="stars-caption">({{ stars }}/5)</span>
+          </div>
+          <ul class="course-chip-list">
+            <li v-for="c in freeByStars[stars]" :key="c._id">
+              <button type="button" class="course-chip" @click="openCourseDetail(c)">{{ c.title }}</button>
+            </li>
+            <li v-if="!freeByStars[stars].length" class="col-empty">—</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <Teleport to="body">
+      <div v-if="detailCourse" class="modal-backdrop" @click.self="closeCourseDetail">
+        <div class="modal modal-course-detail panel">
+          <button type="button" class="detail-close" aria-label="Close" @click="closeCourseDetail">×</button>
+          <CourseCard
+            :course="detailCourse"
+            :slot-text="courseSlotsText(detailCourse)"
+            :is-vip-user="auth.vipStatus"
+            :is-favorited="favorites.has(detailCourse._id)"
+            :is-enrolled="enrolledCourseIds.has(String(detailCourse._id))"
+            @start="handleStartLearning"
+            @enroll="enrollCourse"
+            @drop="dropCourseEnrollment"
+            @favorite="addFavorite"
+          />
+        </div>
+      </div>
+    </Teleport>
 
     <Teleport to="body">
       <div v-if="conflictModal.open" class="modal-backdrop" @click.self="closeConflictModal">
@@ -392,8 +538,138 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.list {
-  margin-top: 16px;
+.catalog-panel {
+  margin-top: 14px;
+}
+.catalog-title {
+  margin: 0 0 4px;
+  color: var(--c6);
+}
+.catalog-hint {
+  margin-bottom: 14px;
+}
+.star-board {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.star-board-vip {
+  background: linear-gradient(180deg, #faf5ff 0%, #f3e8ff55 100%);
+  border: 1px solid #e9d5ff;
+  border-radius: 14px;
+  padding: 12px;
+}
+.star-board-free {
+  background: linear-gradient(180deg, #f8fcfb 0%, #e8f4f2 100%);
+  border: 1px solid #d7e7e6;
+  border-radius: 14px;
+  padding: 12px;
+}
+.star-col {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  overflow: hidden;
+  min-height: 120px;
+}
+.star-board-vip .star-col {
+  border-color: #ddd6fe;
+}
+.star-col-head {
+  text-align: center;
+  padding: 10px 6px;
+  border-bottom: 1px solid #eef2f2;
+  background: #fafcfb;
+}
+.star-board-vip .star-col-head {
+  background: linear-gradient(180deg, #f5f3ff, #ede9fe);
+}
+.stars-label {
+  display: block;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+}
+.stars-caption {
+  font-size: 11px;
+  color: #6b7280;
+}
+.course-chip-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.course-chip {
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #d7e7e6;
+  background: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--c6);
+  line-height: 1.35;
+  transition: background 0.15s, border-color 0.15s;
+}
+.star-board-vip .course-chip {
+  border-color: #e9d5ff;
+}
+.course-chip:hover {
+  background: #f0fdfa;
+  border-color: var(--c3);
+}
+.star-board-vip .course-chip:hover {
+  background: #faf5ff;
+  border-color: #a78bfa;
+}
+.col-empty {
+  font-size: 12px;
+  color: #9ca3af;
+  padding: 8px;
+  text-align: center;
+}
+.modal-course-detail {
+  position: relative;
+  max-width: 480px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding-top: 36px;
+}
+.detail-close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 10px;
+  background: #f3f4f6;
+  color: #374151;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 2;
+}
+.detail-close:hover {
+  background: #e5e7eb;
+}
+@media (max-width: 960px) {
+  .star-board {
+    grid-template-columns: repeat(5, minmax(140px, 1fr));
+  }
 }
 .error {
   color: #b42318;

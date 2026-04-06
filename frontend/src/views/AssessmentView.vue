@@ -139,3 +139,5 @@ hydrateDraft();
     />
   </main>
 </template>
+
+<style scoped></style>

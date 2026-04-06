@@ -2,12 +2,31 @@ const asyncHandler = require("../../utils/asyncHandler");
 const ForumPost = require("../../models/ForumPost");
 const User = require("../../models/User");
 
-const ALLOWED_TAGS = new Set(["饮食", "训练", "减脂", "恢复", "心得", "综合"]);
+const LEGACY_TAG_TO_EN = {
+  饮食: "diet",
+  训练: "training",
+  减脂: "fat_loss",
+  恢复: "recovery",
+  心得: "notes",
+  综合: "general",
+};
+const ALLOWED_TAGS = new Set(["diet", "training", "fat_loss", "recovery", "notes", "general"]);
+
+function toEnglishTag(t) {
+  const s = String(t || "").trim();
+  return LEGACY_TAG_TO_EN[s] || s;
+}
 
 function normalizeTags(raw) {
   if (!Array.isArray(raw)) return [];
-  const next = [...new Set(raw.map((t) => String(t || "").trim()).filter((t) => ALLOWED_TAGS.has(t)))];
+  const next = [
+    ...new Set(raw.map((t) => toEnglishTag(t)).filter((t) => ALLOWED_TAGS.has(t))),
+  ];
   return next;
+}
+
+function tagsForResponse(raw) {
+  return normalizeTags(Array.isArray(raw) ? raw : []);
 }
 
 function serializePost(row, userId) {
@@ -20,6 +39,7 @@ function serializePost(row, userId) {
 
   return {
     ...obj,
+    tags: tagsForResponse(obj.tags),
     likeCount: likedBy.length,
     commentCount: normalizedComments.length,
     likedByMe: likedBy.some((id) => String(id) === String(userId)),
@@ -44,7 +64,7 @@ const create = asyncHandler(async (req, res) => {
     content,
     tags,
   });
-  res.status(201).json(row);
+  res.status(201).json(serializePost(row, req.user.id));
 });
 
 const detail = asyncHandler(async (req, res) => {

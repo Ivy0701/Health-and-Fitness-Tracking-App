@@ -21,7 +21,7 @@ const me = ref(null);
 const items = ref([]);
 const form = reactive({ title: "", date: "", time: "", note: "" });
 
-/** 课表默认打开「含 2026-05-01 的那一周」；可切回今天或前后周 */
+/** Default week includes 2026-05-01; user can jump to today or prev/next week */
 const TERM_ANCHOR = new Date(2026, 4, 1);
 const weekStart = ref(mondayOfDate(TERM_ANCHOR));
 
@@ -108,6 +108,14 @@ async function removeItem(id) {
   await load();
 }
 
+async function clearAllItems() {
+  if (!items.value.length) return;
+  const ok = window.confirm("Delete all schedule items?");
+  if (!ok) return;
+  await Promise.all(items.value.map((it) => api.delete(`/schedules/${it._id}`)));
+  await load();
+}
+
 onMounted(load);
 </script>
 
@@ -121,6 +129,7 @@ onMounted(load);
       <button type="button" class="nav-btn ghost" @click="jumpTermStartWeek">Term start (May 2026)</button>
       <button type="button" class="nav-btn ghost" @click="jumpTodayWeek">This week (today)</button>
       <button type="button" class="nav-btn" @click="nextWeek">Next week →</button>
+      <button type="button" class="nav-btn danger" @click="clearAllItems">Clear all courses</button>
       <span class="toolbar-hint">{{ TIMETABLE_START_HOUR }}:00 – {{ TIMETABLE_END_HOUR }}:00 · overlaps stack in one column</span>
     </section>
 
@@ -156,10 +165,14 @@ onMounted(load);
                   'is-in-stack': cluster.length > 1,
                   multi: cluster.length > 1,
                   marked: it.overlapAccepted,
+                  'is-vip-course': it.courseIsPremium,
                 }"
                 :style="cluster.length > 1 ? stackBlockStyle(it) : undefined"
               >
-                <span class="btitle">{{ it.title }}</span>
+                <span class="btitle">
+                  <span v-if="it.courseIsPremium" class="vip-pill" title="VIP course">VIP</span>
+                  {{ it.title }}
+                </span>
                 <span class="bmeta">{{ it.time }} · {{ it.durationMinutes || 60 }} min</span>
                 <button type="button" class="bx" aria-label="Remove" @click.stop="removeItem(it._id)">×</button>
               </div>
@@ -220,6 +233,10 @@ onMounted(load);
 .nav-btn.ghost {
   background: #e8eceb;
   color: var(--c6);
+}
+
+.nav-btn.danger {
+  background: linear-gradient(90deg, #be3b3b, #a72e2e);
 }
 
 .toolbar-hint {
@@ -292,7 +309,7 @@ onMounted(load);
 .tt-body {
   position: relative;
   box-sizing: border-box;
-  /* 每小时 60px = 每分钟 1px，与左侧整点对齐 */
+  /* 60px per hour = 1px per minute, aligned with the left time rail */
   background-image: repeating-linear-gradient(
     to bottom,
     #f6faf9 0,
@@ -353,6 +370,29 @@ onMounted(load);
 .block.multi {
   background: linear-gradient(135deg, #e8f4ff, #cfe8ff);
   border-color: #6ba3c7;
+}
+
+.block.is-vip-course {
+  background: linear-gradient(135deg, #f3e8ff, #e9d5ff);
+  border-color: #9333ea;
+}
+
+.block.multi.is-vip-course {
+  background: linear-gradient(135deg, #ede9fe, #ddd6fe);
+  border-color: #7c3aed;
+}
+
+.vip-pill {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: #fff;
+  background: linear-gradient(90deg, #6d28d9, #f59e0b);
+  border-radius: 999px;
+  vertical-align: middle;
 }
 
 .block.marked {

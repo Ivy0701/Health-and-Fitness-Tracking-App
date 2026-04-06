@@ -8,7 +8,8 @@ export const useAuthStore = defineStore("auth", {
   }),
   getters: {
     isLoggedIn: (state) => !!state.token,
-    assessmentCompleted: (state) => !!state.user?.assessment_completed
+    assessmentCompleted: (state) => !!state.user?.assessment_completed,
+    vipStatus: (state) => Boolean(state.user?.vip_status ?? state.user?.isVip),
   },
   actions: {
     normalizeUser(user) {

@@ -25,8 +25,22 @@ async function assertNotJoiningPremiumCourse({ userId, courseIds }) {
 const list = asyncHandler(async (req, res) => {
   const userId = req.params.userId;
   if (String(userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
-  const rows = await ScheduleItem.find({ userId }).sort({ date: 1, time: 1, createdAt: -1 });
-  res.json(rows);
+  const rows = await ScheduleItem.find({ userId })
+    .populate("courseId", "isPremium")
+    .sort({ date: 1, time: 1, createdAt: -1 })
+    .lean();
+  const out = rows.map((row) => {
+    const pop = row.courseId;
+    const courseIsPremium = Boolean(pop && typeof pop === "object" && pop.isPremium);
+    const courseId =
+      pop && typeof pop === "object" && pop._id != null
+        ? String(pop._id)
+        : row.courseId != null
+          ? String(row.courseId)
+          : null;
+    return { ...row, courseId, courseIsPremium };
+  });
+  res.json(out);
 });
 
 const create = asyncHandler(async (req, res) => {

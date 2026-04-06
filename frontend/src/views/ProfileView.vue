@@ -1,10 +1,10 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import BmiCalculatorPanel from "../components/BmiCalculatorPanel.vue";
 import api from "../services/api";
 import { useBmiStore } from "../stores/bmi";
-import { formatBmiForDisplay } from "../utils/bmi";
+import { calculateBmiValue, formatBmi, formatBmiForDisplay, getBmiCategoryLabel } from "../utils/bmi";
 
 const bmiStore = useBmiStore();
 
@@ -35,6 +35,28 @@ function fillForm(data) {
   form.heartRate = data.heartRate || "";
   form.avatar = data.avatar || "";
 }
+
+watch(
+  () => [form.height, form.weight],
+  ([heightRaw, weightRaw]) => {
+    const height = Number(heightRaw);
+    const weight = Number(weightRaw);
+    if (!Number.isFinite(height) || height < 50 || height > 250) {
+      bmiStore.clearSession();
+      return;
+    }
+    if (!Number.isFinite(weight) || weight < 20 || weight > 300) {
+      bmiStore.clearSession();
+      return;
+    }
+    const raw = calculateBmiValue(weight, height);
+    if (!Number.isFinite(raw)) {
+      bmiStore.clearSession();
+      return;
+    }
+    bmiStore.setSessionBmi(formatBmi(raw), getBmiCategoryLabel(raw));
+  }
+);
 
 async function load() {
   state.error = "";
@@ -87,9 +109,9 @@ onMounted(async () => {
       <p>📧 Email: <strong>{{ profile.email }}</strong></p>
       <p>Gender: <strong>{{ profile.gender || "-" }}</strong></p>
       <p>Age: <strong>{{ profile.age || "-" }}</strong></p>
-      <p>Height: <strong>{{ profile.height ? `${profile.height} cm` : "-" }}</strong></p>
-      <p>Weight: <strong>{{ profile.weight ? `${profile.weight} kg` : "-" }}</strong></p>
-      <p>📈 Current BMI: <strong>{{ profile.bmi || "-" }}</strong></p>
+      <p>Height: <strong>{{ form.height ? `${form.height} cm` : "-" }}</strong></p>
+      <p>Weight: <strong>{{ form.weight ? `${form.weight} kg` : "-" }}</strong></p>
+      <p>📈 Current BMI: <strong>{{ profileBmiDisplay }}</strong></p>
       <form novalidate @submit.prevent="save">
         <input v-model="form.username" placeholder="Username" />
         <div class="grid grid-2">

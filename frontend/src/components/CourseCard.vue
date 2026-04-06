@@ -1,4 +1,6 @@
 <script setup>
+import { computed } from "vue";
+
 const props = defineProps({
   course: { type: Object, required: true },
   isVipUser: { type: Boolean, default: false },
@@ -8,6 +10,24 @@ const props = defineProps({
 });
 
 const emit = defineEmits(["start", "favorite", "drop", "enroll"]);
+
+/** 1 = easiest … 5 = hardest; legacy `advanced` is treated like expert (5⭐) */
+const DIFFICULTY_STARS = {
+  beginner: 1,
+  easy: 2,
+  intermediate: 3,
+  hard: 4,
+  expert: 5,
+  advanced: 5,
+};
+
+const difficultyStarCount = computed(() => {
+  const k = String(props.course.difficulty || "").toLowerCase();
+  const n = DIFFICULTY_STARS[k];
+  return Number.isFinite(n) ? n : 3;
+});
+
+const difficultyStarsLabel = computed(() => "🌟".repeat(difficultyStarCount.value));
 </script>
 
 <template>
@@ -17,22 +37,20 @@ const emit = defineEmits(["start", "favorite", "drop", "enroll"]);
       <span v-if="props.course.isPremium" class="vip-badge">VIP</span>
     </div>
     <p class="muted">{{ props.course.description }}</p>
-    <p>Difficulty: <strong>{{ props.course.difficulty }}</strong></p>
+    <p class="diff-row">
+      Difficulty: <strong>{{ props.course.difficulty }}</strong>
+      <span class="star-rating" :title="`${difficultyStarCount} / 5 — 1 easiest, 5 hardest`">
+        {{ difficultyStarsLabel }}
+      </span>
+      <span class="star-hint">({{ difficultyStarCount }}/5)</span>
+    </p>
     <p>Duration: <strong>{{ props.course.duration }}</strong> min</p>
     <p>Program: <strong>{{ props.course.duration_days || 7 }} days</strong></p>
     <p>Category: <strong>{{ props.course.category }}</strong></p>
     <p class="schedule-line"><span class="sched-icon">🗓</span> {{ props.slotText }}</p>
     <div class="card-actions">
       <button
-        v-if="!props.course.isPremium || props.isVipUser"
-        type="button"
-        class="btn-start"
-        @click="emit('start', props.course)"
-      >
-        Start Learning
-      </button>
-      <button
-        v-else
+        v-if="props.course.isPremium && !props.isVipUser"
         type="button"
         class="btn-upgrade"
         @click="emit('start', props.course)"
@@ -46,7 +64,15 @@ const emit = defineEmits(["start", "favorite", "drop", "enroll"]);
         :disabled="props.isEnrolled"
         @click="emit('enroll', props.course)"
       >
-        {{ props.isEnrolled ? "Enrolled" : "Enroll / Join" }}
+        Enroll-add full term to schedule
+      </button>
+      <button
+        v-if="props.isEnrolled"
+        type="button"
+        class="btn-drop"
+        @click="emit('drop', props.course)"
+      >
+        Drop course remove all sessions
       </button>
       <button :disabled="props.isFavorited" @click="emit('favorite', props.course)">
         {{ props.isFavorited ? "Favorited" : "Add to Favorites" }}
@@ -72,6 +98,9 @@ const emit = defineEmits(["start", "favorite", "drop", "enroll"]);
 }
 .schedule-line { font-size: 13px; color: var(--c5); margin: 8px 0; }
 .sched-icon { margin-right: 4px; }
+.diff-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.star-rating { letter-spacing: 1px; font-size: 13px; line-height: 1; }
+.star-hint { font-size: 12px; color: #6b7280; }
 .card-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .btn-start {
   background: linear-gradient(90deg, #2563eb, #4f46e5);

@@ -100,6 +100,20 @@ const enroll = asyncHandler(async (req, res) => {
   res.status(201).json(row);
 });
 
+const drop = asyncHandler(async (req, res) => {
+  const { course_id } = req.body;
+  if (!course_id) return res.status(400).json({ message: "course_id is required" });
+  const row = await EnrolledCourse.findOne({ user_id: req.user.id, course_id });
+  if (!row) return res.json({ ok: true, changed: false });
+  if (row.status !== "cancelled") {
+    row.status = "cancelled";
+    row.is_completed = false;
+    row.current_day = 1;
+    await row.save();
+  }
+  res.json({ ok: true, changed: true });
+});
+
 const updateProgress = asyncHandler(async (req, res) => {
   const { enrolled_course_id, date, is_completed } = req.body;
   if (!enrolled_course_id || typeof is_completed !== "boolean") {
@@ -117,5 +131,5 @@ const updateProgress = asyncHandler(async (req, res) => {
   res.json(row);
 });
 
-module.exports = { list, create, detail, listEnrolled, enroll, updateProgress };
+module.exports = { list, create, detail, listEnrolled, enroll, drop, updateProgress };
 

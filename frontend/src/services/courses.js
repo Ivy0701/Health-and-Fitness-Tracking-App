@@ -26,3 +26,8 @@ export async function fetchEnrolledCourses() {
   const { data } = await api.get("/courses/enrolled");
   return data;
 }
+
+export async function dropCourseEnrollment(courseId) {
+  const { data } = await api.post("/courses/drop", { course_id: courseId });
+  return data;
+}

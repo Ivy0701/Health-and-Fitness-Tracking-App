@@ -12,7 +12,11 @@ const courseSchema = new mongoose.Schema(
   {
     title: { type: String, required: true, trim: true },
     description: { type: String, trim: true, default: "" },
-    difficulty: { type: String, enum: ["beginner", "intermediate", "advanced"], default: "beginner" },
+    difficulty: {
+      type: String,
+      enum: ["beginner", "easy", "intermediate", "hard", "expert", "advanced"],
+      default: "beginner",
+    },
     duration: { type: Number, min: 1, default: 30 },
     duration_days: { type: Number, min: 1, default: 7 },
     category: { type: String, trim: true, default: "fitness" },

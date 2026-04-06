@@ -16,23 +16,23 @@ const commentLoading = ref({});
 const commentEditDrafts = ref({});
 const commentEditLoading = ref({});
 
-/** Stored tag keys (API / DB); labels shown in English in the UI. */
+/** Tag keys stored in API (English slugs). */
 const TAG_OPTIONS = [
-  { value: "饮食", label: "Diet" },
-  { value: "训练", label: "Training" },
-  { value: "减脂", label: "Fat loss" },
-  { value: "恢复", label: "Recovery" },
-  { value: "心得", label: "Notes" },
+  { value: "diet", label: "Diet" },
+  { value: "training", label: "Training" },
+  { value: "fat_loss", label: "Fat loss" },
+  { value: "recovery", label: "Recovery" },
+  { value: "notes", label: "Notes" },
 ];
 const selectedTags = ref([]);
 
 const TAG_LABEL_MAP = {
-  饮食: "Diet",
-  训练: "Training",
-  减脂: "Fat loss",
-  恢复: "Recovery",
-  心得: "Notes",
-  综合: "General",
+  diet: "Diet",
+  training: "Training",
+  fat_loss: "Fat loss",
+  recovery: "Recovery",
+  notes: "Notes",
+  general: "General",
 };
 
 const FILTER_CHIPS = [
@@ -72,19 +72,19 @@ function tagLabel(tag) {
 
 function tagClass(tag) {
   const map = {
-    饮食: "tag-diet",
-    训练: "tag-train",
-    减脂: "tag-cut",
-    恢复: "tag-recover",
-    心得: "tag-note",
-    综合: "tag-general",
+    diet: "tag-diet",
+    training: "tag-train",
+    fat_loss: "tag-cut",
+    recovery: "tag-recover",
+    notes: "tag-note",
+    general: "tag-general",
   };
   return map[tag] || "tag-general";
 }
 
 function displayTags(p) {
   const raw = Array.isArray(p.tags) ? p.tags.filter(Boolean) : [];
-  return raw.length ? raw : ["综合"];
+  return raw.length ? raw : ["general"];
 }
 
 function engagementScore(p) {
@@ -110,9 +110,9 @@ const visiblePosts = computed(() => {
   }
 
   if (activeFilter.value === "diet") {
-    rows = rows.filter((p) => (p.tags || []).includes("饮食"));
+    rows = rows.filter((p) => (p.tags || []).includes("diet"));
   } else if (activeFilter.value === "train") {
-    rows = rows.filter((p) => (p.tags || []).includes("训练"));
+    rows = rows.filter((p) => (p.tags || []).includes("training"));
   }
 
   if (activeFilter.value === "hot") {
