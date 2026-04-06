@@ -7,6 +7,15 @@ const forumPostSchema = new mongoose.Schema(
     title: { type: String, required: true, trim: true },
     content: { type: String, required: true, trim: true },
     tags: { type: [String], default: [] },
+    likedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    comments: [
+      {
+        userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+        authorName: { type: String, required: true, trim: true },
+        content: { type: String, required: true, trim: true },
+        createdAt: { type: Date, default: Date.now },
+      },
+    ],
     likeCount: { type: Number, default: 0, min: 0 },
     commentCount: { type: Number, default: 0, min: 0 },
   },

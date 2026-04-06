@@ -9,6 +9,12 @@ const form = reactive({ title: "", content: "" });
 const me = ref(null);
 const searchQuery = ref("");
 const activeFilter = ref("all");
+const expandedComments = ref({});
+const commentDrafts = ref({});
+const likeLoading = ref({});
+const commentLoading = ref({});
+const commentEditDrafts = ref({});
+const commentEditLoading = ref({});
 
 /** Stored tag keys (API / DB); labels shown in English in the UI. */
 const TAG_OPTIONS = [
@@ -129,6 +135,114 @@ async function load() {
   posts.value = await api.get("/forum/posts").then((r) => r.data);
 }
 
+function isCommentsExpanded(postId) {
+  return Boolean(expandedComments.value[postId]);
+}
+
+function toggleComments(postId) {
+  expandedComments.value = {
+    ...expandedComments.value,
+    [postId]: !expandedComments.value[postId],
+  };
+}
+
+function getCommentDraft(postId) {
+  return commentDrafts.value[postId] || "";
+}
+
+function setCommentDraft(postId, value) {
+  commentDrafts.value = {
+    ...commentDrafts.value,
+    [postId]: value,
+  };
+}
+
+function commentKey(postId, commentId) {
+  return `${postId}:${commentId}`;
+}
+
+function isCommentOwner(comment) {
+  return String(comment?.userId) === String(me.value?.id);
+}
+
+function getEditDraft(postId, commentId) {
+  return commentEditDrafts.value[commentKey(postId, commentId)] ?? null;
+}
+
+function startEditComment(postId, comment) {
+  if (!comment?._id) return;
+  commentEditDrafts.value = {
+    ...commentEditDrafts.value,
+    [commentKey(postId, comment._id)]: String(comment.content || ""),
+  };
+}
+
+function cancelEditComment(postId, commentId) {
+  const key = commentKey(postId, commentId);
+  const next = { ...commentEditDrafts.value };
+  delete next[key];
+  commentEditDrafts.value = next;
+}
+
+function setEditDraft(postId, commentId, value) {
+  commentEditDrafts.value = {
+    ...commentEditDrafts.value,
+    [commentKey(postId, commentId)]: value,
+  };
+}
+
+function replacePost(updatedPost) {
+  posts.value = posts.value.map((p) => (p._id === updatedPost._id ? updatedPost : p));
+}
+
+async function toggleLike(postId) {
+  if (likeLoading.value[postId]) return;
+  likeLoading.value = { ...likeLoading.value, [postId]: true };
+  try {
+    const updated = await api.patch(`/forum/posts/${postId}/like`).then((r) => r.data);
+    replacePost(updated);
+  } finally {
+    likeLoading.value = { ...likeLoading.value, [postId]: false };
+  }
+}
+
+async function submitComment(postId) {
+  const content = getCommentDraft(postId).trim();
+  if (!content || commentLoading.value[postId]) return;
+  commentLoading.value = { ...commentLoading.value, [postId]: true };
+  try {
+    const updated = await api.post(`/forum/posts/${postId}/comments`, { content }).then((r) => r.data);
+    replacePost(updated);
+    setCommentDraft(postId, "");
+    expandedComments.value = { ...expandedComments.value, [postId]: true };
+  } finally {
+    commentLoading.value = { ...commentLoading.value, [postId]: false };
+  }
+}
+
+async function saveCommentEdit(postId, commentId) {
+  const key = commentKey(postId, commentId);
+  const content = String(commentEditDrafts.value[key] || "").trim();
+  if (!content || commentEditLoading.value[key]) return;
+  commentEditLoading.value = { ...commentEditLoading.value, [key]: true };
+  try {
+    const updated = await api
+      .put(`/forum/posts/${postId}/comments/${commentId}`, { content })
+      .then((r) => r.data);
+    replacePost(updated);
+    cancelEditComment(postId, commentId);
+  } finally {
+    commentEditLoading.value = { ...commentEditLoading.value, [key]: false };
+  }
+}
+
+async function deleteComment(postId, commentId) {
+  if (!window.confirm("Delete this comment?")) return;
+  const updated = await api.delete(`/forum/posts/${postId}/comments/${commentId}`).then((r) => r.data);
+  replacePost(updated);
+  cancelEditComment(postId, commentId);
+}
+
 async function addPost() {
   await api.post("/forum/posts", {
     title: form.title,
@@ -244,15 +358,74 @@ onMounted(load);
         <p class="post-content">{{ p.content }}</p>
 
         <div class="post-stats" role="group" aria-label="Engagement">
-          <span class="stat">
-            <span class="stat-icon" aria-hidden="true">❤️</span>
+          <button
+            type="button"
+            class="stat stat-btn like-btn"
+            :class="{ liked: p.likedByMe }"
+            :disabled="likeLoading[p._id]"
+            @click="toggleLike(p._id)"
+          >
+            <span class="stat-icon" aria-hidden="true">{{ p.likedByMe ? "♥" : "♡" }}</span>
             <span class="stat-num">{{ p.likeCount ?? 0 }}</span>
-          </span>
-          <span class="stat">
+          </button>
+          <button type="button" class="stat stat-btn comment-btn" @click="toggleComments(p._id)">
             <span class="stat-icon" aria-hidden="true">💬</span>
             <span class="stat-num">{{ p.commentCount ?? 0 }}</span>
-          </span>
+            <span class="comment-expand" aria-hidden="true">{{ isCommentsExpanded(p._id) ? "▴" : "▾" }}</span>
+          </button>
         </div>
+
+        <section v-if="isCommentsExpanded(p._id)" class="comments-panel">
+          <form class="comment-form" @submit.prevent="submitComment(p._id)">
+            <input
+              :value="getCommentDraft(p._id)"
+              type="text"
+              class="comment-input"
+              placeholder="Write a comment..."
+              @input="setCommentDraft(p._id, $event.target.value)"
+            />
+            <button type="submit" class="comment-submit" :disabled="commentLoading[p._id]">Post</button>
+          </form>
+          <div class="comments-divider" aria-hidden="true"></div>
+          <div class="comments-scroll">
+          <p v-if="!(p.comments || []).length" class="comments-empty">No comments yet. Be the first one.</p>
+          <ul v-else class="comment-list">
+            <li v-for="c in p.comments" :key="c._id || `${c.userId}-${c.createdAt}`" class="comment-item">
+              <div class="comment-avatar" :style="{ background: avatarColor(c.userId || c.authorName) }">
+                <span class="avatar-letter comment-avatar-letter">{{ avatarInitial(c.authorName) }}</span>
+              </div>
+              <div class="comment-main">
+                <div class="comment-head">
+                  <span class="comment-author">{{ displayNickname(c.authorName) }}</span>
+                  <time class="comment-time" :datetime="c.createdAt">{{ formatRelativeTime(c.createdAt) }}</time>
+                </div>
+                <p v-if="getEditDraft(p._id, c._id) === null" class="comment-content">{{ c.content }}</p>
+                <div v-else class="comment-edit-row">
+                  <input
+                    :value="getEditDraft(p._id, c._id)"
+                    type="text"
+                    class="comment-edit-input"
+                    @input="setEditDraft(p._id, c._id, $event.target.value)"
+                  />
+                  <button
+                    type="button"
+                    class="comment-action primary"
+                    :disabled="commentEditLoading[`${p._id}:${c._id}`]"
+                    @click="saveCommentEdit(p._id, c._id)"
+                  >
+                    Save
+                  </button>
+                  <button type="button" class="comment-action" @click="cancelEditComment(p._id, c._id)">Cancel</button>
+                </div>
+                <div v-if="isCommentOwner(c) && getEditDraft(p._id, c._id) === null" class="comment-actions">
+                  <button type="button" class="comment-link" @click="startEditComment(p._id, c)">Edit</button>
+                  <button type="button" class="comment-link danger" @click="deleteComment(p._id, c._id)">Delete</button>
+                </div>
+              </div>
+            </li>
+          </ul>
+          </div>
+        </section>
       </article>
     </section>
   </main>
@@ -596,6 +769,7 @@ onMounted(load);
 .post-stats {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 20px;
   padding-top: 12px;
   border-top: 1px solid #e8f0ee;
@@ -613,9 +787,46 @@ onMounted(load);
   transition: color 0.15s ease, background 0.15s ease;
 }
 
+.stat-btn {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.stat-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .stat:hover {
   color: var(--c5);
   background: #f0faf7;
+}
+
+.like-btn.liked {
+  color: #d63a64;
+}
+
+.comment-expand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: 8px;
+  border: 1px solid transparent;
+  background: #f4faf8;
+  color: #68828d;
+  font-size: 0.78rem;
+  line-height: 1;
+  border-radius: 999px;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.comment-btn:hover .comment-expand {
+  background: #e8f4f0;
+  color: #4a6571;
+  border-color: #d6e7e2;
 }
 
 .stat-icon {
@@ -626,5 +837,182 @@ onMounted(load);
 .stat-num {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+}
+
+.comments-panel {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed #dceae6;
+}
+
+.comments-divider {
+  height: 1px;
+  background: #edf2f4;
+  margin: 10px 0 8px;
+}
+
+.comments-scroll {
+  max-height: 340px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.comments-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.comments-scroll::-webkit-scrollbar-thumb {
+  background: #d8e4e8;
+  border-radius: 999px;
+}
+
+.comments-empty {
+  margin: 0;
+  color: #6e8791;
+  font-size: 0.86rem;
+  padding: 4px 2px;
+}
+
+.comment-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.comment-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 2px;
+  border-bottom: 1px solid #edf2f4;
+}
+
+.comment-item:last-child {
+  border-bottom: none;
+}
+
+.comment-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.comment-avatar-letter {
+  font-size: 0.85rem;
+}
+
+.comment-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.comment-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.comment-author {
+  font-weight: 700;
+  color: var(--c6);
+  font-size: 0.88rem;
+}
+
+.comment-time {
+  font-size: 0.75rem;
+  color: #9aaab2;
+}
+
+.comment-content {
+  margin: 0;
+  color: #2f424b;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.comment-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.comment-link {
+  border: none;
+  background: transparent;
+  color: #6f8a95;
+  font-size: 0.78rem;
+  padding: 0;
+}
+
+.comment-link:hover {
+  color: var(--c5);
+  text-decoration: underline;
+}
+
+.comment-link.danger:hover {
+  color: #c44;
+}
+
+.comment-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.comment-edit-input {
+  flex: 1;
+  border: 1px solid #c8dbd7;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 0.84rem;
+}
+
+.comment-action {
+  width: auto;
+  min-width: 58px;
+  border-radius: 8px;
+  font-size: 0.76rem;
+  padding: 7px 10px;
+  background: #eef3f5;
+  color: #47606b;
+}
+
+.comment-action.primary {
+  background: var(--c4);
+  color: #fff;
+}
+
+.comment-form {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 10px;
+  background: #f9fcfb;
+}
+
+.comment-input {
+  flex: 1;
+  border: 1px solid #c8dbd7;
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 0.86rem;
+}
+
+.comment-submit {
+  width: auto;
+  min-width: 72px;
+  border-radius: 10px;
+  font-size: 0.84rem;
+  padding: 8px 12px;
 }
 </style>
