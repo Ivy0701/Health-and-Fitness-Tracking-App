@@ -17,6 +17,8 @@ function toProfile(user) {
     heartRate: user.heartRate,
     goal: user.goal,
     activityLevel: user.activityLevel,
+    preferredWorkoutTypes: Array.isArray(user.preferredWorkoutTypes) ? user.preferredWorkoutTypes : [],
+    preferredDietFocus: user.preferredDietFocus || "",
     avatar: user.avatar,
     vip_status: user.vip_status,
     isVip: user.isVip,
@@ -41,6 +43,8 @@ async function updateMe(userId, payload) {
     "targetWeight",
     "goal",
     "activityLevel",
+    "preferredWorkoutTypes",
+    "preferredDietFocus",
     "heartRate",
     "avatar",
     "username",
@@ -50,6 +54,10 @@ async function updateMe(userId, payload) {
   allowed.forEach((key) => {
     if (payload[key] !== undefined) update[key] = payload[key];
   });
+
+  if (Array.isArray(update.preferredWorkoutTypes)) {
+    update.preferredWorkoutTypes = [...new Set(update.preferredWorkoutTypes.map(String).filter(Boolean))].slice(0, 12);
+  }
 
   const user = await User.findByIdAndUpdate(userId, { $set: update }, { new: true, runValidators: true });
   return toProfile(user);

@@ -38,6 +38,11 @@ const userSchema = new mongoose.Schema(
       enum: ["sedentary", "light", "moderate", "active", "very_active"],
       default: "moderate",
     },
+    preferredWorkoutTypes: {
+      type: [String],
+      default: [],
+    },
+    preferredDietFocus: { type: String, trim: true, maxlength: 80, default: "" },
     avatar: { type: String, trim: true },
     isVip: { type: Boolean, default: false },
     vip_status: { type: Boolean, default: false },
