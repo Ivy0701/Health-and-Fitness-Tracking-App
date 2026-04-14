@@ -24,6 +24,7 @@ function logout() {
     <router-link to="/profile">👤 Profile</router-link>
     <router-link to="/favorites">⭐ Favorites</router-link>
     <router-link to="/forum">💬 Forum</router-link>
+    <router-link to="/system-status">📈 System Status</router-link>
     <router-link to="/vip">👑 VIP</router-link>
     <button class="logout" @click="logout">🚪 Logout</button>
   </nav>

@@ -5,5 +5,6 @@ const controller = require("./dashboard.controller");
 const router = express.Router();
 router.get("/", authMiddleware, controller.getDashboard);
 router.get("/overview", authMiddleware, controller.getDashboard);
+router.get("/system-status", authMiddleware, controller.getSystemStatus);
 
 module.exports = router;
