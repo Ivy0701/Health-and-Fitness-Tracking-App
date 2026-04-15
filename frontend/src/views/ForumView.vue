@@ -1,10 +1,13 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
+import { useFavorites } from "../services/favorites";
 import { formatRelativeTime } from "../utils/formatRelativeTime";
 
 const posts = ref([]);
+const route = useRoute();
 const form = reactive({ title: "", content: "" });
 const me = ref(null);
 const searchQuery = ref("");
@@ -15,6 +18,9 @@ const likeLoading = ref({});
 const commentLoading = ref({});
 const commentEditDrafts = ref({});
 const commentEditLoading = ref({});
+const { isFavorited, toggleFavorite, ensureFavoritesLoaded } = useFavorites();
+const focusedPostId = ref("");
+let focusTimer = null;
 
 /** Tag keys stored in API (English slugs). */
 const TAG_OPTIONS = [
@@ -133,6 +139,23 @@ function toggleFormTag(value) {
 async function load() {
   me.value = await api.get("/users/me").then((r) => r.data);
   posts.value = await api.get("/forum/posts").then((r) => r.data);
+}
+
+async function focusPostFromQuery() {
+  const focusId = String(route.query.focusItem || "").trim();
+  if (!focusId) return;
+  const exists = posts.value.some((post) => String(post?._id || "") === focusId);
+  if (!exists) return;
+  activeFilter.value = "all";
+  searchQuery.value = "";
+  focusedPostId.value = focusId;
+  await nextTick();
+  const el = document.querySelector(`[data-post-id="${focusId}"]`);
+  if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (focusTimer) window.clearTimeout(focusTimer);
+  focusTimer = window.setTimeout(() => {
+    focusedPostId.value = "";
+  }, 2200);
 }
 
 function isCommentsExpanded(postId) {
@@ -260,7 +283,37 @@ async function removePost(id) {
   await load();
 }
 
-onMounted(load);
+function isForumFavorited(postId) {
+  return isFavorited("forum", String(postId || ""));
+}
+
+async function toggleForumFavorite(post) {
+  await toggleFavorite({
+    itemType: "forum",
+    itemId: String(post._id),
+    title: post.title,
+    description: String(post.content || "").slice(0, 180),
+    metadata: {
+      authorName: post.authorName || "",
+      likeCount: Number(post.likeCount || 0),
+      commentCount: Number(post.commentCount || 0),
+      tags: Array.isArray(post.tags) ? post.tags : [],
+    },
+    sourceType: "forum_post",
+  });
+}
+
+onMounted(async () => {
+  await Promise.all([load(), ensureFavoritesLoaded()]);
+  await focusPostFromQuery();
+});
+
+watch(
+  () => route.query.focusItem,
+  async () => {
+    await focusPostFromQuery();
+  }
+);
 </script>
 
 <template>
@@ -326,7 +379,13 @@ onMounted(load);
 
     <section class="post-list">
       <p v-if="!visiblePosts.length" class="empty-hint muted">No posts match. Try another filter or create one.</p>
-      <article v-for="p in visiblePosts" :key="p._id" class="post-card">
+      <article
+        v-for="p in visiblePosts"
+        :key="p._id"
+        class="post-card"
+        :class="{ focused: focusedPostId === String(p._id) }"
+        :data-post-id="String(p._id)"
+      >
         <div class="post-top">
           <div class="author-block">
             <div
@@ -341,14 +400,19 @@ onMounted(load);
               <time class="rel-time" :datetime="p.createdAt">{{ formatRelativeTime(p.createdAt) }}</time>
             </div>
           </div>
-          <button
-            v-if="String(p.userId) === String(me?.id)"
-            type="button"
-            class="delete-post"
-            @click="removePost(p._id)"
-          >
-            Delete
-          </button>
+          <div class="post-top-actions">
+            <button type="button" class="fav-post-btn" :class="{ active: isForumFavorited(p._id) }" @click="toggleForumFavorite(p)">
+              {{ isForumFavorited(p._id) ? "★ Saved" : "☆ Save" }}
+            </button>
+            <button
+              v-if="String(p.userId) === String(me?.id)"
+              type="button"
+              class="delete-post"
+              @click="removePost(p._id)"
+            >
+              Delete
+            </button>
+          </div>
         </div>
 
         <h3 class="post-title">{{ p.title }}</h3>
@@ -636,12 +700,39 @@ onMounted(load);
   box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
 }
 
+.post-card.focused {
+  border-color: #4ab7a1;
+  box-shadow: 0 0 0 2px rgba(72, 174, 164, 0.2);
+  background: #f8fefd;
+}
+
 .post-top {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.post-top-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.fav-post-btn {
+  border: 1px solid #d8e4e0;
+  background: #f4f9f7;
+  color: var(--c6);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 0.78rem;
+}
+
+.fav-post-btn.active {
+  background: #fff8e5;
+  border-color: #e7ce8d;
+  color: #9a6a00;
 }
 
 .author-block {

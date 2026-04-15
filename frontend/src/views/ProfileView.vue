@@ -256,7 +256,7 @@ const weightGoalModule = computed(() => {
   if (t == null) {
     return {
       mode: "no_target",
-      statusTag: "No target weight set",
+      statusTag: "No target set",
       headline: "Set a target weight to track your progress",
       distanceLine: "",
       percent: null,
@@ -737,9 +737,9 @@ onMounted(load);
                 <input v-model="form.age" type="number" min="1" max="130" step="1" placeholder="e.g. 28" />
               </label>
               <label class="field field-span-2">
-                <span class="field-label">Avatar URL</span>
-                <input v-model="form.avatar" type="url" autocomplete="off" placeholder="https://…" />
-                <span class="field-hint">Updates header and preview as you type. Invalid images fall back to initials.</span>
+                <span class="field-label">Profile Photo Link</span>
+                <input v-model="form.avatar" type="url" autocomplete="off" placeholder="Paste an image link here" />
+                <span class="field-hint">Paste a direct image link to preview your profile photo. If the image cannot be loaded, a default avatar will be shown.</span>
               </label>
             </div>
           </section>
@@ -1077,23 +1077,27 @@ onMounted(load);
 
 .goal-status-pill {
   flex-shrink: 0;
-  padding: 6px 14px;
+  padding: 5px 12px;
   border-radius: 999px;
   font-size: 12px;
   font-weight: 700;
-  border: 1px solid rgba(52, 139, 147, 0.35);
-  background: rgba(167, 242, 173, 0.35);
-  color: var(--c6, #2f4858);
+  letter-spacing: 0.02em;
+  border: 1px solid rgba(52, 139, 147, 0.28);
+  background: rgba(167, 242, 173, 0.2);
+  color: #355462;
+  cursor: default;
+  user-select: none;
+  box-shadow: none;
 }
 
 .goal-status-pill[data-mode="no_target"] {
-  background: rgba(240, 248, 246, 0.9);
+  background: rgba(240, 248, 246, 0.95);
   border-color: rgba(49, 104, 121, 0.2);
   color: #5a6f7a;
 }
 
 .goal-status-pill[data-mode="no_weight"] {
-  background: rgba(72, 174, 164, 0.2);
+  background: rgba(72, 174, 164, 0.16);
 }
 
 .goal-headline {

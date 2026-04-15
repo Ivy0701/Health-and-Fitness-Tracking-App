@@ -1,117 +1,371 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
-import api from "../services/api";
+import { useFavorites } from "../services/favorites";
 
-const me = ref(null);
-const list = ref([]);
+const router = useRouter();
+const activeTab = ref("all");
+const searchTerm = ref("");
+const sortBy = ref("newest");
+const toast = ref("");
+let toastTimer = null;
 
-async function load() {
-  me.value = await api.get("/users/me").then((r) => r.data);
-  list.value = await api.get(`/favorites/${me.value.id}`).then((r) => r.data);
+const { favorites, loading, ensureFavoritesLoaded, normalizeType, removeFavoriteByRowId } = useFavorites();
+
+const TAB_ITEMS = [
+  { id: "all", label: "All" },
+  { id: "workout", label: "Workouts" },
+  { id: "diet", label: "Diet / Recipes" },
+  { id: "course", label: "Courses" },
+  { id: "forum", label: "Forum" },
+];
+
+const SORT_OPTIONS = [
+  { id: "newest", label: "Newest" },
+  { id: "oldest", label: "Oldest" },
+  { id: "az", label: "A-Z" },
+  { id: "category", label: "Category" },
+];
+
+const TYPE_LABEL = {
+  workout: "Workout",
+  diet: "Diet",
+  course: "Course",
+  forum: "Forum",
+};
+
+const TYPE_ICON = {
+  workout: "💪",
+  diet: "🥗",
+  course: "📚",
+  forum: "💬",
+};
+
+const DEFAULT_RECOMMENDATIONS = {
+  workout: [
+    { id: "w1", title: "Quick HIIT Session", subtitle: "20 min, high intensity cardio", route: "/workout" },
+    { id: "w2", title: "Core Strength Builder", subtitle: "Build daily stability routine", route: "/workout" },
+  ],
+  course: [
+    { id: "c1", title: "Beginner Mobility Course", subtitle: "Low impact and flexible pace", route: "/courses" },
+    { id: "c2", title: "Cardio Foundations", subtitle: "Progressive schedule for 14 days", route: "/courses" },
+  ],
+  diet: [
+    { id: "d1", title: "Balanced High-Protein Day", subtitle: "Lean proteins and whole grains", route: "/diet" },
+    { id: "d2", title: "Smart Fat-Loss Meals", subtitle: "Lower calorie with high satiety", route: "/diet" },
+  ],
+  forum: [
+    { id: "f1", title: "Weekly Workout Wins", subtitle: "See what others are achieving", route: "/forum" },
+    { id: "f2", title: "Meal Prep Thread", subtitle: "Community recipe tips and ideas", route: "/forum" },
+  ],
+};
+
+function showToast(message) {
+  toast.value = message;
+  if (toastTimer) window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toast.value = "";
+  }, 1800);
 }
 
-async function removeFavorite(id) {
-  await api.delete(`/favorites/${id}`);
-  await load();
+function routeByType(type) {
+  if (type === "workout") return "/workout";
+  if (type === "course") return "/courses";
+  if (type === "diet") return "/diet";
+  if (type === "forum") return "/forum";
+  return "/favorites";
 }
 
-function normalizeType(type) {
-  const t = String(type || "").toLowerCase();
-  if (t === "course") return "Course";
-  if (t === "workout") return "Workout";
-  if (t === "article") return "Article";
-  if (t === "diet") return "Diet";
-  return "Other";
+function normalizeRow(row) {
+  const type = normalizeType(row.itemType);
+  const metadata = row?.metadata && typeof row.metadata === "object" ? row.metadata : {};
+  return {
+    ...row,
+    type,
+    metadata,
+    title: row.title || "Untitled item",
+    description: row.description || metadata.preview || "",
+    image: row.image || metadata.image || "",
+  };
 }
+
+const normalizedFavorites = computed(() => favorites.value.map(normalizeRow));
 
 const stats = computed(() => {
-  const out = { total: list.value.length, course: 0, workout: 0, article: 0, diet: 0, other: 0 };
-  for (const item of list.value) {
-    const t = String(item?.itemType || "").toLowerCase();
-    if (t === "course") out.course += 1;
-    else if (t === "workout") out.workout += 1;
-    else if (t === "article") out.article += 1;
-    else if (t === "diet") out.diet += 1;
-    else out.other += 1;
+  const out = { total: normalizedFavorites.value.length, workout: 0, diet: 0, course: 0, forum: 0 };
+  for (const row of normalizedFavorites.value) {
+    if (out[row.type] != null) out[row.type] += 1;
   }
   return out;
 });
 
-onMounted(load);
+const filteredFavorites = computed(() => {
+  let rows = [...normalizedFavorites.value];
+  if (activeTab.value !== "all") {
+    rows = rows.filter((row) => row.type === activeTab.value);
+  }
+  const keyword = searchTerm.value.trim().toLowerCase();
+  if (keyword) {
+    rows = rows.filter((row) => {
+      const blob = [
+        row.title,
+        row.description,
+        row.metadata?.category,
+        row.metadata?.difficulty,
+        row.metadata?.authorName,
+      ]
+        .join(" ")
+        .toLowerCase();
+      return blob.includes(keyword);
+    });
+  }
+
+  if (sortBy.value === "oldest") {
+    rows.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  } else if (sortBy.value === "az") {
+    rows.sort((a, b) => String(a.title || "").localeCompare(String(b.title || "")));
+  } else if (sortBy.value === "category") {
+    rows.sort((a, b) => String(a.type).localeCompare(String(b.type)));
+  } else {
+    rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  }
+
+  return rows;
+});
+
+const hasAnyFavorites = computed(() => stats.value.total > 0);
+const hasCurrentTabItems = computed(() => filteredFavorites.value.length > 0);
+
+const recommendationTypes = computed(() => {
+  if (!hasAnyFavorites.value) return ["workout", "course", "diet", "forum"];
+  const sorted = ["workout", "course", "diet", "forum"].sort((a, b) => stats.value[b] - stats.value[a]);
+  return sorted;
+});
+
+const recommendations = computed(() => {
+  const cards = [];
+  for (const type of recommendationTypes.value) {
+    cards.push(...(DEFAULT_RECOMMENDATIONS[type] || []));
+    if (cards.length >= 4) break;
+  }
+  return cards.slice(0, 4);
+});
+
+async function removeItem(row) {
+  await removeFavoriteByRowId(row._id);
+  showToast("Removed from favorites");
+}
+
+function openItem(row) {
+  router.push({
+    path: routeByType(row.type),
+    query: { focusItem: String(row.itemId || "") },
+  });
+}
+
+function startWorkout(row) {
+  router.push({ path: "/workout", query: { focusItem: String(row.itemId || ""), intent: "start" } });
+}
+
+function addWorkoutToPlan(row) {
+  router.push({ path: "/workout", query: { focusItem: String(row.itemId || ""), intent: "plan" } });
+}
+
+function detailBadges(row) {
+  const meta = row.metadata || {};
+  if (row.type === "workout") {
+    return [
+      meta.duration ? `${meta.duration} min` : "",
+      meta.calories ? `${meta.calories} kcal` : "",
+      meta.difficulty || "",
+      meta.category || "",
+    ].filter(Boolean);
+  }
+  if (row.type === "diet") {
+    return [meta.mealType || meta.planType || "Meal plan", row.targetCalories ? `${Math.round(row.targetCalories)} kcal` : ""].filter(Boolean);
+  }
+  if (row.type === "course") {
+    return [meta.durationDays ? `${meta.durationDays} days` : "", meta.difficulty || "", meta.category || ""].filter(Boolean);
+  }
+  if (row.type === "forum") {
+    return [meta.authorName || "", Number.isFinite(meta.likeCount) ? `♥ ${meta.likeCount}` : "", Number.isFinite(meta.commentCount) ? `💬 ${meta.commentCount}` : ""].filter(Boolean);
+  }
+  return [];
+}
+
+onMounted(async () => {
+  await ensureFavoritesLoaded();
+});
 </script>
 
 <template>
   <AppNavbar />
   <main class="page favorites-page">
     <section class="panel favorites-hero">
-      <h2 class="title">⭐ Favorites</h2>
-      <p class="muted">Keep your saved items in one place for quick access.</p>
+      <div class="hero-top">
+        <div>
+          <h2 class="title">Favorites</h2>
+          <p class="muted hero-subtitle">Save your favorite workouts, meals, courses, and forum posts for quick access.</p>
+          <p class="saved-count">{{ stats.total }} saved items</p>
+        </div>
+        <div class="hero-controls">
+          <input v-model.trim="searchTerm" type="search" placeholder="Search favorites..." />
+          <select v-model="sortBy">
+            <option v-for="opt in SORT_OPTIONS" :key="opt.id" :value="opt.id">{{ opt.label }}</option>
+          </select>
+        </div>
+      </div>
       <div class="stats-row">
-        <div class="stat-chip">
-          <span>Total saved</span>
-          <strong>{{ stats.total }}</strong>
-        </div>
-        <div class="stat-chip">
-          <span>Courses</span>
-          <strong>{{ stats.course }}</strong>
-        </div>
-        <div class="stat-chip">
-          <span>Workouts</span>
-          <strong>{{ stats.workout }}</strong>
-        </div>
-        <div class="stat-chip">
-          <span>Articles</span>
-          <strong>{{ stats.article }}</strong>
-        </div>
-        <div class="stat-chip">
-          <span>Diet</span>
-          <strong>{{ stats.diet }}</strong>
-        </div>
+        <div class="stat-chip"><span>Workouts</span><strong>{{ stats.workout }}</strong></div>
+        <div class="stat-chip"><span>Diet</span><strong>{{ stats.diet }}</strong></div>
+        <div class="stat-chip"><span>Courses</span><strong>{{ stats.course }}</strong></div>
+        <div class="stat-chip"><span>Forum</span><strong>{{ stats.forum }}</strong></div>
       </div>
     </section>
 
-    <section v-if="list.length" class="grid grid-2 favorites-grid">
-      <article v-for="f in list" :key="f._id" class="card favorite-card">
-        <div class="card-head">
-          <h3>{{ f.title || "Untitled item" }}</h3>
-          <span class="type-pill">{{ normalizeType(f.itemType) }}</span>
+    <section class="tabs-row">
+      <button
+        v-for="tab in TAB_ITEMS"
+        :key="tab.id"
+        type="button"
+        class="tab-btn"
+        :class="{ active: activeTab === tab.id }"
+        @click="activeTab = tab.id"
+      >
+        {{ tab.label }}
+      </button>
+    </section>
+
+    <section v-if="loading && !hasAnyFavorites" class="grid favorite-grid">
+      <article v-for="idx in 4" :key="idx" class="card favorite-card skeleton-card">
+        <div class="skeleton-box" />
+        <div class="skeleton-line" />
+        <div class="skeleton-line short" />
+      </article>
+    </section>
+
+    <section v-else-if="!hasAnyFavorites" class="panel empty-state">
+      <div class="empty-icon">☆</div>
+      <h3>No favorites yet</h3>
+      <p class="muted">Start saving workouts, courses, meals, and forum posts you love.</p>
+      <div class="empty-actions">
+        <button type="button" class="ghost-action" @click="router.push('/workout')">Explore Workouts</button>
+        <button type="button" class="ghost-action" @click="router.push('/courses')">Browse Courses</button>
+        <button type="button" class="ghost-action" @click="router.push('/forum')">Visit Forum</button>
+        <button type="button" class="ghost-action" @click="router.push('/diet')">Discover Diet Plans</button>
+      </div>
+    </section>
+
+    <section v-else-if="!hasCurrentTabItems" class="panel empty-state slim">
+      <h3>No items found for this filter</h3>
+      <p class="muted">Try another tab or clear your search keyword.</p>
+    </section>
+
+    <section v-else class="grid favorite-grid">
+      <article v-for="row in filteredFavorites" :key="row._id" class="card favorite-card">
+        <div class="card-thumb">
+          <img v-if="row.image" :src="row.image" :alt="row.title" />
+          <span v-else class="thumb-placeholder">{{ TYPE_ICON[row.type] || "⭐" }}</span>
         </div>
-        <p class="muted meta-line">Reference ID: <span class="mono">{{ f.itemId }}</span></p>
-        <p v-if="String(f.itemType).toLowerCase() === 'diet' && Number.isFinite(Number(f.targetCalories))" class="muted meta-line">
-          Target calories: <strong>{{ Math.round(Number(f.targetCalories)) }} kcal/day</strong>
-        </p>
-        <p v-if="String(f.itemType).toLowerCase() === 'diet' && f.description" class="muted meta-line">
-          {{ f.description }}
-        </p>
-        <div class="actions">
-          <button class="remove-btn" @click="removeFavorite(f._id)">Remove</button>
+        <div class="card-main">
+          <div class="card-head">
+            <h3>{{ row.title }}</h3>
+            <button type="button" class="inline-fav" @click="removeItem(row)">★</button>
+          </div>
+          <span class="type-pill">{{ TYPE_LABEL[row.type] || "Item" }}</span>
+          <p class="muted desc-text">{{ row.description || "Saved item from your health app journey." }}</p>
+          <div class="meta-badges">
+            <span v-for="badge in detailBadges(row)" :key="badge" class="meta-chip">{{ badge }}</span>
+          </div>
+          <div class="quick-actions">
+            <button v-if="row.type === 'workout'" type="button" class="small-btn" @click="startWorkout(row)">Start</button>
+            <button v-if="row.type === 'workout'" type="button" class="small-btn ghost" @click="addWorkoutToPlan(row)">Add to Plan</button>
+            <button type="button" class="small-btn ghost" @click="openItem(row)">
+              {{
+                row.type === "course"
+                  ? "Go to Course"
+                  : row.type === "workout"
+                  ? "Go to Workout"
+                  : row.type === "diet"
+                  ? "View Diet"
+                  : row.type === "forum"
+                  ? "Go to Post"
+                  : "Open Module"
+              }}
+            </button>
+            <button type="button" class="small-btn danger" @click="removeItem(row)">Remove</button>
+          </div>
         </div>
       </article>
     </section>
 
-    <section v-else class="panel empty-state">
-      <h3>No favorites yet</h3>
-      <p class="muted">When you save a course, workout, or article, it will show up here.</p>
+    <section class="panel quick-panel">
+      <h3>Quick actions</h3>
+      <div class="quick-links">
+        <button type="button" class="ghost-action" @click="router.push('/workout')">Start a workout</button>
+        <button type="button" class="ghost-action" @click="router.push('/courses')">Go to courses</button>
+        <button type="button" class="ghost-action" @click="router.push('/diet')">View diet plans</button>
+        <button type="button" class="ghost-action" @click="router.push('/forum')">Join forum</button>
+      </div>
     </section>
+
+    <section class="panel recommendation-panel">
+      <h3>You may also like</h3>
+      <div class="grid recommend-grid">
+        <article v-for="item in recommendations" :key="item.id" class="recommend-card">
+          <h4>{{ item.title }}</h4>
+          <p class="muted">{{ item.subtitle }}</p>
+          <button type="button" class="small-btn" @click="router.push(item.route)">Explore</button>
+        </article>
+      </div>
+    </section>
+
+    <div v-if="toast" class="toast">{{ toast }}</div>
   </main>
 </template>
 
 <style scoped>
 .favorites-page {
-  max-width: 1120px;
+  max-width: 1140px;
+  display: grid;
+  gap: 14px;
 }
 
 .favorites-hero {
   background: linear-gradient(140deg, #f8fcfb 0%, #edf6f4 45%, #e3f1ee 100%);
-  border: 1px solid #cfe4df;
+}
+
+.hero-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.hero-subtitle {
+  margin: -4px 0 8px;
+  max-width: 640px;
+}
+
+.saved-count {
+  margin: 0;
+  font-weight: 700;
+  color: var(--c5);
+}
+
+.hero-controls {
+  width: 320px;
+  max-width: 100%;
+  display: grid;
+  gap: 8px;
 }
 
 .stats-row {
-  margin-top: 10px;
+  margin-top: 12px;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
 }
 
 .stat-chip {
@@ -119,8 +373,6 @@ onMounted(load);
   border-radius: 12px;
   padding: 10px 12px;
   background: #fff;
-  display: grid;
-  gap: 3px;
 }
 
 .stat-chip span {
@@ -129,77 +381,255 @@ onMounted(load);
 }
 
 .stat-chip strong {
-  font-size: 20px;
+  display: block;
+  font-size: 22px;
   color: #2f4858;
 }
 
-.favorites-grid {
-  margin-top: 14px;
+.tabs-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
-.favorites-grid .card + .card {
+.tab-btn {
+  border: 1px solid #d2e4df;
+  border-radius: 999px;
+  background: #f4f9f8;
+  color: var(--c5);
+  padding: 7px 14px;
+}
+
+.tab-btn.active {
+  background: linear-gradient(90deg, var(--c3), var(--c4));
+  color: #fff;
+  border-color: transparent;
+}
+
+.favorite-grid {
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+
+.favorite-grid .card + .card {
   margin-top: 0;
 }
 
 .favorite-card {
+  padding: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  border: 1px solid #d5e7e3;
-  box-shadow: 0 8px 20px rgba(47, 72, 88, 0.07);
+}
+
+.card-thumb {
+  height: 130px;
+  background: linear-gradient(140deg, #e8f4f2, #dceef0);
+  display: grid;
+  place-items: center;
+}
+
+.card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thumb-placeholder {
+  font-size: 34px;
+}
+
+.card-main {
+  padding: 12px;
+  display: grid;
+  gap: 8px;
 }
 
 .card-head {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
   gap: 10px;
 }
 
 .card-head h3 {
   margin: 0;
-  line-height: 1.3;
-  color: #2f4858;
+  color: var(--c6);
+  font-size: 17px;
+}
+
+.inline-fav {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid #ebd49c;
+  background: #fff8e5;
+  color: #9a6a00;
 }
 
 .type-pill {
+  width: fit-content;
   background: #e8f3f0;
   color: #316879;
   border: 1px solid #c9dfd9;
   font-size: 12px;
   font-weight: 700;
-  padding: 4px 10px;
+  padding: 3px 9px;
   border-radius: 999px;
-  white-space: nowrap;
 }
 
-.meta-line {
+.desc-text {
   margin: 0;
+  line-height: 1.45;
+  min-height: 40px;
 }
 
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+.meta-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.meta-chip {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  background: #eef6f4;
+  color: #45626f;
+  border: 1px solid #d8e8e4;
+}
+
+.quick-actions {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.small-btn {
+  width: auto;
+  padding: 7px 11px;
   font-size: 12px;
 }
 
-.actions {
-  margin-top: auto;
+.small-btn.ghost {
+  background: #ecf2f0;
+  color: #355462;
 }
 
-.remove-btn {
+.small-btn.danger {
   background: #fff5f5;
   color: #9b2c2c;
   border: 1px solid #e8a09e;
 }
 
+.quick-panel h3,
+.recommendation-panel h3 {
+  margin: 0 0 10px;
+  color: var(--c6);
+}
+
+.quick-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ghost-action {
+  width: auto;
+  border: 1px solid #d2e4df;
+  color: var(--c5);
+  background: #f5faf8;
+}
+
+.recommend-grid {
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+}
+
+.recommend-card {
+  border: 1px solid #d9e9e6;
+  border-radius: 12px;
+  padding: 12px;
+  background: #fff;
+}
+
+.recommend-card h4 {
+  margin: 0 0 8px;
+  color: var(--c6);
+}
+
+.recommend-card p {
+  margin: 0 0 10px;
+  min-height: 38px;
+}
+
 .empty-state {
-  margin-top: 14px;
   text-align: center;
+  padding: 32px 20px;
+}
+
+.empty-state.slim {
+  padding: 18px;
+}
+
+.empty-icon {
+  font-size: 42px;
+  margin-bottom: 8px;
+  color: #c59d2b;
 }
 
 .empty-state h3 {
-  margin: 2px 0 6px;
-  color: #2f4858;
+  margin: 0 0 8px;
+  color: var(--c6);
+}
+
+.empty-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.skeleton-card {
+  min-height: 240px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.skeleton-box,
+.skeleton-line {
+  border-radius: 8px;
+  background: linear-gradient(90deg, #edf4f2 0%, #f8fcfb 40%, #edf4f2 100%);
+}
+
+.skeleton-box {
+  height: 110px;
+}
+
+.skeleton-line {
+  height: 14px;
+}
+
+.skeleton-line.short {
+  width: 60%;
+}
+
+.toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  background: #1b7e5a;
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-weight: 700;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+}
+
+@media (max-width: 760px) {
+  .hero-top {
+    flex-direction: column;
+  }
 }
 </style>
 

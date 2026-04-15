@@ -1,12 +1,14 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import WorkoutDateSlider from "../components/workout/WorkoutDateSlider.vue";
 import api from "../services/api";
 import { useRoute, useRouter } from "vue-router";
+import { useFavorites } from "../services/favorites";
 
 const route = useRoute();
 const router = useRouter();
+const { isFavorited, toggleFavorite, ensureFavoritesLoaded } = useFavorites();
 
 const showForm = ref(false);
 const saving = ref(false);
@@ -25,6 +27,8 @@ const todayInfo = ref({
 });
 const selectedDate = ref(new Date().toISOString().slice(0, 10));
 const todayDateKey = new Date().toISOString().slice(0, 10);
+const focusedPlanId = ref("");
+let focusTimer = null;
 
 const EXERCISE_GROUPS = [
   {
@@ -72,6 +76,32 @@ const form = reactive({
   durationPerDay: 30,
 });
 
+function workoutItemId(plan) {
+  return String(plan?.id || plan?._id || "");
+}
+
+function isWorkoutFavorited(plan) {
+  return isFavorited("workout", workoutItemId(plan));
+}
+
+async function toggleWorkoutFavorite(plan) {
+  const itemId = workoutItemId(plan);
+  if (!itemId) return;
+  await toggleFavorite({
+    itemType: "workout",
+    itemId,
+    title: plan.exercise_name || plan.exerciseName || "Workout Plan",
+    description: `${plan.category || "General"} training`,
+    metadata: {
+      category: plan.category || "Other",
+      duration: Number(plan.duration_per_day || plan.durationPerDay || 0),
+      days: Number(plan.days || 0),
+      difficulty: plan.is_custom ? "Custom" : "Standard",
+    },
+    sourceType: "workout_plan",
+  });
+}
+
 const isCustomExercise = computed(() => form.exercise === "Other");
 
 function getCategoryByExercise(exercise) {
@@ -84,6 +114,21 @@ function getCategoryByExercise(exercise) {
 
 async function loadPlans() {
   plans.value = await api.get("/workout/plan").then((r) => r.data);
+}
+
+async function focusPlanFromQuery() {
+  const focusId = String(route.query.focusItem || route.query.favorite || "").trim();
+  if (!focusId) return;
+  const exists = plans.value.some((plan) => workoutItemId(plan) === focusId);
+  if (!exists) return;
+  focusedPlanId.value = focusId;
+  await nextTick();
+  const el = document.querySelector(`[data-plan-id="${focusId}"]`);
+  if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (focusTimer) window.clearTimeout(focusTimer);
+  focusTimer = window.setTimeout(() => {
+    focusedPlanId.value = "";
+  }, 2200);
 }
 
 async function loadProfile() {
@@ -201,11 +246,19 @@ onMounted(async () => {
     selectedDate.value = route.query.date;
   }
   try {
-    await Promise.all([loadPlans(), loadProfile(), loadTodayInfo()]);
+    await Promise.all([loadPlans(), loadProfile(), loadTodayInfo(), ensureFavoritesLoaded()]);
+    await focusPlanFromQuery();
   } catch (err) {
     error.value = err?.response?.data?.message || "Failed to load workout data.";
   }
 });
+
+watch(
+  () => route.query.focusItem,
+  async () => {
+    await focusPlanFromQuery();
+  }
+);
 
 async function handleDateChange(dateKey) {
   selectedDate.value = dateKey;
@@ -331,7 +384,18 @@ async function handleDateChange(dateKey) {
         <p v-if="success" class="success-text">{{ success }}</p>
 
         <section class="plan-list">
-          <article v-for="plan in plans" :key="plan.id || plan._id" class="card">
+          <article
+            v-for="plan in plans"
+            :key="plan.id || plan._id"
+            class="card"
+            :class="{ focused: focusedPlanId === workoutItemId(plan) }"
+            :data-plan-id="workoutItemId(plan)"
+          >
+            <div class="plan-row-head">
+              <button type="button" class="tiny-fav-btn" :class="{ active: isWorkoutFavorited(plan) }" @click="toggleWorkoutFavorite(plan)">
+                {{ isWorkoutFavorited(plan) ? "★ Saved" : "☆ Save" }}
+              </button>
+            </div>
             <h4>{{ plan.exercise_name || plan.exerciseName }}</h4>
             <p>Category: {{ plan.category }}</p>
             <p>Days: {{ plan.days }}</p>
@@ -489,6 +553,32 @@ async function handleDateChange(dateKey) {
   margin-top: 14px;
   display: grid;
   gap: 10px;
+}
+
+.plan-list .card.focused {
+  border-color: #4ab7a1;
+  box-shadow: 0 0 0 2px rgba(72, 174, 164, 0.2);
+  background: #f8fefd;
+}
+
+.plan-row-head {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.tiny-fav-btn {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid #d7e7e6;
+  background: #f3f8f7;
+  color: var(--c6);
+  font-size: 12px;
+}
+
+.tiny-fav-btn.active {
+  background: #fff8e5;
+  border-color: #e7ce8d;
+  color: #9a6a00;
 }
 
 .error-text {

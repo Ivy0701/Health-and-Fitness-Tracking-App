@@ -1,9 +1,10 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
-import { useRouter } from "vue-router";
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import CourseCard from "../components/CourseCard.vue";
 import api from "../services/api";
+import { useFavorites } from "../services/favorites";
 import { useAuthStore } from "../stores/auth";
 import {
   createCourse as createCourseApi,
@@ -21,10 +22,13 @@ import {
 } from "../utils/weekSchedule";
 
 const router = useRouter();
+const route = useRoute();
 const auth = useAuthStore();
 const courses = ref([]);
-const favorites = ref(new Set());
 const enrolledCourseIds = ref(new Set());
+const { isFavorited, toggleFavorite, ensureFavoritesLoaded } = useFavorites();
+const focusedCourseId = ref("");
+let focusTimer = null;
 
 const form = reactive({
   title: "",
@@ -84,6 +88,22 @@ function closeCourseDetail() {
   detailCourse.value = null;
 }
 
+async function focusCourseFromQuery() {
+  const focusId = String(route.query.focusItem || "").trim();
+  if (!focusId) return;
+  const match = courses.value.find((course) => String(course?._id || "") === focusId);
+  if (!match) return;
+  openCourseDetailFromBoard(match);
+  focusedCourseId.value = focusId;
+  await nextTick();
+  const el = document.querySelector(`[data-course-id="${focusId}"]`);
+  if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (focusTimer) window.clearTimeout(focusTimer);
+  focusTimer = window.setTimeout(() => {
+    focusedCourseId.value = "";
+  }, 2200);
+}
+
 function addSlotRow() {
   form.weeklySlots.push({ weekday: 2, startTime: "10:00" });
 }
@@ -108,16 +128,25 @@ async function loadCourses() {
   courses.value = rows;
 }
 
-async function loadFavorites() {
-  const me = await api.get("/users/me").then((r) => r.data);
-  const rows = await api.get(`/favorites/${me.id}`).then((r) => r.data);
-  favorites.value = new Set(rows.filter((x) => x.itemType === "course").map((x) => x.itemId));
+function courseFavoriteState(courseId) {
+  return isFavorited("course", courseId);
 }
 
-async function addFavorite(course) {
-  const me = await api.get("/users/me").then((r) => r.data);
-  await api.post("/favorites", { userId: me.id, itemType: "course", itemId: course._id, title: course.title });
-  favorites.value.add(course._id);
+async function toggleCourseFavorite(course) {
+  await toggleFavorite({
+    itemType: "course",
+    itemId: String(course._id),
+    title: course.title,
+    description: course.description,
+    metadata: {
+      difficulty: course.difficulty,
+      duration: course.duration,
+      durationDays: course.duration_days,
+      category: course.category,
+      isPremium: Boolean(course.isPremium),
+    },
+    sourceType: "course_catalog",
+  });
 }
 
 async function dropCourseEnrollment(course) {
@@ -423,8 +452,16 @@ const vipByStars = computed(() => bucketCoursesByStars(vipCoursesList.value));
 const freeByStars = computed(() => bucketCoursesByStars(freeCoursesList.value));
 
 onMounted(async () => {
-  await Promise.all([loadCourses(), loadFavorites(), refreshEnrolled()]);
+  await Promise.all([loadCourses(), ensureFavoritesLoaded(), refreshEnrolled()]);
+  await focusCourseFromQuery();
 });
+
+watch(
+  () => route.query.focusItem,
+  async () => {
+    await focusCourseFromQuery();
+  }
+);
 </script>
 
 <template>
@@ -480,8 +517,9 @@ onMounted(async () => {
               <button
                 type="button"
                 class="course-chip"
-                :class="{ locked: c.isPremium && !auth.vipStatus }"
+                :class="{ locked: c.isPremium && !auth.vipStatus, focused: focusedCourseId === String(c._id) }"
                 :disabled="c.isPremium && !auth.vipStatus"
+                :data-course-id="String(c._id)"
                 @click="openCourseDetailFromBoard(c)"
               >
                 {{ c.title }}
@@ -504,7 +542,15 @@ onMounted(async () => {
           </div>
           <ul class="course-chip-list">
             <li v-for="c in freeByStars[stars]" :key="c._id">
-              <button type="button" class="course-chip" @click="openCourseDetailFromBoard(c)">{{ c.title }}</button>
+              <button
+                type="button"
+                class="course-chip"
+                :class="{ focused: focusedCourseId === String(c._id) }"
+                :data-course-id="String(c._id)"
+                @click="openCourseDetailFromBoard(c)"
+              >
+                {{ c.title }}
+              </button>
             </li>
             <li v-if="!freeByStars[stars].length" class="col-empty">—</li>
           </ul>
@@ -520,12 +566,12 @@ onMounted(async () => {
             :course="detailCourse"
             :slot-text="courseSlotsText(detailCourse)"
             :is-vip-user="auth.vipStatus"
-            :is-favorited="favorites.has(detailCourse._id)"
+            :is-favorited="courseFavoriteState(detailCourse._id)"
             :is-enrolled="enrolledCourseIds.has(String(detailCourse._id))"
             @start="handleStartLearning"
             @enroll="enrollCourse"
             @drop="dropCourseEnrollment"
-            @favorite="addFavorite"
+            @favorite="toggleCourseFavorite"
           />
         </div>
       </div>
@@ -743,6 +789,11 @@ onMounted(async () => {
 .course-chip:hover {
   background: #f0fdfa;
   border-color: var(--c3);
+}
+.course-chip.focused {
+  border-color: #4ab7a1;
+  background: #e9f8f5;
+  box-shadow: 0 0 0 2px rgba(72, 174, 164, 0.22);
 }
 .course-chip.locked,
 .course-chip:disabled {

@@ -3,12 +3,14 @@ const mongoose = require("mongoose");
 const favoriteSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
-    itemType: { type: String, enum: ["course", "workout", "article", "diet"], required: true },
+    itemType: { type: String, enum: ["course", "workout", "article", "diet", "forum"], required: true },
     itemId: { type: String, required: true, trim: true },
     title: { type: String, trim: true, default: "" },
+    image: { type: String, trim: true, default: "" },
     planType: { type: String, trim: true, default: "" },
     targetCalories: { type: Number, min: 0, default: null },
     description: { type: String, trim: true, default: "" },
+    metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
     sourceType: { type: String, trim: true, default: "" },
   },
   { timestamps: true, versionKey: false }

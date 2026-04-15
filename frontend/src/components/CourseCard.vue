@@ -85,8 +85,8 @@ const enrollDisabled = computed(() => props.isEnrolled || cannotEnrollPremium.va
       >
         Drop course remove all sessions
       </button>
-      <button class="btn-fav" :disabled="props.isFavorited" @click="emit('favorite', props.course)">
-        {{ props.isFavorited ? "Favorited" : "Add to Favorites" }}
+      <button class="btn-fav" @click="emit('favorite', props.course)">
+        {{ props.isFavorited ? "★ Remove Favorite" : "☆ Add to Favorites" }}
       </button>
     </div>
   </article>

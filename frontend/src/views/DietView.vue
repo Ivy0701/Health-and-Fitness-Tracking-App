@@ -1,5 +1,6 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
 
@@ -162,10 +163,13 @@ const selectedFoodTemplate = ref(null);
 const selectedPlanId = ref(null);
 const appliedPlanId = ref("");
 const recordMode = ref("recommended");
+const route = useRoute();
+const focusedPlanCardId = ref("");
 let searchTimer = null;
 let focusSyncHandler = null;
 let suppressFoodSearchOnce = false;
 let loadRequestSeq = 0;
+let focusPlanTimer = null;
 
 const overview = ref({
   target: { calories: 2000, suggestedWorkoutBurn: 160, protein: 120, carbs: 220, fat: 65 },
@@ -795,6 +799,30 @@ function togglePlanCard(planId) {
   selectedPlanId.value = selectedPlanId.value === planId ? null : planId;
 }
 
+function normalizeFocusPlanId(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  if (value.startsWith("diet-plan-")) return value.slice("diet-plan-".length);
+  return value;
+}
+
+async function focusPlanFromQuery() {
+  const planId = normalizeFocusPlanId(route.query.focusItem);
+  if (!planId) return;
+  const exists = PLAN_DEFINITIONS.some((plan) => plan.id === planId);
+  if (!exists) return;
+  selectedPlanId.value = planId;
+  recordMode.value = "recommended";
+  focusedPlanCardId.value = planId;
+  await nextTick();
+  const el = document.querySelector(`[data-plan-id="${planId}"]`);
+  if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (focusPlanTimer) window.clearTimeout(focusPlanTimer);
+  focusPlanTimer = window.setTimeout(() => {
+    focusedPlanCardId.value = "";
+  }, 2200);
+}
+
 function applySelectedPlan() {
   if (!selectedPlan.value) return;
   if (isSelectedPlanApplied.value) {
@@ -1021,6 +1049,7 @@ watch(
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
   if (focusSyncHandler) window.removeEventListener("focus", focusSyncHandler);
+  if (focusPlanTimer) clearTimeout(focusPlanTimer);
 });
 
 onMounted(async () => {
@@ -1030,6 +1059,7 @@ onMounted(async () => {
     form.date = selectedDate.value;
     dateWindowStart.value = shiftDateKey(selectedDate.value, -Math.floor(DATE_WINDOW_DAYS / 2));
     await Promise.all([loadForDate(), loadDietFavorites()]);
+    await focusPlanFromQuery();
     focusSyncHandler = () => {
       loadDietFavorites();
     };
@@ -1038,6 +1068,13 @@ onMounted(async () => {
     pageError.value = err?.response?.data?.message || "Failed to initialize diet page.";
   }
 });
+
+watch(
+  () => route.query.focusItem,
+  async () => {
+    await focusPlanFromQuery();
+  }
+);
 </script>
 
 <template>
@@ -1182,7 +1219,14 @@ onMounted(async () => {
     <section class="panel plans-panel">
       <h3>Popular Meal Plans</h3>
       <div class="plans-grid">
-        <article v-for="plan in planCards" :key="plan.id" class="plan-card" :class="{ active: selectedPlanId === plan.id }" @click="togglePlanCard(plan.id)">
+        <article
+          v-for="plan in planCards"
+          :key="plan.id"
+          class="plan-card"
+          :class="{ active: selectedPlanId === plan.id, focused: focusedPlanCardId === plan.id }"
+          :data-plan-id="plan.id"
+          @click="togglePlanCard(plan.id)"
+        >
           <div class="plan-top-strip" />
           <div class="plan-main">
             <div class="plan-title-row">
@@ -1828,6 +1872,11 @@ onMounted(async () => {
   border: 2px solid var(--c4);
   background: linear-gradient(135deg, var(--c3), var(--c4));
   box-shadow: 0 10px 20px rgba(52, 139, 147, 0.28);
+}
+
+.plan-card.focused {
+  border-color: #4ab7a1;
+  box-shadow: 0 0 0 2px rgba(72, 174, 164, 0.22), 0 10px 20px rgba(52, 139, 147, 0.14);
 }
 
 .plan-card.active h4,
