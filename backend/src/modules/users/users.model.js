@@ -68,6 +68,8 @@ async function updateMe(userId, payload) {
 async function saveBasicAssessment(userId, payload) {
   const height = Number(payload.height);
   const weight = Number(payload.weight);
+  const targetWeight = payload.targetWeight == null ? weight : Number(payload.targetWeight);
+  const targetDays = payload.targetDays == null ? 30 : Number(payload.targetDays);
   const bmi = payload.bmi != null ? Number(payload.bmi) : calculateBmi(weight, height);
 
   const user = await User.findByIdAndUpdate(
@@ -78,6 +80,8 @@ async function saveBasicAssessment(userId, payload) {
         age: Number(payload.age),
         height,
         weight,
+        targetWeight,
+        targetDays,
         bmi: Number(bmi.toFixed(1)),
         assessment_completed: true,
       },

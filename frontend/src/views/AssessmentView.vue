@@ -5,6 +5,7 @@ import { useAuthStore } from "../stores/auth";
 import api from "../services/api";
 import AssessmentStepOne from "../components/assessment/AssessmentStepOne.vue";
 import AssessmentStepTwo from "../components/assessment/AssessmentStepTwo.vue";
+import AssessmentStepThree from "../components/assessment/AssessmentStepThree.vue";
 
 const DRAFT_KEY = "assessment_draft_v1";
 const router = useRouter();
@@ -14,12 +15,15 @@ const step = ref(1);
 const saving = ref(false);
 const stepOneError = ref("");
 const stepTwoError = ref("");
+const stepThreeError = ref("");
 
 const form = reactive({
   gender: "male",
   age: 18,
   height: 170,
   weight: 60,
+  targetWeight: 60,
+  targetDays: 30,
 });
 
 function updateForm(nextValue) {
@@ -36,8 +40,10 @@ function hydrateDraft() {
       form.age = Number(data.form.age) || form.age;
       form.height = Number(data.form.height) || form.height;
       form.weight = Number(data.form.weight) || form.weight;
+      form.targetWeight = Number(data.form.targetWeight) || form.targetWeight;
+      form.targetDays = Number(data.form.targetDays) || form.targetDays;
     }
-    if (data?.step === 1 || data?.step === 2) step.value = data.step;
+    if (data?.step === 1 || data?.step === 2 || data?.step === 3) step.value = data.step;
   } catch {
     localStorage.removeItem(DRAFT_KEY);
   }
@@ -97,16 +103,82 @@ function goNext() {
   step.value = 2;
 }
 
-async function finish() {
+function goToTargetSetup() {
   if (!validateStepTwo()) return;
+  if (!Number.isFinite(Number(form.targetWeight)) || Number(form.targetWeight) <= 0) {
+    form.targetWeight = Number(form.weight);
+  }
+  if (!Number.isInteger(Number(form.targetDays)) || Number(form.targetDays) <= 0) {
+    form.targetDays = 30;
+  }
+  step.value = 3;
+}
+
+function evaluateGoalPace(currentWeight, targetWeight, targetDays) {
+  const weeks = targetDays / 7;
+  if (!Number.isFinite(weeks) || weeks <= 0) {
+    return { ok: false, message: "Please set a more realistic goal." };
+  }
+  if (targetWeight < currentWeight) {
+    const lossPerWeek = (currentWeight - targetWeight) / weeks;
+    if (lossPerWeek > 1.5) {
+      return {
+        ok: false,
+        message: "This weight-loss goal is too aggressive. Please choose a more realistic timeline.",
+      };
+    }
+    return { ok: true, message: "" };
+  }
+  if (targetWeight > currentWeight) {
+    const gainPerWeek = (targetWeight - currentWeight) / weeks;
+    if (gainPerWeek > 1) {
+      return {
+        ok: false,
+        message: "This weight-gain goal is too aggressive. Please choose a more realistic timeline.",
+      };
+    }
+    return { ok: true, message: "" };
+  }
+  return { ok: true, message: "" };
+}
+
+function getStepThreeErrorMessage() {
+  const currentWeight = Number(form.weight);
+  const targetWeight = Number(form.targetWeight);
+  const targetDays = Number(form.targetDays);
+
+  if (!Number.isFinite(targetWeight) || targetWeight < 30 || targetWeight > 200) {
+    return "Target weight must be between 30 and 200 kg.";
+  }
+  if (!Number.isInteger(targetDays) || targetDays < 7 || targetDays > 365) {
+    return "Target days must be an integer between 7 and 365.";
+  }
+
+  const paceCheck = evaluateGoalPace(currentWeight, targetWeight, targetDays);
+  if (!paceCheck.ok) {
+    return paceCheck.message || "Please set a more realistic goal.";
+  }
+  return "";
+}
+
+function validateStepThree() {
+  const message = getStepThreeErrorMessage();
+  stepThreeError.value = message;
+  return !message;
+}
+
+async function finish() {
+  if (!validateStepThree()) return;
   saving.value = true;
-  stepTwoError.value = "";
+  stepThreeError.value = "";
   try {
     const payload = {
       gender: form.gender,
       age: Number(form.age),
       height: Number(form.height),
       weight: Number(form.weight),
+      targetWeight: Number(form.targetWeight),
+      targetDays: Number(form.targetDays),
       bmi: Number(bmi.value.toFixed(1)),
     };
     const { data } = await api.post("/user/assessment", payload);
@@ -114,27 +186,44 @@ async function finish() {
     localStorage.removeItem(DRAFT_KEY);
     router.replace("/dashboard");
   } catch (error) {
-    stepTwoError.value = error?.response?.data?.message || "Failed to save assessment. Please try again.";
+    stepThreeError.value = error?.response?.data?.message || "Failed to save assessment. Please try again.";
   } finally {
     saving.value = false;
   }
 }
 
 hydrateDraft();
+
+watch(
+  () => [step.value, form.weight, form.targetWeight, form.targetDays],
+  () => {
+    if (step.value !== 3) return;
+    stepThreeError.value = getStepThreeErrorMessage();
+  }
+);
 </script>
 
 <template>
   <main class="page">
     <AssessmentStepOne v-if="step === 1" :model-value="form" :error="stepOneError" @update:model-value="updateForm" @next="goNext" />
     <AssessmentStepTwo
-      v-else
+      v-else-if="step === 2"
       :model-value="form"
       @update:model-value="updateForm"
       :bmi="bmi"
       :bmi-category="bmiCategory"
-      :saving="saving"
       :error="stepTwoError"
       @back="step = 1"
+      @next="goToTargetSetup"
+      @finish="goToTargetSetup"
+    />
+    <AssessmentStepThree
+      v-else
+      :model-value="form"
+      @update:model-value="updateForm"
+      :saving="saving"
+      :error="stepThreeError"
+      @back="step = 2"
       @finish="finish"
     />
   </main>

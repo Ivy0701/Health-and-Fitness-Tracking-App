@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
 import { useAuthStore } from "../stores/auth";
@@ -8,12 +8,57 @@ const auth = useAuthStore();
 const me = ref(null);
 const status = ref(null);
 const loading = ref(false);
+const showPaymentModal = ref(false);
+const showPaymentFormModal = ref(false);
+const pendingPlan = ref("");
+const paymentSubmitting = ref(false);
+const paymentError = ref("");
+const paymentSuccess = ref("");
+const paymentForm = reactive({
+  areaCode: "+86",
+  phoneNumber: "",
+  paymentMethod: "",
+  cardNumber: "",
+});
+const showActionConfirmModal = ref(false);
+const actionSubmitting = ref(false);
+const actionError = ref("");
+const showRefundRequestModal = ref(false);
+const refundSubmitting = ref(false);
+const refundError = ref("");
+const refundForm = reactive({
+  reason: "",
+  note: "",
+});
+let paymentSuccessTimer = null;
 
 const featureRows = [
   { name: "Premium course access", free: "Locked", vip: "Full access" },
   { name: "Start premium courses", free: "Upgrade required", vip: "Available now" },
+  { name: "Premium diet recipes", free: "Only first 4 visible", vip: "All premium recipes unlocked" },
   { name: "Support priority", free: "Standard queue", vip: "Priority queue" },
   { name: "Plan options", free: "No subscription", vip: "Monthly / Yearly" },
+];
+const PAYMENT_PLANS = {
+  monthly: {
+    key: "monthly",
+    label: "Monthly VIP",
+    price: "38 HKD / month",
+    billingCycle: "Billed monthly",
+    benefits: ["Premium diet recipes", "AI diet assistant", "Advanced analytics"],
+  },
+  yearly: {
+    key: "yearly",
+    label: "Yearly VIP",
+    price: "368 HKD / year",
+    billingCycle: "Billed yearly",
+    benefits: ["Premium diet recipes", "AI diet assistant", "Advanced analytics", "Better yearly value"],
+  },
+};
+const PAYMENT_METHODS = [
+  { key: "wechat", label: "WeChat Pay", icon: "💬" },
+  { key: "alipay", label: "Alipay", icon: "💠" },
+  { key: "card", label: "Credit Card", icon: "💳" },
 ];
 
 function formatDate(value) {
@@ -24,6 +69,19 @@ const isVipActive = computed(() => Boolean(status.value?.vip_status));
 const vipPlanLabel = computed(() => status.value?.vipPlan || "none");
 const vipSinceLabel = computed(() => formatDate(status.value?.vipSince));
 const vipEndLabel = computed(() => formatDate(status.value?.vipEndDate));
+const selectedPaymentPlan = computed(() => PAYMENT_PLANS[pendingPlan.value] || null);
+const refundStatus = computed(() => String(status.value?.refundStatus || "none"));
+const refundWindowDays = computed(() => {
+  if (!status.value?.vipSince || !isVipActive.value) return null;
+  const vipSinceTs = new Date(status.value.vipSince).getTime();
+  if (!Number.isFinite(vipSinceTs)) return null;
+  const diffDays = Math.floor((Date.now() - vipSinceTs) / (24 * 60 * 60 * 1000));
+  return Math.max(0, diffDays);
+});
+const isWithinRefundWindow = computed(() => isVipActive.value && refundWindowDays.value != null && refundWindowDays.value <= 7);
+const hasPendingRefundRequest = computed(() => refundStatus.value === "pending");
+const canRequestRefund = computed(() => isWithinRefundWindow.value && refundStatus.value === "none");
+const canCancelSubscription = computed(() => isVipActive.value && !isWithinRefundWindow.value && !hasPendingRefundRequest.value);
 
 const daysLeft = computed(() => {
   if (!status.value?.vipEndDate || !isVipActive.value) return null;
@@ -54,27 +112,134 @@ async function load() {
   loading.value = false;
 }
 
-async function upgrade(plan) {
-  if (!me.value?.id) return;
-  if (isVipActive.value) {
-    const currentPlan = String(status.value?.vipPlan || "none");
-    const targetPlan = String(plan || "monthly");
-    const message =
-      currentPlan === targetPlan
-        ? `Your VIP is already active on the ${currentPlan} plan. Do you want to extend your membership?`
-        : `Your VIP is already active on the ${currentPlan} plan. Do you want to switch to the ${targetPlan} plan and renew/extend your membership?`;
-    const ok = window.confirm(message);
-    if (!ok) return;
-  }
-  status.value = await api.post("/vip/upgrade", { userId: me.value.id, vipPlan: plan }).then((r) => r.data);
-  auth.setVipStatus(status.value?.vip_status ?? status.value?.isVip);
+function openPaymentModal(plan) {
+  pendingPlan.value = String(plan || "monthly");
+  paymentError.value = "";
+  paymentSuccess.value = "";
+  paymentForm.areaCode = "+86";
+  paymentForm.phoneNumber = "";
+  paymentForm.paymentMethod = "";
+  paymentForm.cardNumber = "";
+  showPaymentFormModal.value = false;
+  showPaymentModal.value = true;
 }
 
-async function cancelVip() {
-  const ok = window.confirm("Are you sure you want to cancel your VIP membership?");
-  if (!ok) return;
-  status.value = await api.post("/vip/cancel", { userId: me.value.id }).then((r) => r.data);
-  auth.setVipStatus(status.value?.vip_status ?? status.value?.isVip);
+function closePaymentModal(force = false) {
+  if (paymentSubmitting.value && !force) return;
+  showPaymentModal.value = false;
+  showPaymentFormModal.value = false;
+  pendingPlan.value = "";
+  paymentError.value = "";
+  paymentForm.areaCode = "+86";
+  paymentForm.phoneNumber = "";
+  paymentForm.paymentMethod = "";
+  paymentForm.cardNumber = "";
+}
+
+function openPaymentFormModal() {
+  paymentError.value = "";
+  showPaymentModal.value = false;
+  showPaymentFormModal.value = true;
+}
+
+function getPaymentValidationError() {
+  const phoneDigits = String(paymentForm.phoneNumber || "").replace(/\D/g, "");
+  if (!phoneDigits) return "Contact number is required.";
+  if (paymentForm.areaCode === "+86" && phoneDigits.length !== 11) return "Phone number must be 11 digits for +86";
+  if (paymentForm.areaCode === "+852" && phoneDigits.length !== 8) return "Phone number must be 8 digits for +852";
+  if (!paymentForm.paymentMethod) return "Please select a payment method.";
+  if (paymentForm.paymentMethod !== "card") return "";
+  const cardDigits = String(paymentForm.cardNumber || "").replace(/\D/g, "");
+  if (!cardDigits) return "Card number is required.";
+  if (cardDigits.length !== 16) return "Card number must be 16 digits";
+  return "";
+}
+
+async function confirmPayment() {
+  if (!me.value?.id || !pendingPlan.value) return;
+  paymentError.value = getPaymentValidationError();
+  if (paymentError.value) return;
+  paymentSubmitting.value = true;
+  paymentError.value = "";
+  try {
+    status.value = await api.post("/vip/upgrade", { userId: me.value.id, vipPlan: pendingPlan.value }).then((r) => r.data);
+    auth.setVipStatus(status.value?.vip_status ?? status.value?.isVip);
+    paymentSuccess.value = "Payment successful.";
+    if (paymentSuccessTimer) window.clearTimeout(paymentSuccessTimer);
+    paymentSuccessTimer = window.setTimeout(() => {
+      paymentSuccess.value = "";
+    }, 3000);
+    closePaymentModal(true);
+  } catch (error) {
+    paymentError.value = error?.response?.data?.message || "Payment failed. Please try again.";
+  } finally {
+    paymentSubmitting.value = false;
+  }
+}
+
+function openMembershipActionModal() {
+  actionError.value = "";
+  showActionConfirmModal.value = true;
+}
+
+function closeMembershipActionModal(force = false) {
+  if (actionSubmitting.value && !force) return;
+  showActionConfirmModal.value = false;
+  actionError.value = "";
+}
+
+async function confirmMembershipAction() {
+  if (!me.value?.id) return;
+  actionSubmitting.value = true;
+  actionError.value = "";
+  try {
+    status.value = await api.post("/vip/cancel", { userId: me.value.id }).then((r) => r.data);
+    auth.setVipStatus(status.value?.vip_status ?? status.value?.isVip);
+    closeMembershipActionModal(true);
+  } catch (error) {
+    actionError.value = error?.response?.data?.message || "Failed to update VIP membership.";
+  } finally {
+    actionSubmitting.value = false;
+  }
+}
+
+function openRefundRequestModal() {
+  refundError.value = "";
+  refundForm.reason = "";
+  refundForm.note = "";
+  showRefundRequestModal.value = true;
+}
+
+function closeRefundRequestModal(force = false) {
+  if (refundSubmitting.value && !force) return;
+  showRefundRequestModal.value = false;
+  refundError.value = "";
+}
+
+async function submitRefundRequest() {
+  const reason = String(refundForm.reason || "").trim();
+  if (!reason) {
+    refundError.value = "Reason for refund is required.";
+    return;
+  }
+  if (!me.value?.id) return;
+  refundSubmitting.value = true;
+  refundError.value = "";
+  try {
+    status.value = await api
+      .post("/vip/refund-request", {
+        userId: me.value.id,
+        reason,
+        note: String(refundForm.note || "").trim(),
+      })
+      .then((r) => r.data);
+    auth.setVipStatus(status.value?.vip_status ?? status.value?.isVip);
+    closeRefundRequestModal(true);
+  } catch (error) {
+    refundError.value = error?.response?.data?.message || "Failed to submit refund request.";
+  } finally {
+    refundSubmitting.value = false;
+  }
 }
 
 onMounted(load);
@@ -95,18 +260,23 @@ onMounted(load);
         <p>VIP Since: <strong>{{ vipSinceLabel }}</strong></p>
         <p>Subscription Ends: <strong>{{ vipEndLabel }}</strong></p>
         <p class="hint">{{ statusHint }}</p>
+        <p v-if="refundStatus === 'pending'" class="refund-status pending">Refund Status: Pending Review</p>
+        <p v-if="refundStatus === 'pending'" class="hint">Your refund request is awaiting admin approval.</p>
+        <p v-if="refundStatus === 'approved'" class="refund-status approved">Refund Approved</p>
+        <p v-if="refundStatus === 'rejected'" class="refund-status rejected">Refund Rejected</p>
+        <p v-if="paymentSuccess" class="success-tip">{{ paymentSuccess }}</p>
       </template>
 
       <div class="grid grid-2 plans">
         <article class="card" :class="{ recommended: recommendedPlan === 'monthly' }">
           <h3>Monthly Plan</h3>
           <p class="muted">Flexible monthly billing for short-term goals and trial periods.</p>
-          <button @click="upgrade('monthly')">Upgrade to Monthly</button>
+          <button @click="openPaymentModal('monthly')">Upgrade to Monthly</button>
         </article>
         <article class="card" :class="{ recommended: recommendedPlan === 'yearly' }">
           <h3>Yearly Plan</h3>
           <p class="muted">Best long-term value with uninterrupted premium training access.</p>
-          <button @click="upgrade('yearly')">Upgrade to Yearly</button>
+          <button @click="openPaymentModal('yearly')">Upgrade to Yearly</button>
         </article>
       </div>
 
@@ -136,10 +306,118 @@ onMounted(load);
         </ul>
       </section>
 
-      <div v-if="status?.vip_status" class="cancel-box">
-        <button class="cancel-btn" @click="cancelVip">Cancel VIP Membership</button>
+      <div v-if="canRequestRefund" class="cancel-box">
+        <button class="cancel-btn" @click="openRefundRequestModal">Request Refund</button>
+      </div>
+      <div v-if="hasPendingRefundRequest" class="cancel-box">
+        <button class="cancel-btn" type="button" disabled>Pending Review</button>
+      </div>
+      <div v-if="canCancelSubscription" class="cancel-box">
+        <button class="cancel-btn" @click="openMembershipActionModal">Cancel Subscription</button>
       </div>
     </section>
+
+    <div v-if="showPaymentModal && selectedPaymentPlan" class="modal-overlay" @click.self="closePaymentModal">
+      <section class="modal-card" role="dialog" aria-modal="true" aria-label="Payment confirmation">
+        <h3>Payment details</h3>
+        <p><strong>Plan:</strong> {{ selectedPaymentPlan.label }}</p>
+        <p><strong>Price:</strong> {{ selectedPaymentPlan.price }}</p>
+        <p><strong>Billing cycle:</strong> {{ selectedPaymentPlan.billingCycle }}</p>
+        <div class="benefits-box">
+          <p><strong>Premium benefits:</strong></p>
+          <ul>
+            <li v-for="item in selectedPaymentPlan.benefits" :key="item">{{ item }}</li>
+          </ul>
+        </div>
+        <p v-if="paymentError" class="error">{{ paymentError }}</p>
+        <div class="modal-actions">
+          <button type="button" class="cancel-btn" @click="closePaymentModal">Cancel</button>
+          <button type="button" @click="openPaymentFormModal">Payment</button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="showPaymentFormModal && selectedPaymentPlan" class="modal-overlay" @click.self="closePaymentModal">
+      <section class="modal-card" role="dialog" aria-modal="true" aria-label="Complete your payment">
+        <h3>Complete your payment</h3>
+        <p><strong>Plan:</strong> {{ selectedPaymentPlan.label }}</p>
+        <p><strong>Price:</strong> {{ selectedPaymentPlan.price }}</p>
+
+        <div class="payment-form-block">
+          <p><strong>Contact number</strong></p>
+          <div class="contact-row">
+            <select v-model="paymentForm.areaCode">
+              <option value="+86">+86</option>
+              <option value="+852">+852</option>
+            </select>
+            <input v-model.trim="paymentForm.phoneNumber" type="text" inputmode="numeric" placeholder="Phone number" />
+          </div>
+        </div>
+
+        <div class="payment-form-block">
+          <p><strong>Payment method</strong></p>
+          <div class="payment-method-options">
+            <label v-for="method in PAYMENT_METHODS" :key="method.key" class="method-option">
+              <input v-model="paymentForm.paymentMethod" type="radio" name="payment-method" :value="method.key" />
+              <span class="method-icon">{{ method.icon }}</span>
+              <span>{{ method.label }}</span>
+            </label>
+          </div>
+        </div>
+
+        <div v-if="paymentForm.paymentMethod === 'card'" class="payment-form-block">
+          <label>
+            Card number
+            <input v-model.trim="paymentForm.cardNumber" type="text" inputmode="numeric" placeholder="1234 5678 9012 3456" />
+          </label>
+        </div>
+
+        <p v-if="paymentError" class="error">{{ paymentError }}</p>
+        <div class="modal-actions">
+          <button type="button" class="cancel-btn" @click="closePaymentModal">Cancel</button>
+          <button type="button" :disabled="paymentSubmitting" @click="confirmPayment">
+            {{ paymentSubmitting ? "Processing..." : "Pay Now" }}
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="showActionConfirmModal" class="modal-overlay" @click.self="closeMembershipActionModal">
+      <section class="modal-card" role="dialog" aria-modal="true" aria-label="Membership action confirmation">
+        <h3>Cancel subscription</h3>
+        <p>Are you sure you want to cancel your VIP subscription?</p>
+        <p v-if="actionError" class="error">{{ actionError }}</p>
+        <div class="modal-actions">
+          <button type="button" class="cancel-btn" @click="closeMembershipActionModal">Cancel</button>
+          <button type="button" :disabled="actionSubmitting" @click="confirmMembershipAction">
+            {{ actionSubmitting ? "Updating..." : "Confirm Cancel" }}
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="showRefundRequestModal" class="modal-overlay" @click.self="closeRefundRequestModal">
+      <section class="modal-card" role="dialog" aria-modal="true" aria-label="Refund request form">
+        <h3>Refund request</h3>
+        <p class="muted">Refund is available only within 7 days from the VIP since date.</p>
+        <p class="muted">All refund requests are subject to admin approval.</p>
+        <label class="payment-form-block">
+          Reason for refund
+          <textarea v-model.trim="refundForm.reason" rows="3" placeholder="Please describe the reason..." />
+        </label>
+        <label class="payment-form-block">
+          Additional note (optional)
+          <textarea v-model.trim="refundForm.note" rows="2" placeholder="Optional details" />
+        </label>
+        <p v-if="refundError" class="error">{{ refundError }}</p>
+        <div class="modal-actions">
+          <button type="button" class="cancel-btn" @click="closeRefundRequestModal">Cancel</button>
+          <button type="button" :disabled="refundSubmitting" @click="submitRefundRequest">
+            {{ refundSubmitting ? "Submitting..." : "Submit Refund Request" }}
+          </button>
+        </div>
+      </section>
+    </div>
   </main>
 </template>
 
@@ -207,6 +485,24 @@ onMounted(load);
   color: #486170;
   font-size: 13px;
 }
+.success-tip {
+  margin-top: 8px;
+  color: #117a52;
+  font-weight: 600;
+}
+.refund-status {
+  margin-top: 8px;
+  font-weight: 700;
+}
+.refund-status.pending {
+  color: #9a6a00;
+}
+.refund-status.approved {
+  color: #117a52;
+}
+.refund-status.rejected {
+  color: #8f2d2d;
+}
 .text-ok { color: #117a52; }
 .text-muted { color: #486170; }
 .cancel-box { margin-top: 14px; display: flex; justify-content: flex-end; }
@@ -214,6 +510,91 @@ onMounted(load);
   border: 1px solid #e5bcbc;
   background: #fff4f4;
   color: #8f2d2d;
+}
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 16px;
+}
+.modal-card {
+  width: min(100%, 460px);
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid #d7e7e6;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  padding: 16px;
+}
+.modal-card h3 {
+  margin-top: 0;
+  margin-bottom: 10px;
+}
+.benefits-box {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  background: #f7fbfa;
+  border: 1px solid #e1eeec;
+}
+.benefits-box p {
+  margin: 0 0 6px;
+}
+.benefits-box ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.modal-actions {
+  margin-top: 14px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.payment-form-block {
+  margin-top: 12px;
+}
+.payment-form-block p {
+  margin: 0 0 8px;
+}
+.payment-method-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.method-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #d7e7e6;
+  border-radius: 8px;
+  background: #fbfefd;
+  font-size: 13px;
+}
+.method-icon {
+  font-size: 14px;
+}
+.payment-form-block label {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: #2f4858;
+}
+.payment-form-block input,
+.payment-form-block select,
+.payment-form-block textarea {
+  border: 1px solid #d7e7e6;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  font-family: inherit;
+}
+.contact-row {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 8px;
 }
 </style>
 

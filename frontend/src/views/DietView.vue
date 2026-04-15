@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
 
@@ -18,7 +18,14 @@ const PLAN_DEFINITIONS = [
   { id: "muscle_gain", name: "Muscle Gain Plan", type: "muscle_gain", description: "Higher calories and more protein/carb support for training." },
   { id: "high_protein", name: "High Protein Plan", type: "high_protein", description: "Raise protein intake while keeping calories manageable." },
   { id: "balanced", name: "Balanced Plan", type: "balanced", description: "Even macro structure for long-term consistency." },
+  { id: "keto", name: "Keto Plan", type: "fat_loss", description: "Very low-carb meals with moderate protein and healthy fats." },
+  { id: "vegetarian", name: "Vegetarian Plan", type: "balanced", description: "Plant-forward meal combinations with balanced daily macros." },
+  { id: "low_sugar", name: "Low Sugar Plan", type: "weight_loss", description: "Reduce added sugar while keeping stable energy through the day." },
+  { id: "low_fat", name: "Low Fat Plan", type: "weight_loss", description: "Lower-fat food picks with controlled portions and lighter cooking." },
+  { id: "athlete", name: "Athlete Plan", type: "muscle_gain", description: "Higher fuel support for training volume and recovery demands." },
+  { id: "clean_eating", name: "Clean Eating Plan", type: "high_protein", description: "Whole-food focused plan with practical prep and clean ingredients." },
 ];
+const LOCK_FREE_PLAN_COUNT = 4;
 
 const PLAN_CATEGORY_BLUEPRINT = {
   hot: {
@@ -164,12 +171,17 @@ const selectedPlanId = ref(null);
 const appliedPlanId = ref("");
 const recordMode = ref("recommended");
 const route = useRoute();
+const router = useRouter();
 const focusedPlanCardId = ref("");
+const vipUnlocked = ref(false);
+const showVipUpgradeModal = ref(false);
+const showVipUnlockLoadingModal = ref(false);
 let searchTimer = null;
 let focusSyncHandler = null;
 let suppressFoodSearchOnce = false;
 let loadRequestSeq = 0;
 let focusPlanTimer = null;
+let vipUnlockTimer = null;
 
 const overview = ref({
   target: { calories: 2000, suggestedWorkoutBurn: 160, protein: 120, carbs: 220, fat: 65 },
@@ -265,6 +277,7 @@ const defaultDynamicPlan = computed(() => ({
   type: defaultDynamicPlanType.value,
   description: "Auto-generated from your current weight, target weight, and target days.",
 }));
+const isVipUser = computed(() => Boolean(me.value?.isVip || me.value?.vip_status));
 const selectedPlanFavoriteId = computed(() => (selectedPlan.value ? `diet-plan-${selectedPlan.value.id}` : ""));
 const isSelectedPlanFavorited = computed(() => Boolean(selectedPlanFavoriteId.value && dietFavoriteIds.value.has(selectedPlanFavoriteId.value)));
 const displayedOverviewFoods = computed(() => overviewFoodRows.value.slice(0, 10));
@@ -659,13 +672,14 @@ const recommendedSourceMeta = computed(() => {
 });
 
 const planCards = computed(() =>
-  PLAN_DEFINITIONS.map((plan) => {
+  PLAN_DEFINITIONS.map((plan, idx) => {
     let suggestion = adjustedPlanCalories.value;
     if (plan.type === "muscle_gain") suggestion += 120;
     if (plan.type === "fat_loss" || plan.type === "weight_loss") suggestion -= 120;
     if (plan.type === "high_protein") suggestion += 40;
     return {
       ...plan,
+      isLocked: !vipUnlocked.value && idx >= LOCK_FREE_PLAN_COUNT,
       suggestedCalories: clamp(roundToInt(suggestion), 1200, 4000),
       goalTag:
         plan.type === "muscle_gain"
@@ -799,6 +813,30 @@ function togglePlanCard(planId) {
   selectedPlanId.value = selectedPlanId.value === planId ? null : planId;
 }
 
+function handlePlanCardClick(plan) {
+  if (plan?.isLocked) {
+    if (showVipUnlockLoadingModal.value) return;
+    if (isVipUser.value) {
+      showVipUpgradeModal.value = false;
+      showVipUnlockLoadingModal.value = true;
+      if (vipUnlockTimer) window.clearTimeout(vipUnlockTimer);
+      vipUnlockTimer = window.setTimeout(() => {
+        showVipUnlockLoadingModal.value = false;
+        vipUnlocked.value = true;
+      }, 1500);
+      return;
+    }
+    showVipUpgradeModal.value = true;
+    return;
+  }
+  togglePlanCard(plan.id);
+}
+
+function goToVipPage() {
+  showVipUpgradeModal.value = false;
+  router.push("/vip");
+}
+
 function normalizeFocusPlanId(raw) {
   const value = String(raw || "").trim();
   if (!value) return "";
@@ -811,6 +849,8 @@ async function focusPlanFromQuery() {
   if (!planId) return;
   const exists = PLAN_DEFINITIONS.some((plan) => plan.id === planId);
   if (!exists) return;
+  const targetPlan = planCards.value.find((plan) => plan.id === planId);
+  if (targetPlan?.isLocked) return;
   selectedPlanId.value = planId;
   recordMode.value = "recommended";
   focusedPlanCardId.value = planId;
@@ -1050,6 +1090,7 @@ onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
   if (focusSyncHandler) window.removeEventListener("focus", focusSyncHandler);
   if (focusPlanTimer) clearTimeout(focusPlanTimer);
+  if (vipUnlockTimer) clearTimeout(vipUnlockTimer);
 });
 
 onMounted(async () => {
@@ -1217,15 +1258,15 @@ watch(
     </section>
 
     <section class="panel plans-panel">
-      <h3>Popular Meal Plans</h3>
+      <h3>Hot Recipes 🔥</h3>
       <div class="plans-grid">
         <article
           v-for="plan in planCards"
           :key="plan.id"
           class="plan-card"
-          :class="{ active: selectedPlanId === plan.id, focused: focusedPlanCardId === plan.id }"
+          :class="{ active: selectedPlanId === plan.id, focused: focusedPlanCardId === plan.id, locked: plan.isLocked }"
           :data-plan-id="plan.id"
-          @click="togglePlanCard(plan.id)"
+          @click="handlePlanCardClick(plan)"
         >
           <div class="plan-top-strip" />
           <div class="plan-main">
@@ -1233,8 +1274,14 @@ watch(
               <h4>{{ plan.name }}</h4>
               <span class="plan-tag">{{ plan.goalTag }}</span>
             </div>
-            <p>{{ plan.description }}</p>
-            <strong class="plan-kcal">{{ plan.suggestedCalories }} <small>kcal/day</small></strong>
+            <div class="plan-content" :class="{ blurred: plan.isLocked }">
+              <p>{{ plan.description }}</p>
+              <strong class="plan-kcal">{{ plan.suggestedCalories }} <small>kcal/day</small></strong>
+            </div>
+            <div v-if="plan.isLocked" class="plan-lock-overlay">
+              <span class="lock-icon">🔒 VIP Only</span>
+              <small>Upgrade to unlock</small>
+            </div>
           </div>
         </article>
       </div>
@@ -1247,10 +1294,10 @@ watch(
           </div>
           <div class="selected-head-actions">
             <button type="button" :class="['tiny-btn', isSelectedPlanApplied ? 'applied-btn' : 'ghost-btn']" @click="applySelectedPlan">
-              {{ isSelectedPlanApplied ? "Applied" : "Apply Plan" }}
+              {{ isSelectedPlanApplied ? "Remove Applied Plan" : "Apply Plan" }}
             </button>
             <button type="button" :class="['tiny-btn', isSelectedPlanFavorited ? 'saved-btn' : 'ghost-btn']" @click="toggleSelectedPlanFavorite">
-              {{ isSelectedPlanFavorited ? "Saved" : "Add to Favorites" }}
+              {{ isSelectedPlanFavorited ? "Remove from Favorites" : "Add to Favorites" }}
             </button>
           </div>
         </div>
@@ -1406,6 +1453,20 @@ watch(
     <p v-if="pageError" class="error">{{ pageError }}</p>
     <p v-if="pageSuccess" class="success">{{ pageSuccess }}</p>
     <p v-if="loading" class="muted loading-text">Loading diet data...</p>
+
+    <div v-if="showVipUpgradeModal" class="modal-overlay" @click.self="showVipUpgradeModal = false">
+      <div class="modal-content">
+        <p class="vip-modal-title">🔒 VIP only</p>
+        <p class="upgrade-link" @click="goToVipPage">Upgrade to unlock premium recipes</p>
+      </div>
+    </div>
+
+    <div v-if="showVipUnlockLoadingModal" class="modal-overlay">
+      <div class="modal-content vip-loading-modal">
+        <div class="spinner" />
+        <p class="vip-modal-title">✨ Unlocking premium recipes...</p>
+      </div>
+    </div>
   </main>
 </template>
 
@@ -1797,6 +1858,11 @@ watch(
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
+  max-height: 390px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
 }
 
 .plan-card {
@@ -1819,9 +1885,15 @@ watch(
 }
 
 .plan-main {
+  position: relative;
   padding: 12px;
   display: grid;
   gap: 10px;
+}
+
+.plan-content {
+  display: grid;
+  gap: 8px;
 }
 
 .plan-title-row {
@@ -1893,6 +1965,46 @@ watch(
 .plan-card.active .plan-tag {
   background: rgba(255, 255, 255, 0.2);
   border: 1px solid rgba(255, 255, 255, 0.35);
+}
+
+.plan-card.locked {
+  cursor: not-allowed;
+}
+
+.plan-card.locked .plan-top-strip {
+  opacity: 0.7;
+}
+
+.plan-card.locked:hover {
+  transform: none;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.08);
+}
+
+.plan-content.blurred {
+  filter: blur(2px);
+  opacity: 0.75;
+  user-select: none;
+  pointer-events: none;
+}
+
+.plan-lock-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(1px);
+  display: grid;
+  place-content: center;
+  gap: 4px;
+  text-align: center;
+  color: var(--c6);
+  font-weight: 700;
+}
+
+.plan-lock-overlay small {
+  font-size: 11px;
+  font-weight: 600;
+  color: #4f6a73;
 }
 
 .selected-plan {
@@ -2232,6 +2344,59 @@ watch(
 
 .loading-text {
   text-align: center;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 26, 28, 0.45);
+  display: grid;
+  place-items: center;
+  z-index: 1200;
+}
+
+.modal-content {
+  width: min(92vw, 360px);
+  border-radius: 12px;
+  padding: 18px 16px;
+  background: #fff;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.2);
+  text-align: center;
+}
+
+.vip-loading-modal {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+}
+
+.vip-modal-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #28363d;
+}
+
+.upgrade-link {
+  margin: 8px 0 0;
+  text-decoration: underline;
+  cursor: pointer;
+  color: #3b82f6;
+}
+
+.spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid #ccc;
+  border-top: 3px solid #10b981;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  100% {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 1100px) {

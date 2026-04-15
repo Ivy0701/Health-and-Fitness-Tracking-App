@@ -5,6 +5,8 @@ import api from "../services/api";
 const loading = ref(true);
 const error = ref("");
 const payload = ref(null);
+const refundActionLoadingId = ref("");
+const refundActionError = ref("");
 
 function n(v) {
   const x = Number(v);
@@ -13,6 +15,7 @@ function n(v) {
 
 const users = computed(() => payload.value?.users || {});
 const vip = computed(() => payload.value?.vip || {});
+const refundRequests = computed(() => payload.value?.refundRequests || {});
 const catalog = computed(() => payload.value?.catalog || {});
 const courseEnrollments = computed(() => payload.value?.courseEnrollments || {});
 const featureAdoption = computed(() => payload.value?.featureAdoption || {});
@@ -20,6 +23,14 @@ const featureUsage = computed(() => payload.value?.featureUsage || {});
 const community = computed(() => payload.value?.community || {});
 const systemRuntime = computed(() => payload.value?.systemRuntime || {});
 const usersPreview12 = computed(() => users.value.preview12 || []);
+const refundRows = computed(() => refundRequests.value.rows || []);
+
+function formatDateTime(value) {
+  if (!value) return "—";
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return "—";
+  return dt.toLocaleString();
+}
 
 const uptimeText = computed(() => {
   const s = Number(systemRuntime.value.processUptimeSeconds || 0);
@@ -54,8 +65,9 @@ const enrollStatus = computed(() => courseEnrollments.value.byStatus || {});
 
 const topCourses = computed(() => courseEnrollments.value.topByEnrollments || []);
 
-onMounted(async () => {
+async function loadSystemStatus() {
   try {
+    refundActionError.value = "";
     const res = await api.get("/dashboard/system-status");
     payload.value = res.data;
   } catch (err) {
@@ -74,7 +86,37 @@ onMounted(async () => {
   } finally {
     loading.value = false;
   }
-});
+}
+
+async function approveRefund(userId) {
+  if (!userId || refundActionLoadingId.value) return;
+  refundActionLoadingId.value = `approve:${userId}`;
+  refundActionError.value = "";
+  try {
+    await api.post(`/dashboard/refund-requests/${userId}/approve`);
+    await loadSystemStatus();
+  } catch (err) {
+    refundActionError.value = err?.response?.data?.message || "Failed to approve refund request.";
+  } finally {
+    refundActionLoadingId.value = "";
+  }
+}
+
+async function rejectRefund(userId) {
+  if (!userId || refundActionLoadingId.value) return;
+  refundActionLoadingId.value = `reject:${userId}`;
+  refundActionError.value = "";
+  try {
+    await api.post(`/dashboard/refund-requests/${userId}/reject`);
+    await loadSystemStatus();
+  } catch (err) {
+    refundActionError.value = err?.response?.data?.message || "Failed to reject refund request.";
+  } finally {
+    refundActionLoadingId.value = "";
+  }
+}
+
+onMounted(loadSystemStatus);
 </script>
 
 <template>
@@ -172,6 +214,83 @@ onMounted(async () => {
               <span class="kpi-label">VIP flag but <code>vipPlan = none</code></span>
               <strong class="kpi-value">{{ n(vip.vipButPlanNone) }}</strong>
             </div>
+            <div class="kpi">
+              <span class="kpi-label">Refund requests pending review</span>
+              <strong class="kpi-value">{{ n(vip.refundPendingRequests) }}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <h2 class="section-title">VIP refund management</h2>
+          <p class="hint">Review pending requests and decide whether to approve or reject.</p>
+          <p v-if="refundActionError" class="state-block error">{{ refundActionError }}</p>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th>VIP plan</th>
+                  <th>VIP since</th>
+                  <th>Subscription ends</th>
+                  <th>Refund reason</th>
+                  <th>Additional note</th>
+                  <th>Requested at</th>
+                  <th>Status</th>
+                  <th>Reviewed at</th>
+                  <th>Reviewed by</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in refundRows" :key="row.userId">
+                  <td>
+                    <div>{{ row.username || "—" }}</div>
+                    <div class="mono small">{{ row.userId || "—" }}</div>
+                    <div class="mono small">{{ row.email || "—" }}</div>
+                  </td>
+                  <td><span class="badge">{{ row.vipPlan || "none" }}</span></td>
+                  <td class="mono small">{{ formatDateTime(row.vipSince) }}</td>
+                  <td class="mono small">{{ formatDateTime(row.subscriptionEnds) }}</td>
+                  <td>{{ row.refundReason || "—" }}</td>
+                  <td>{{ row.refundNote || "—" }}</td>
+                  <td class="mono small">{{ formatDateTime(row.refundRequestedAt) }}</td>
+                  <td>
+                    <span class="badge" :class="{ 'badge-pending': row.refundStatus === 'pending', 'badge-ok': row.refundStatus === 'approved', 'badge-bad': row.refundStatus === 'rejected' }">
+                      {{ row.refundStatus || "none" }}
+                    </span>
+                  </td>
+                  <td class="mono small">{{ formatDateTime(row.refundReviewedAt) }}</td>
+                  <td class="mono small">{{ row.refundReviewedBy || "—" }}</td>
+                  <td>
+                    <div class="action-row">
+                      <button
+                        v-if="row.refundStatus === 'pending'"
+                        type="button"
+                        class="btn-ok"
+                        :disabled="Boolean(refundActionLoadingId)"
+                        @click="approveRefund(row.userId)"
+                      >
+                        {{ refundActionLoadingId === `approve:${row.userId}` ? "Approving..." : "Approve" }}
+                      </button>
+                      <button
+                        v-if="row.refundStatus === 'pending'"
+                        type="button"
+                        class="btn-bad"
+                        :disabled="Boolean(refundActionLoadingId)"
+                        @click="rejectRefund(row.userId)"
+                      >
+                        {{ refundActionLoadingId === `reject:${row.userId}` ? "Rejecting..." : "Reject" }}
+                      </button>
+                      <span v-if="row.refundStatus !== 'pending'" class="mono small">—</span>
+                    </div>
+                  </td>
+                </tr>
+                <tr v-if="!refundRows.length">
+                  <td colspan="11" class="empty">No refund requests found</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </section>
 
@@ -531,6 +650,21 @@ onMounted(async () => {
   font-weight: 600;
 }
 
+.badge-pending {
+  background: #fff3cd;
+  color: #8a6300;
+}
+
+.badge-ok {
+  background: #d9f7e8;
+  color: #0f6b48;
+}
+
+.badge-bad {
+  background: #ffe3e3;
+  color: #9b1c1c;
+}
+
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.82rem;
@@ -552,6 +686,37 @@ onMounted(async () => {
 .state-block.error {
   border-color: #e8a0a0;
   color: #9b1c1c;
+}
+
+.action-row {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-ok,
+.btn-bad {
+  border-radius: 8px;
+  border: 1px solid #ccebd5;
+  padding: 4px 8px;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.btn-ok {
+  background: #e8f8ef;
+  color: #1b6f4f;
+}
+
+.btn-bad {
+  background: #fff1f1;
+  color: #9b1c1c;
+  border-color: #f2c2c2;
+}
+
+.btn-ok:disabled,
+.btn-bad:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 @media (max-width: 768px) {

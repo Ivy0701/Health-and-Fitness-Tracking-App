@@ -14,17 +14,13 @@ const props = defineProps({
     type: String,
     default: "",
   },
-  saving: {
-    type: Boolean,
-    default: false,
-  },
   error: {
     type: String,
     default: "",
   },
 });
 
-const emit = defineEmits(["update:modelValue", "back", "finish"]);
+const emit = defineEmits(["update:modelValue", "back", "next", "finish"]);
 
 const height = computed({
   get: () => props.modelValue.height,
@@ -35,12 +31,18 @@ const weight = computed({
   get: () => props.modelValue.weight,
   set: (value) => emit("update:modelValue", { ...props.modelValue, weight: Number(value) }),
 });
+
+function handleNext() {
+  emit("next");
+  // Keep compatibility with listeners still expecting "finish" on step two.
+  emit("finish");
+}
 </script>
 
 <template>
   <section class="panel step-card">
     <h2 class="title">Basic Assessment</h2>
-    <p class="muted">Step 2 of 2</p>
+    <p class="muted">Step 2 of 3</p>
 
     <div class="slider-grid">
       <div class="slider-box">
@@ -65,9 +67,7 @@ const weight = computed({
 
     <div class="actions">
       <button type="button" class="ghost" @click="emit('back')">Back</button>
-      <button type="button" :disabled="saving" @click="emit('finish')">
-        {{ saving ? "Saving..." : "Finish" }}
-      </button>
+      <button type="button" @click="handleNext">Next</button>
     </div>
   </section>
 </template>

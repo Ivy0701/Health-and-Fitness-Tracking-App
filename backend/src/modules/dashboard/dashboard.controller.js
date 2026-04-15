@@ -12,6 +12,25 @@ const WorkoutDailyStatus = require("../../models/WorkoutDailyStatus");
 const EnrolledCourse = require("../../models/EnrolledCourse");
 const Favorite = require("../../models/Favorite");
 const Course = require("../../models/Course");
+const REFUND_STATUSES = ["pending", "approved", "rejected"];
+
+function toRefundRow(user) {
+  return {
+    userId: String(user?._id || ""),
+    username: user?.username || "",
+    email: user?.email || "",
+    vipPlan: user?.vipPlan || "none",
+    vipSince: user?.vipSince || null,
+    subscriptionEnds: user?.vipEndAt || null,
+    refundStatus: user?.refundStatus || "none",
+    refundReason: user?.refundReason || "",
+    refundNote: user?.refundNote || "",
+    refundRequestedAt: user?.refundRequestedAt || null,
+    refundReviewedAt: user?.refundReviewedAt || null,
+    refundReviewedBy: user?.refundReviewedBy || "",
+    isVip: Boolean(user?.vip_status || user?.isVip),
+  };
+}
 
 const safeIsoDate = (value) => {
   const date = new Date(value);
@@ -390,6 +409,14 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     .limit(12)
     .select("username email createdAt vip_status isVip vipPlan assessment_completed")
     .lean();
+  const refundUsers = await User.find({ refundStatus: { $in: REFUND_STATUSES } })
+    .sort({ refundRequestedAt: -1, updatedAt: -1 })
+    .select("username email vip_status isVip vipPlan vipSince vipEndAt refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy")
+    .lean();
+  const refundRows = (refundUsers || []).map((row) => toRefundRow(row));
+  const pendingCount = refundRows.filter((x) => x.refundStatus === "pending").length;
+  const approvedCount = refundRows.filter((x) => x.refundStatus === "approved").length;
+  const rejectedCount = refundRows.filter((x) => x.refundStatus === "rejected").length;
 
   res.json({
     users: {
@@ -412,6 +439,13 @@ const getSystemStatus = asyncHandler(async (req, res) => {
       monthlyPlanUsers: vipMonthlyUsers,
       yearlyPlanUsers: vipYearlyUsers,
       vipButPlanNone: vipActivePlanNone,
+      refundPendingRequests: pendingCount,
+    },
+    refundRequests: {
+      pendingCount,
+      approvedCount,
+      rejectedCount,
+      rows: refundRows,
     },
     catalog: {
       totalCourses: totalCoursesInCatalog,
@@ -463,4 +497,78 @@ const getSystemStatus = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { getDashboard, getSystemStatus };
+const listRefundRequests = asyncHandler(async (_req, res) => {
+  const users = await User.find({ refundStatus: { $in: REFUND_STATUSES } })
+    .sort({ refundRequestedAt: -1, updatedAt: -1 })
+    .select("username email vip_status isVip vipPlan vipSince vipEndAt refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy")
+    .lean();
+  const rows = (users || []).map((row) => toRefundRow(row));
+  const pendingCount = rows.filter((x) => x.refundStatus === "pending").length;
+  const approvedCount = rows.filter((x) => x.refundStatus === "approved").length;
+  const rejectedCount = rows.filter((x) => x.refundStatus === "rejected").length;
+  res.json({
+    pendingCount,
+    approvedCount,
+    rejectedCount,
+    rows,
+  });
+});
+
+const approveRefundRequest = asyncHandler(async (req, res) => {
+  const userId = String(req.params.userId || "").trim();
+  if (!userId) return res.status(400).json({ message: "User ID is required." });
+
+  const user = await User.findById(userId).select("refundStatus").lean();
+  if (!user) return res.status(404).json({ message: "User not found." });
+  if (user.refundStatus !== "pending") return res.status(400).json({ message: "Only pending requests can be approved." });
+
+  const reviewer = String(req.body?.reviewedBy || req.user?.email || req.user?.id || "system-status-console").trim();
+  const updated = await User.findByIdAndUpdate(
+    userId,
+    {
+      $set: {
+        isVip: false,
+        vip_status: false,
+        vipSince: null,
+        vipEndAt: null,
+        vipPlan: "none",
+        refundStatus: "approved",
+        refundReviewedAt: new Date(),
+        refundReviewedBy: reviewer,
+      },
+    },
+    { new: true }
+  )
+    .select("username email vip_status isVip vipPlan vipSince vipEndAt refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy")
+    .lean();
+
+  res.json(toRefundRow(updated));
+});
+
+const rejectRefundRequest = asyncHandler(async (req, res) => {
+  const userId = String(req.params.userId || "").trim();
+  if (!userId) return res.status(400).json({ message: "User ID is required." });
+
+  const user = await User.findById(userId).select("refundStatus").lean();
+  if (!user) return res.status(404).json({ message: "User not found." });
+  if (user.refundStatus !== "pending") return res.status(400).json({ message: "Only pending requests can be rejected." });
+
+  const reviewer = String(req.body?.reviewedBy || req.user?.email || req.user?.id || "system-status-console").trim();
+  const updated = await User.findByIdAndUpdate(
+    userId,
+    {
+      $set: {
+        refundStatus: "rejected",
+        refundReviewedAt: new Date(),
+        refundReviewedBy: reviewer,
+      },
+    },
+    { new: true }
+  )
+    .select("username email vip_status isVip vipPlan vipSince vipEndAt refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy")
+    .lean();
+
+  res.json(toRefundRow(updated));
+});
+
+module.exports = { getDashboard, getSystemStatus, listRefundRequests, approveRefundRequest, rejectRefundRequest };

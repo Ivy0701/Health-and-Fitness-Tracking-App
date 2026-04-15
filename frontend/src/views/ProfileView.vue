@@ -229,20 +229,40 @@ const parsedTargetDays = computed(() => {
   return Number.isInteger(d) && d > 0 ? d : null;
 });
 
+function evaluateGoalPace(currentWeight, targetWeight, targetDays) {
+  const weeks = targetDays / 7;
+  if (!Number.isFinite(weeks) || weeks <= 0) {
+    return { ok: false, message: "Please set a more realistic goal." };
+  }
+  if (targetWeight < currentWeight) {
+    const lossPerWeek = (currentWeight - targetWeight) / weeks;
+    if (lossPerWeek > 1.5) {
+      return {
+        ok: false,
+        message: "This weight-loss goal is too aggressive. Please choose a more realistic timeline.",
+      };
+    }
+    return { ok: true, message: "" };
+  }
+  if (targetWeight > currentWeight) {
+    const gainPerWeek = (targetWeight - currentWeight) / weeks;
+    if (gainPerWeek > 1) {
+      return {
+        ok: false,
+        message: "This weight-gain goal is too aggressive. Please choose a more realistic timeline.",
+      };
+    }
+    return { ok: true, message: "" };
+  }
+  return { ok: true, message: "" };
+}
+
 const targetDaysPaceWarning = computed(() => {
   const w = parsedWeightKg.value;
   const t = parsedTargetWeightKg.value;
   const d = parsedTargetDays.value;
   if (w == null || t == null || d == null) return "";
-  const weightDifference = Math.abs(w - t);
-  if (weightDifference === 0) return "";
-  const weeks = d / 7;
-  if (weeks <= 0) return "";
-  const weeklyChange = weightDifference / weeks;
-  if (weeklyChange > 1) {
-    return "This goal is too aggressive. Please choose a more realistic timeline.";
-  }
-  return "";
+  return evaluateGoalPace(w, t, d).message || "";
 });
 
 /**
@@ -393,14 +413,14 @@ function validateProfileForm() {
   }
   if (form.targetWeight !== "" && form.targetWeight != null) {
     const t = Number(form.targetWeight);
-    if (!Number.isFinite(t) || t <= 0) return "Target weight must be positive, or leave empty.";
+    if (!Number.isFinite(t) || t < 30 || t > 200) return "Target weight must be between 30 and 200 kg, or leave empty.";
   }
   if (form.targetDays !== "" && form.targetDays != null) {
     const d = Number(form.targetDays);
-    if (!Number.isInteger(d) || d <= 0) return "Target days must be a positive integer.";
+    if (!Number.isInteger(d) || d < 7 || d > 365) return "Target days must be an integer between 7 and 365.";
   }
   if (targetDaysPaceWarning.value) {
-    return "The target days do not match a healthy weight change pace.";
+    return targetDaysPaceWarning.value;
   }
   if (form.heartRate !== "" && form.heartRate != null) {
     const hr = Number(form.heartRate);
