@@ -17,6 +17,7 @@ const dietSchema = new mongoose.Schema(
     sourceType: { type: String, enum: ["manual", "recommended"], default: "manual" },
     foodId: { type: String, trim: true, default: "" },
     recommendationId: { type: String, trim: true, default: "" },
+    scheduleItemId: { type: mongoose.Schema.Types.ObjectId, ref: "ScheduleItem", default: null, index: true },
     recordedAt: { type: Date, default: null },
   },
   { timestamps: true, versionKey: false }

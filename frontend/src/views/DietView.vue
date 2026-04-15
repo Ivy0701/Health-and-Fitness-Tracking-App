@@ -74,6 +74,19 @@ function formatDateKey(date) {
   return `${y}-${m}-${d}`;
 }
 
+function parseDateKey(key) {
+  const [y, m, d] = String(key || "").split("-").map(Number);
+  const dt = new Date(y, (m || 1) - 1, d || 1);
+  dt.setHours(0, 0, 0, 0);
+  return dt;
+}
+
+function shiftDateKey(key, days) {
+  const dt = parseDateKey(key);
+  dt.setDate(dt.getDate() + days);
+  return formatDateKey(dt);
+}
+
 function toNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -121,11 +134,15 @@ function mealIcon(mealType) {
 
 const todayKey = formatDateKey(new Date());
 const selectedDate = ref(todayKey);
+const DATE_WINDOW_DAYS = 9;
+const DATE_SHIFT_DAYS = 7;
+const dateWindowStart = ref(shiftDateKey(todayKey, -Math.floor(DATE_WINDOW_DAYS / 2)));
 const me = ref(null);
 const loading = ref(false);
 const searchingFoods = ref(false);
 const submitting = ref(false);
 const records = ref([]);
+const isSearchDropdownOpen = ref(false);
 const showFoodOverview = ref(false);
 const foodResults = ref([]);
 const foodLibraryRows = ref([]);
@@ -147,12 +164,69 @@ const appliedPlanId = ref("");
 const recordMode = ref("recommended");
 let searchTimer = null;
 let focusSyncHandler = null;
+let suppressFoodSearchOnce = false;
+let loadRequestSeq = 0;
 
 const overview = ref({
   target: { calories: 2000, suggestedWorkoutBurn: 160, protein: 120, carbs: 220, fat: 65 },
   consumed: { calories: 0, protein: 0, carbs: 0, fat: 0 },
   remaining: { calories: 2000, protein: 120, carbs: 220, fat: 65 },
 });
+
+function normalizeOverviewPayload(data) {
+  const targetCalories = Math.max(0, roundToOne(data?.target?.calories));
+  const targetProtein = Math.max(0, roundToOne(data?.target?.protein));
+  const targetCarbs = Math.max(0, roundToOne(data?.target?.carbs));
+  const targetFat = Math.max(0, roundToOne(data?.target?.fat));
+  const consumedCalories = Math.max(0, roundToOne(data?.consumed?.calories));
+  const consumedProtein = Math.max(0, roundToOne(data?.consumed?.protein));
+  const consumedCarbs = Math.max(0, roundToOne(data?.consumed?.carbs));
+  const consumedFat = Math.max(0, roundToOne(data?.consumed?.fat));
+  return {
+    target: {
+      calories: targetCalories,
+      suggestedWorkoutBurn: Math.max(0, roundToOne(data?.target?.suggestedWorkoutBurn)),
+      protein: targetProtein,
+      carbs: targetCarbs,
+      fat: targetFat,
+    },
+    consumed: {
+      calories: consumedCalories,
+      protein: consumedProtein,
+      carbs: consumedCarbs,
+      fat: consumedFat,
+    },
+    remaining: {
+      calories: roundToOne(targetCalories - consumedCalories),
+      protein: roundToOne(targetProtein - consumedProtein),
+      carbs: roundToOne(targetCarbs - consumedCarbs),
+      fat: roundToOne(targetFat - consumedFat),
+    },
+  };
+}
+
+function deriveZeroedOverviewFromTarget(target) {
+  const targetCalories = Math.max(0, roundToOne(target?.calories));
+  const targetProtein = Math.max(0, roundToOne(target?.protein));
+  const targetCarbs = Math.max(0, roundToOne(target?.carbs));
+  const targetFat = Math.max(0, roundToOne(target?.fat));
+  return {
+    target: {
+      calories: targetCalories,
+      suggestedWorkoutBurn: Math.max(0, roundToOne(target?.suggestedWorkoutBurn)),
+      protein: targetProtein,
+      carbs: targetCarbs,
+      fat: targetFat,
+    },
+    consumed: { calories: 0, protein: 0, carbs: 0, fat: 0 },
+    remaining: {
+      calories: targetCalories,
+      protein: targetProtein,
+      carbs: targetCarbs,
+      fat: targetFat,
+    },
+  };
+}
 
 const form = reactive({
   date: todayKey,
@@ -190,6 +264,22 @@ const defaultDynamicPlan = computed(() => ({
 const selectedPlanFavoriteId = computed(() => (selectedPlan.value ? `diet-plan-${selectedPlan.value.id}` : ""));
 const isSelectedPlanFavorited = computed(() => Boolean(selectedPlanFavoriteId.value && dietFavoriteIds.value.has(selectedPlanFavoriteId.value)));
 const displayedOverviewFoods = computed(() => overviewFoodRows.value.slice(0, 10));
+const dateSliderMonthLabel = computed(() =>
+  new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(parseDateKey(selectedDate.value))
+);
+const dateSliderItems = computed(() =>
+  Array.from({ length: DATE_WINDOW_DAYS }).map((_, idx) => {
+    const key = shiftDateKey(dateWindowStart.value, idx);
+    const dt = parseDateKey(key);
+    return {
+      key,
+      weekday: new Intl.DateTimeFormat("en-US", { weekday: "short" }).format(dt),
+      dayNum: dt.getDate(),
+      isToday: key === todayKey,
+      isSelected: key === selectedDate.value,
+    };
+  })
+);
 
 function appliedPlanStorageKey() {
   const userId = String(me.value?.id || "").trim();
@@ -264,6 +354,16 @@ function macroPct(card) {
   return Math.min(roundToOne((toNumber(card.consumed) / target) * 100), 100);
 }
 
+function moveDateWindow(step) {
+  dateWindowStart.value = shiftDateKey(dateWindowStart.value, step);
+}
+
+function selectDateFromSlider(dateKey) {
+  if (dateKey === selectedDate.value) return;
+  selectedDate.value = dateKey;
+  loadForDate();
+}
+
 function resetManualForm() {
   form.date = selectedDate.value;
   form.mealType = "breakfast";
@@ -293,12 +393,13 @@ function validateManualForm() {
 }
 
 function applyFoodTemplate(item) {
+  suppressFoodSearchOnce = true;
   selectedFoodTemplate.value = item;
   form.foodName = item.name;
   form.foodId = item.id || "";
   foodQuery.value = item.name;
   recalcNutritionByGrams();
-  foodResults.value = [];
+  isSearchDropdownOpen.value = false;
 }
 
 function recalcNutritionByGrams() {
@@ -316,8 +417,14 @@ async function loadPlanFoodLibraryIfNeeded() {
   foodLibraryRows.value = Array.isArray(data) ? data : [];
 }
 
-async function loadRecords() {
-  const { data } = await api.get(`/diets/${me.value.id}`, { params: { date: selectedDate.value } });
+async function loadRecords(dateKey = selectedDate.value) {
+  const { data } = await api.get(`/diets/${me.value.id}`, {
+    params: { date: dateKey, _ts: Date.now() },
+    headers: {
+      "Cache-Control": "no-cache, no-store, max-age=0",
+      Pragma: "no-cache",
+    },
+  });
   records.value = Array.isArray(data) ? data : [];
 }
 
@@ -340,21 +447,81 @@ async function loadDietFavorites() {
   dietFavoriteRowIdByItemId.value = map;
 }
 
-async function loadOverview() {
-  const { data } = await api.get(`/diets/${me.value.id}/overview`, { params: { date: selectedDate.value } });
-  overview.value = data || overview.value;
+async function loadOverview(dateKey = selectedDate.value) {
+  console.debug("[Diet][Overview] request", {
+    userId: me.value?.id || "",
+    selectedDate: selectedDate.value,
+    requestDate: dateKey,
+  });
+  const { data } = await api.get(`/diets/${me.value.id}/overview`, {
+    params: { date: dateKey, _ts: Date.now() },
+    headers: {
+      "Cache-Control": "no-cache, no-store, max-age=0",
+      Pragma: "no-cache",
+    },
+  });
+  console.debug("[Diet][Overview] response", {
+    requestDate: dateKey,
+    responseDate: data?.date || "",
+    raw: data,
+  });
+  overview.value = normalizeOverviewPayload(data || {});
 }
 
 async function loadForDate() {
   if (!me.value?.id) return;
+  const dateKey = selectedDate.value;
+  const requestId = ++loadRequestSeq;
   loading.value = true;
   pageError.value = "";
+  console.debug("[Diet][LoadForDate] start", {
+    requestId,
+    userId: me.value?.id || "",
+    selectedDate: selectedDate.value,
+    requestDate: dateKey,
+  });
   try {
-    await Promise.all([loadRecords(), loadOverview(), loadPlanFoodLibraryIfNeeded()]);
+    const [recordsRes, overviewRes, libraryRes] = await Promise.allSettled([
+      loadRecords(dateKey),
+      loadOverview(dateKey),
+      loadPlanFoodLibraryIfNeeded(),
+    ]);
+    if (requestId !== loadRequestSeq) return;
+    if (recordsRes.status === "rejected") {
+      throw recordsRes.reason;
+    }
+    if (overviewRes.status === "rejected") {
+      throw overviewRes.reason;
+    }
+    if (!records.value.length) {
+      overview.value = deriveZeroedOverviewFromTarget(overview.value.target);
+      console.debug("[Diet][Overview] reconciled to zero from records", {
+        requestId,
+        dateKey,
+        reason: "no diet records for current user/date",
+      });
+    }
+    if (libraryRes.status === "rejected") {
+      console.debug("[Diet][LoadForDate] food library load failed", {
+        requestId,
+        reason: libraryRes.reason?.message || "unknown",
+      });
+    }
+    console.debug("[Diet][LoadForDate] done", {
+      requestId,
+      selectedDate: selectedDate.value,
+      renderedOverview: overview.value,
+    });
   } catch (error) {
+    if (requestId !== loadRequestSeq) return;
     pageError.value = error?.response?.data?.message || "Failed to load diet data.";
+    console.debug("[Diet][LoadForDate] failed", {
+      requestId,
+      selectedDate: selectedDate.value,
+      message: pageError.value,
+    });
   } finally {
-    loading.value = false;
+    if (requestId === loadRequestSeq) loading.value = false;
   }
 }
 
@@ -399,16 +566,25 @@ async function searchFoods() {
   const keyword = foodQuery.value.trim();
   if (!keyword) {
     foodResults.value = [];
+    isSearchDropdownOpen.value = false;
     return;
   }
   searchingFoods.value = true;
   try {
     const { data } = await api.get("/diets/foods/search", { params: { query: keyword, limit: 12 } });
     foodResults.value = Array.isArray(data) ? data : [];
+    isSearchDropdownOpen.value = foodResults.value.length > 0;
   } catch {
     foodResults.value = [];
+    isSearchDropdownOpen.value = false;
   } finally {
     searchingFoods.value = false;
+  }
+}
+
+function handleFoodQueryFocus() {
+  if (foodQuery.value.trim() && foodResults.value.length) {
+    isSearchDropdownOpen.value = true;
   }
 }
 
@@ -785,7 +961,17 @@ async function removeRecord(id) {
 }
 
 watch(foodQuery, () => {
+  if (suppressFoodSearchOnce) {
+    suppressFoodSearchOnce = false;
+    return;
+  }
   if (searchTimer) clearTimeout(searchTimer);
+  if (!foodQuery.value.trim()) {
+    foodResults.value = [];
+    isSearchDropdownOpen.value = false;
+    return;
+  }
+  isSearchDropdownOpen.value = true;
   searchTimer = setTimeout(searchFoods, 280);
 });
 
@@ -805,6 +991,33 @@ watch(
   }
 );
 
+watch(
+  () => selectedDate.value,
+  (next) => {
+    const start = parseDateKey(dateWindowStart.value);
+    const end = parseDateKey(shiftDateKey(dateWindowStart.value, DATE_WINDOW_DAYS - 1));
+    const picked = parseDateKey(next);
+    if (picked < start || picked > end) {
+      dateWindowStart.value = shiftDateKey(next, -Math.floor(DATE_WINDOW_DAYS / 2));
+    }
+  }
+);
+
+watch(
+  () => overview.value,
+  (next) => {
+    console.debug("[Diet][Overview] render values", {
+      selectedDate: selectedDate.value,
+      userId: me.value?.id || "",
+      consumed: next?.consumed || {},
+      remaining: next?.remaining || {},
+      target: next?.target || {},
+      hasLocalAccumulator: false,
+    });
+  },
+  { deep: true }
+);
+
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
   if (focusSyncHandler) window.removeEventListener("focus", focusSyncHandler);
@@ -815,6 +1028,7 @@ onMounted(async () => {
     me.value = await api.get("/users/me").then((r) => r.data);
     restoreAppliedPlanFromStorage();
     form.date = selectedDate.value;
+    dateWindowStart.value = shiftDateKey(selectedDate.value, -Math.floor(DATE_WINDOW_DAYS / 2));
     await Promise.all([loadForDate(), loadDietFavorites()]);
     focusSyncHandler = () => {
       loadDietFavorites();
@@ -829,73 +1043,92 @@ onMounted(async () => {
 <template>
   <AppNavbar />
   <main class="page diet-page">
-    <section class="panel diet-hero">
-      <div class="hero-top">
+    <section class="diet-header">
+      <div class="hero-title-row">
         <h2 class="title">🥗 Diet</h2>
-        <div class="date-toolbar">
-          <label class="custom-date">
-            <span>Custom date</span>
-            <input v-model="selectedDate" type="date" @change="loadForDate" />
-          </label>
-          <button type="button" class="ghost-btn" @click="toggleFoodOverview">Food Nutrition Overview</button>
+        <button type="button" class="ghost-btn overview-toggle-btn" @click="toggleFoodOverview">Food Nutrition Overview</button>
+      </div>
+    </section>
+
+    <section v-if="showFoodOverview" class="food-overview panel">
+      <div class="food-overview-head">
+        <h3>Food Nutrition Overview</h3>
+        <div class="food-overview-search-wrap">
+          <input v-model.trim="overviewFoodQuery" class="food-overview-search" placeholder="Search food name..." @keyup.enter="searchOverviewFoods" />
+          <button type="button" class="tiny-btn" @click="searchOverviewFoods">Search</button>
+        </div>
+      </div>
+      <p v-if="overviewLoading" class="muted">Searching foods...</p>
+      <p v-if="overviewFoodError" class="error">{{ overviewFoodError }}</p>
+
+      <div v-if="!overviewHasSearched && !overviewLoading" class="food-overview-default">
+        <p class="muted">Search a food to view calories and nutrition facts.</p>
+        <p class="muted">Try searching: chicken, rice, apple</p>
+      </div>
+
+      <div v-else-if="!overviewLoading && !overviewFoodError" class="food-overview-results">
+        <p v-if="!displayedOverviewFoods.length" class="food-empty">No foods found. Try another keyword.</p>
+        <p v-else class="muted result-hint">Showing top {{ displayedOverviewFoods.length }} results.</p>
+
+        <div class="food-cards">
+          <article
+            v-for="food in displayedOverviewFoods"
+            :key="String(food.id || food.fdcId || food.name)"
+            class="food-card"
+            :class="{ expanded: expandedOverviewFoodId === String(food.id || food.fdcId || food.name) }"
+            @click="toggleOverviewFoodDetails(food)"
+          >
+            <div class="food-card-main">
+              <div>
+                <h4>{{ food.name }}</h4>
+                <p class="food-kcal">{{ roundToOne(food.caloriesPer100g) }} kcal / 100g</p>
+              </div>
+              <button type="button" class="ghost-btn tiny-btn" @click.stop="toggleOverviewFoodDetails(food)">
+                {{ expandedOverviewFoodId === String(food.id || food.fdcId || food.name) ? "Hide Details" : "View Details" }}
+              </button>
+            </div>
+            <div class="food-macros">
+              <span>P {{ roundToOne(food.proteinPer100g) }}g</span>
+              <span>C {{ roundToOne(food.carbsPer100g) }}g</span>
+              <span>F {{ roundToOne(food.fatPer100g) }}g</span>
+            </div>
+            <div v-if="expandedOverviewFoodId === String(food.id || food.fdcId || food.name)" class="food-details">
+              <p><strong>Calories:</strong> {{ roundToOne(food.caloriesPer100g) }} kcal / 100g</p>
+              <p><strong>Protein:</strong> {{ roundToOne(food.proteinPer100g) }}g</p>
+              <p><strong>Carbs:</strong> {{ roundToOne(food.carbsPer100g) }}g</p>
+              <p><strong>Fat:</strong> {{ roundToOne(food.fatPer100g) }}g</p>
+              <p><strong>Source:</strong> {{ (food.source || "local").toUpperCase() }}</p>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel diet-hero">
+      <div class="date-slider">
+        <div class="date-slider-head">
+          <h3>{{ dateSliderMonthLabel }}</h3>
+          <div class="date-slider-nav">
+            <button type="button" class="date-nav-btn" @click="moveDateWindow(-DATE_SHIFT_DAYS)">&#8249;</button>
+            <button type="button" class="date-nav-btn" @click="moveDateWindow(DATE_SHIFT_DAYS)">&#8250;</button>
+          </div>
+        </div>
+        <div class="date-slider-row">
+          <button
+            v-for="item in dateSliderItems"
+            :key="item.key"
+            type="button"
+            class="date-pill"
+            :class="{ selected: item.isSelected, today: item.isToday }"
+            @click="selectDateFromSlider(item.key)"
+          >
+            <span class="weekday">{{ item.weekday }}</span>
+            <span class="day-num">{{ item.dayNum }}</span>
+          </button>
         </div>
       </div>
 
       <p class="muted">Selected date: {{ selectedDate }}</p>
-
-      <section v-if="showFoodOverview" class="food-overview">
-        <div class="food-overview-head">
-          <h3>Food Nutrition Overview</h3>
-          <div class="food-overview-search-wrap">
-            <input v-model.trim="overviewFoodQuery" class="food-overview-search" placeholder="Search food name..." @keyup.enter="searchOverviewFoods" />
-            <button type="button" class="tiny-btn" @click="searchOverviewFoods">Search</button>
-          </div>
-        </div>
-        <p v-if="overviewLoading" class="muted">Searching foods...</p>
-        <p v-if="overviewFoodError" class="error">{{ overviewFoodError }}</p>
-
-        <div v-if="!overviewHasSearched && !overviewLoading" class="food-overview-default">
-          <p class="muted">Search a food to view calories and nutrition facts.</p>
-          <p class="muted">Try searching: chicken, rice, apple</p>
-        </div>
-
-        <div v-else-if="!overviewLoading && !overviewFoodError" class="food-overview-results">
-          <p v-if="!displayedOverviewFoods.length" class="food-empty">No foods found. Try another keyword.</p>
-          <p v-else class="muted result-hint">Showing top {{ displayedOverviewFoods.length }} results.</p>
-
-          <div class="food-cards">
-            <article
-              v-for="food in displayedOverviewFoods"
-              :key="String(food.id || food.fdcId || food.name)"
-              class="food-card"
-              :class="{ expanded: expandedOverviewFoodId === String(food.id || food.fdcId || food.name) }"
-              @click="toggleOverviewFoodDetails(food)"
-            >
-              <div class="food-card-main">
-                <div>
-                  <h4>{{ food.name }}</h4>
-                  <p class="food-kcal">{{ roundToOne(food.caloriesPer100g) }} kcal / 100g</p>
-                </div>
-                <button type="button" class="ghost-btn tiny-btn" @click.stop="toggleOverviewFoodDetails(food)">
-                  {{ expandedOverviewFoodId === String(food.id || food.fdcId || food.name) ? "Hide Details" : "View Details" }}
-                </button>
-              </div>
-              <div class="food-macros">
-                <span>P {{ roundToOne(food.proteinPer100g) }}g</span>
-                <span>C {{ roundToOne(food.carbsPer100g) }}g</span>
-                <span>F {{ roundToOne(food.fatPer100g) }}g</span>
-              </div>
-              <div v-if="expandedOverviewFoodId === String(food.id || food.fdcId || food.name)" class="food-details">
-                <p><strong>Calories:</strong> {{ roundToOne(food.caloriesPer100g) }} kcal / 100g</p>
-                <p><strong>Protein:</strong> {{ roundToOne(food.proteinPer100g) }}g</p>
-                <p><strong>Carbs:</strong> {{ roundToOne(food.carbsPer100g) }}g</p>
-                <p><strong>Fat:</strong> {{ roundToOne(food.fatPer100g) }}g</p>
-                <p><strong>Source:</strong> {{ (food.source || "local").toUpperCase() }}</p>
-              </div>
-            </article>
-          </div>
-        </div>
-      </section>
 
       <div class="overview-grid">
         <article class="overview-card strong">
@@ -1074,10 +1307,10 @@ onMounted(async () => {
 
           <label>
             Search food library
-            <input v-model="foodQuery" placeholder="Type food name to search" />
+            <input v-model="foodQuery" placeholder="Type food name to search" @focus="handleFoodQueryFocus" />
           </label>
           <p v-if="searchingFoods" class="muted">Searching...</p>
-          <div v-if="foodResults.length" class="search-list">
+          <div v-if="isSearchDropdownOpen && foodResults.length" class="search-list">
             <button v-for="item in foodResults" :key="item.id || item.name" type="button" class="search-item" @click="applyFoodTemplate(item)">
               <strong>{{ item.name }}</strong>
               <span>{{ item.caloriesPer100g }} kcal / 100g</span>
@@ -1138,29 +1371,108 @@ onMounted(async () => {
   gap: 14px;
 }
 
-.diet-hero {
-  background: linear-gradient(140deg, #f7fcfb, #eef7f5);
-}
-
-.hero-top {
+.diet-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
 }
 
-.date-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
+.diet-hero {
+  background: linear-gradient(140deg, #f7fcfb, #eef7f5);
 }
 
-.custom-date {
+.hero-title-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 13px;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.overview-toggle-btn {
+  padding: 7px 12px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.date-slider {
+  border: 1px solid #d7e6e3;
+  border-radius: 14px;
+  background: #fff;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.date-slider-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.date-slider-head h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--c6);
+}
+
+.date-slider-nav {
+  display: flex;
+  gap: 8px;
+}
+
+.date-nav-btn {
+  border: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  color: var(--c6);
+  background: #e9f4f1;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.date-slider-row {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(64px, 1fr));
+  gap: 8px;
+}
+
+.date-pill {
+  border: 1px solid #dcebe6;
+  border-radius: 14px;
+  padding: 8px 6px;
+  background: #f8fcfb;
+  color: var(--c6);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.date-pill:hover {
+  background: #eef8f5;
+}
+
+.date-pill.selected {
+  background: linear-gradient(120deg, #4ab7a1, #2f8a7b);
+  color: #fff;
+  border-color: transparent;
+}
+
+.date-pill.today:not(.selected) {
+  box-shadow: inset 0 0 0 1px #3aa58e;
+}
+
+.weekday {
+  font-size: 12px;
+}
+
+.day-num {
+  font-size: 20px;
+  font-weight: 700;
 }
 
 .food-overview {
@@ -1803,7 +2115,10 @@ onMounted(async () => {
 .search-list {
   border: 1px solid #d6e8e4;
   border-radius: 10px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: 320px;
+  scrollbar-gutter: stable;
 }
 
 .search-item {
@@ -1882,9 +2197,18 @@ onMounted(async () => {
     grid-template-columns: 1fr;
   }
 
-  .hero-top {
+  .date-slider-row {
+    grid-template-columns: repeat(3, minmax(64px, 1fr));
+  }
+
+  .diet-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .hero-title-row {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .mode-head,

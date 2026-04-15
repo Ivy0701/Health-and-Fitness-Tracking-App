@@ -2,6 +2,7 @@ const https = require("https");
 const asyncHandler = require("../../utils/asyncHandler");
 const Diet = require("../../models/Diet");
 const User = require("../../models/User");
+const ScheduleItem = require("../../models/ScheduleItem");
 const FOOD_LIBRARY = require("./foodLibrary");
 
 const ALLOWED_MEAL_TYPES = new Set(["breakfast", "lunch", "dinner", "snack"]);
@@ -41,6 +42,86 @@ function safeDateKey(value) {
   if (isValidDateKey(value)) return value;
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function formatDateKeyFromDate(value) {
+  const dt = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(dt.getTime())) return safeDateKey();
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+}
+
+function formatTimeKeyFromDate(value) {
+  const dt = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(dt.getTime())) return "12:00";
+  return `${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
+}
+
+function formatMealTypeLabel(mealType) {
+  const key = String(mealType || "").toLowerCase();
+  if (key === "breakfast") return "Breakfast";
+  if (key === "lunch") return "Lunch";
+  if (key === "dinner") return "Dinner";
+  return "Snack";
+}
+
+function formatKcal(value) {
+  const n = roundOne(value);
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+function buildDietSubtitle(row) {
+  const mealLabel = formatMealTypeLabel(row?.mealType);
+  const kcal = roundInt(row?.calories);
+  return `${mealLabel} - ${kcal} kcal`;
+}
+
+async function syncDietMealSchedule(userId, dateKey, mealType) {
+  if (!userId || !isValidDateKey(dateKey) || !ALLOWED_MEAL_TYPES.has(String(mealType || "").toLowerCase())) return null;
+  const mealKey = String(mealType).toLowerCase();
+  const mealLabel = formatMealTypeLabel(mealKey);
+  const subtitlePattern = new RegExp(`^${mealLabel}\\s-\\s`);
+  const scheduleFilter = { userId, itemType: "diet", date: dateKey, meal: mealKey };
+  const rows = await Diet.find({ userId, mealType: mealKey, date: dayRangeFromDateKey(dateKey) })
+    .sort({ recordedAt: 1, createdAt: 1 })
+    .lean();
+
+  if (!rows.length) {
+    await ScheduleItem.deleteMany({
+      userId,
+      itemType: "diet",
+      date: dateKey,
+      $or: [{ meal: mealKey }, { subtitle: subtitlePattern }],
+    });
+    return null;
+  }
+
+  const totalCalories = roundOne(rows.reduce((sum, x) => sum + toNumber(x.calories), 0));
+  const firstTimestamp = rows[0].recordedAt || rows[0].createdAt || new Date(`${dateKey}T12:00:00`);
+  const payload = {
+    userId,
+    itemType: "diet",
+    meal: mealKey,
+    totalCalories,
+    timestamp: firstTimestamp,
+    title: "Diet",
+    subtitle: `${mealLabel} - ${formatKcal(totalCalories)} kcal`,
+    date: dateKey,
+    time: formatTimeKeyFromDate(firstTimestamp),
+    note: "",
+    durationMinutes: 15,
+    overlapAccepted: true,
+    courseId: null,
+    linkedDietId: null,
+  };
+  const saved = await ScheduleItem.findOneAndUpdate(scheduleFilter, { $set: payload }, { new: true, upsert: true, setDefaultsOnInsert: true });
+  await ScheduleItem.deleteMany({
+    userId,
+    itemType: "diet",
+    date: dateKey,
+    _id: { $ne: saved._id },
+    $or: [{ meal: mealKey }, { subtitle: subtitlePattern }],
+  });
+  return saved;
 }
 
 function localFoodRows(query, limit) {
@@ -289,6 +370,7 @@ function serializeDiet(row) {
     sourceType: row.sourceType || "manual",
     foodId: row.foodId || "",
     recommendationId: row.recommendationId || "",
+    scheduleItemId: row.scheduleItemId ? String(row.scheduleItemId) : "",
     recordedAt: row.recordedAt || row.createdAt || null,
   };
 }
@@ -379,25 +461,44 @@ const create = asyncHandler(async (req, res) => {
   const { errors, data } = sanitizePayload(req.body);
   if (errors.length) return res.status(400).json({ message: errors[0] });
   const row = await Diet.create({ userId: uid, ...data, recordedAt: data.recordedAt || new Date() });
-  res.status(201).json(row);
+  try {
+    await syncDietMealSchedule(row.userId, formatDateKeyFromDate(row.date), row.mealType);
+  } catch (error) {
+    await row.deleteOne();
+    throw error;
+  }
+  const fresh = await Diet.findById(row._id).lean();
+  res.status(201).json(serializeDiet(fresh || row.toObject()));
 });
 
 const update = asyncHandler(async (req, res) => {
   const row = await Diet.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Diet record not found" });
   if (String(row.userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  const oldDateKey = formatDateKeyFromDate(row.date);
+  const oldMealType = row.mealType;
   const { errors, data } = sanitizePayload(req.body);
   if (errors.length) return res.status(400).json({ message: errors[0] });
   Object.assign(row, data);
   await row.save();
-  res.json(row);
+  const newDateKey = formatDateKeyFromDate(row.date);
+  const newMealType = row.mealType;
+  if (oldDateKey !== newDateKey || oldMealType !== newMealType) {
+    await syncDietMealSchedule(row.userId, oldDateKey, oldMealType);
+  }
+  await syncDietMealSchedule(row.userId, newDateKey, newMealType);
+  const fresh = await Diet.findById(row._id).lean();
+  res.json(serializeDiet(fresh || row.toObject()));
 });
 
 const remove = asyncHandler(async (req, res) => {
   const row = await Diet.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Diet record not found" });
   if (String(row.userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  const dateKey = formatDateKeyFromDate(row.date);
+  const mealType = row.mealType;
   await row.deleteOne();
+  await syncDietMealSchedule(req.user.id, dateKey, mealType);
   res.json({ success: true });
 });
 

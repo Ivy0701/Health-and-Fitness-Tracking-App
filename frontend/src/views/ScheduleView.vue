@@ -75,6 +75,20 @@ function stackBlockStyle(it) {
 
 const ttBodyH = timetableBodyHeightPx();
 
+function clusterStyle(cluster) {
+  const base = clusterEnvelopeStyle(cluster);
+  const allDiet = Array.isArray(cluster) && cluster.length > 0 && cluster.every((it) => it.itemType === "diet");
+  if (!allDiet) return base;
+  const topPct = Number(String(base.top || "0").replace("%", ""));
+  const heightPct = Number(String(base.height || "0").replace("%", ""));
+  const minPct = (74 / ttBodyH) * 100;
+  const safeTop = Number.isFinite(topPct) ? Math.max(0, topPct) : 0;
+  const safeHeight = Number.isFinite(heightPct) ? heightPct : minPct;
+  const nextHeight = Math.max(minPct, safeHeight);
+  const clampedHeight = Math.min(nextHeight, 100 - safeTop);
+  return { top: `${safeTop}%`, height: `${clampedHeight}%` };
+}
+
 function prevWeek() {
   weekStart.value = addDays(weekStart.value, -7);
 }
@@ -204,7 +218,7 @@ onMounted(load);
               :key="clusterKey(cluster)"
               class="cluster"
               :class="{ 'is-stack': cluster.length > 1 }"
-              :style="clusterEnvelopeStyle(cluster)"
+              :style="clusterStyle(cluster)"
             >
               <div
                 v-for="it in sortedCluster(cluster)"
@@ -216,6 +230,7 @@ onMounted(load);
                   multi: cluster.length > 1,
                   marked: it.overlapAccepted,
                   'is-vip-course': it.courseIsPremium,
+                  'is-diet-item': it.itemType === 'diet',
                 }"
                 :style="cluster.length > 1 ? stackBlockStyle(it) : undefined"
               >
@@ -223,6 +238,7 @@ onMounted(load);
                   <span v-if="it.courseIsPremium" class="vip-pill" title="VIP course">VIP</span>
                   {{ it.title }}
                 </span>
+                <span v-if="it.subtitle" class="bsub">{{ it.subtitle }}</span>
                 <span class="bmeta">{{ it.time }} · {{ it.durationMinutes || 60 }} min</span>
                 <button type="button" class="bx" aria-label="Remove" @click.stop="removeItem(it._id)">×</button>
               </div>
@@ -252,6 +268,7 @@ onMounted(load);
       <summary>Full list view</summary>
       <article v-for="s in items" :key="s._id" class="card">
         <h3>{{ s.title }}</h3>
+        <p v-if="s.subtitle">{{ s.subtitle }}</p>
         <p>Date: {{ s.date }} · {{ s.time }} ({{ s.durationMinutes || 60 }} min)</p>
         <p class="muted">{{ s.note || "No note" }}</p>
         <button @click="removeItem(s._id)">Delete</button>
@@ -451,6 +468,16 @@ onMounted(load);
   min-height: 44px;
 }
 
+.block.is-diet-item {
+  padding: 8px 26px 8px 8px;
+  min-height: 72px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 4px;
+}
+
 .block.is-single {
   position: absolute;
   left: 0;
@@ -511,16 +538,50 @@ onMounted(load);
   overflow: hidden;
 }
 
+.block.is-diet-item .btitle {
+  width: 100%;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  display: block;
+}
+
 .bmeta {
   font-size: 10px;
   color: #3d5a62;
   flex-shrink: 0;
 }
 
+.bsub {
+  font-size: 11px;
+  color: #335861;
+  line-height: 1.3;
+}
+
+.block.is-diet-item .bsub {
+  width: 100%;
+  font-size: 12px;
+  color: #4a6570;
+  line-height: 1.3;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.block.is-diet-item .bmeta {
+  width: 100%;
+  font-size: 11px;
+  color: #6a7d86;
+  line-height: 1.3;
+}
+
 .bx {
   position: absolute;
-  top: 4px;
-  right: 4px;
+  top: 6px;
+  right: 6px;
   width: 22px;
   height: 22px;
   padding: 0;
