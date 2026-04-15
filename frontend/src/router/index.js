@@ -17,7 +17,6 @@ import ForumView from "../views/ForumView.vue";
 import VipView from "../views/VipView.vue";
 import PremiumCoursePage from "../views/PremiumCoursePage.vue";
 import CourseLearningView from "../views/CourseLearningView.vue";
-import SystemStatusView from "../views/SystemStatusView.vue";
 import api from "../services/api";
 
 const routes = [
@@ -53,7 +52,6 @@ const routes = [
   { path: "/profile", component: ProfileView, meta: { auth: true } },
   { path: "/favorites", component: FavoritesView, meta: { auth: true } },
   { path: "/forum", component: ForumView, meta: { auth: true } },
-  { path: "/system-status", component: SystemStatusView, meta: { auth: true } },
   { path: "/vip", component: VipView, meta: { auth: true } },
   { path: "/premium-course", component: PremiumCoursePage, meta: { auth: true, vip: true } },
 ];

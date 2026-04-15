@@ -19,7 +19,8 @@ import {
 
 const me = ref(null);
 const items = ref([]);
-const form = reactive({ title: "", date: "", time: "", note: "" });
+const form = reactive({ title: "", date: "", startTime: "", endTime: "", note: "" });
+const formError = ref("");
 
 /** Default week includes 2026-05-01; user can jump to today or prev/next week */
 const TERM_ANCHOR = new Date(2026, 4, 1);
@@ -39,6 +40,12 @@ const weekDays = computed(() => {
     return { weekday: w, iso, label: WEEKDAY_LABELS[w], md: `${m}/${d}` };
   });
 });
+
+const weekIsoSet = computed(() => new Set(weekDays.value.map((d) => d.iso)));
+const weekItems = computed(() => items.value.filter((it) => weekIsoSet.value.has(it.date)));
+const enrolledCourseCount = computed(() => new Set(items.value.filter((it) => it.courseId).map((it) => String(it.courseId))).size);
+const weekVipCount = computed(() => weekItems.value.filter((it) => it.courseIsPremium).length);
+const weekManualCount = computed(() => weekItems.value.filter((it) => !it.courseId).length);
 
 function tickTop(h) {
   const fromStart = h * 60 - TIMETABLE_START_HOUR * 60;
@@ -90,15 +97,31 @@ async function load() {
 }
 
 async function addItem() {
+  formError.value = "";
+  const start = parseTimeToMinutes(form.startTime);
+  const end = parseTimeToMinutes(form.endTime);
+  if (!form.title || !form.date || !form.startTime || !form.endTime) {
+    formError.value = "Please fill title, date, start time and end time.";
+    return;
+  }
+  if (end <= start) {
+    formError.value = "End time must be later than start time.";
+    return;
+  }
+  const durationMinutes = end - start;
   await api.post("/schedules", {
-    ...form,
+    title: form.title,
+    date: form.date,
+    time: form.startTime,
+    note: form.note,
     userId: me.value.id,
-    durationMinutes: 60,
+    durationMinutes,
     overlapAccepted: false,
   });
   form.title = "";
   form.date = "";
-  form.time = "";
+  form.startTime = "";
+  form.endTime = "";
   form.note = "";
   await load();
 }
@@ -122,15 +145,42 @@ onMounted(load);
 <template>
   <AppNavbar />
   <main class="page schedule-page">
-    <h2 class="title">🗓 Schedule</h2>
+    <section class="schedule-hero panel">
+      <h2 class="title">🗓 Schedule Planner</h2>
+      <p class="muted hero-sub">Weekly timeline for course sessions and personal items.</p>
+      <div class="stats-row">
+        <div class="stat-chip">
+          <span>This week items</span>
+          <strong>{{ weekItems.length }}</strong>
+        </div>
+        <div class="stat-chip">
+          <span>Enrolled courses</span>
+          <strong>{{ enrolledCourseCount }}</strong>
+        </div>
+        <div class="stat-chip">
+          <span>VIP sessions this week</span>
+          <strong>{{ weekVipCount }}</strong>
+        </div>
+        <div class="stat-chip">
+          <span>Personal items this week</span>
+          <strong>{{ weekManualCount }}</strong>
+        </div>
+      </div>
+    </section>
 
     <section class="toolbar panel panel-tight">
-      <button type="button" class="nav-btn" @click="prevWeek">← Prev week</button>
-      <button type="button" class="nav-btn ghost" @click="jumpTermStartWeek">Term start (May 2026)</button>
-      <button type="button" class="nav-btn ghost" @click="jumpTodayWeek">This week (today)</button>
-      <button type="button" class="nav-btn" @click="nextWeek">Next week →</button>
-      <button type="button" class="nav-btn danger" @click="clearAllItems">Clear all courses</button>
-      <span class="toolbar-hint">{{ TIMETABLE_START_HOUR }}:00 – {{ TIMETABLE_END_HOUR }}:00 · overlaps stack in one column</span>
+      <div class="toolbar-group">
+        <button type="button" class="nav-btn" @click="prevWeek">← Prev week</button>
+        <button type="button" class="nav-btn ghost" @click="jumpTermStartWeek">Term start (May 2026)</button>
+        <button type="button" class="nav-btn ghost" @click="jumpTodayWeek">This week (today)</button>
+        <button type="button" class="nav-btn" @click="nextWeek">Next week →</button>
+      </div>
+      <div class="toolbar-group">
+        <button type="button" class="nav-btn danger" @click="clearAllItems">Clear all items</button>
+      </div>
+      <span class="toolbar-hint">
+        Time range {{ TIMETABLE_START_HOUR }}:00 – {{ TIMETABLE_END_HOUR }}:00 · overlap sessions stack in one column
+      </span>
     </section>
 
     <section class="timetable-card panel">
@@ -183,20 +233,23 @@ onMounted(load);
     </section>
 
     <section class="panel add-panel">
-      <h3>Add your own item</h3>
+      <h3>Add personal schedule item</h3>
+      <p class="muted">Use this form for non-course tasks and reminders.</p>
       <form novalidate @submit.prevent="addItem">
         <input v-model="form.title" placeholder="Title" />
-        <div class="grid grid-2">
+        <div class="grid grid-3">
           <input v-model="form.date" type="date" />
-          <input v-model="form.time" type="time" />
+          <input v-model="form.startTime" type="time" placeholder="Start time" />
+          <input v-model="form.endTime" type="time" placeholder="End time" />
         </div>
         <input v-model="form.note" placeholder="Note (optional)" />
+        <p v-if="formError" class="error">{{ formError }}</p>
         <button type="submit">Save Schedule</button>
       </form>
     </section>
 
     <details class="list-details">
-      <summary>Full list (same entries)</summary>
+      <summary>Full list view</summary>
       <article v-for="s in items" :key="s._id" class="card">
         <h3>{{ s.title }}</h3>
         <p>Date: {{ s.date }} · {{ s.time }} ({{ s.durationMinutes || 60 }} min)</p>
@@ -212,12 +265,54 @@ onMounted(load);
   max-width: 1200px;
 }
 
+.schedule-hero {
+  margin-bottom: 14px;
+  background: linear-gradient(135deg, #f8fcfb 0%, #eef6f5 45%, #e5f2f0 100%);
+  border: 1px solid #cfe4df;
+}
+
+.hero-sub {
+  margin-top: -4px;
+  margin-bottom: 12px;
+}
+
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.stat-chip {
+  border: 1px solid #d5e7e3;
+  border-radius: 12px;
+  background: #fff;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.stat-chip span {
+  font-size: 12px;
+  color: #4b6672;
+}
+
+.stat-chip strong {
+  font-size: 20px;
+  color: #2f4858;
+}
+
 .panel-tight {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 12px 16px;
+}
+
+.toolbar-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .nav-btn {
@@ -243,11 +338,14 @@ onMounted(load);
   font-size: 12px;
   color: #486170;
   margin-left: auto;
+  padding-left: 6px;
 }
 
 .timetable-card {
   margin-top: 14px;
   overflow-x: auto;
+  border: 1px solid #d1e3df;
+  background: #fcfffe;
 }
 
 .tt-grid {
@@ -269,7 +367,7 @@ onMounted(load);
   padding: 10px 4px;
   border-bottom: 1px solid #d7e7e6;
   border-left: 1px solid #eef5f4;
-  background: linear-gradient(180deg, #f8fcfb, #eef6f5);
+  background: linear-gradient(180deg, #f9fdfc, #edf6f4);
 }
 
 .d-lab {
@@ -312,10 +410,10 @@ onMounted(load);
   /* 60px per hour = 1px per minute, aligned with the left time rail */
   background-image: repeating-linear-gradient(
     to bottom,
-    #f6faf9 0,
-    #f6faf9 59px,
-    #d5e3e0 59px,
-    #d5e3e0 60px
+    #f8fcfb 0,
+    #f8fcfb 59px,
+    #d8e6e2 59px,
+    #d8e6e2 60px
   );
 }
 
@@ -347,7 +445,7 @@ onMounted(load);
   flex-direction: column;
   justify-content: flex-start;
   gap: 4px;
-  box-shadow: 0 2px 8px rgba(47, 72, 88, 0.12);
+  box-shadow: 0 3px 10px rgba(47, 72, 88, 0.12);
   overflow-x: hidden;
   overflow-y: auto;
   min-height: 44px;
@@ -443,15 +541,31 @@ onMounted(load);
 
 .add-panel {
   margin-top: 20px;
+  border: 1px solid #d1e3df;
 }
 
 .list-details {
   margin-top: 20px;
   font-size: 14px;
   color: var(--c5);
+  border: 1px solid #d1e3df;
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: #fdfefe;
 }
 
 .list-details .card {
   margin-top: 10px;
+}
+
+.grid-3 {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+@media (max-width: 900px) {
+  .toolbar-hint {
+    margin-left: 0;
+    width: 100%;
+  }
 }
 </style>

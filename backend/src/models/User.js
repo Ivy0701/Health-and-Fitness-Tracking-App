@@ -47,6 +47,7 @@ const userSchema = new mongoose.Schema(
     isVip: { type: Boolean, default: false },
     vip_status: { type: Boolean, default: false },
     vipSince: { type: Date },
+    vipEndAt: { type: Date, default: null },
     vipPlan: { type: String, enum: ["none", "monthly", "yearly"], default: "none" },
     bodyFat: { type: Number, min: 0, max: 80 },
     bloodPressure: { type: String, trim: true, maxlength: 20 },

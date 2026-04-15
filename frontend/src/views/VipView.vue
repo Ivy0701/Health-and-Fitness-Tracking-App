@@ -56,6 +56,16 @@ async function load() {
 
 async function upgrade(plan) {
   if (!me.value?.id) return;
+  if (isVipActive.value) {
+    const currentPlan = String(status.value?.vipPlan || "none");
+    const targetPlan = String(plan || "monthly");
+    const message =
+      currentPlan === targetPlan
+        ? `Your VIP is already active on the ${currentPlan} plan. Do you want to extend your membership?`
+        : `Your VIP is already active on the ${currentPlan} plan. Do you want to switch to the ${targetPlan} plan and renew/extend your membership?`;
+    const ok = window.confirm(message);
+    if (!ok) return;
+  }
   status.value = await api.post("/vip/upgrade", { userId: me.value.id, vipPlan: plan }).then((r) => r.data);
   auth.setVipStatus(status.value?.vip_status ?? status.value?.isVip);
 }
@@ -84,7 +94,6 @@ onMounted(load);
         <p>Current Plan: <strong>{{ vipPlanLabel }}</strong></p>
         <p>VIP Since: <strong>{{ vipSinceLabel }}</strong></p>
         <p>Subscription Ends: <strong>{{ vipEndLabel }}</strong></p>
-        <p v-if="daysLeft != null" class="muted">Days Remaining: <strong>{{ daysLeft }}</strong></p>
         <p class="hint">{{ statusHint }}</p>
       </template>
 
@@ -136,6 +145,31 @@ onMounted(load);
 
 <style scoped>
 .plans { margin-top: 14px; }
+.plans.grid {
+  align-items: stretch;
+}
+.plans .card + .card {
+  margin-top: 0;
+}
+.plans .card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.plans .card h3 {
+  margin-top: 0;
+}
+.plans .card p.muted {
+  min-height: 44px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.plans .card button {
+  margin-top: auto;
+  align-self: flex-start;
+}
 .recommended {
   border: 1px solid #9ad8d3;
   box-shadow: 0 8px 18px rgba(49, 104, 121, 0.12);

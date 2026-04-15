@@ -10,6 +10,8 @@ const CourseDailyProgress = require("../../models/CourseDailyProgress");
 const WorkoutPlan = require("../../models/WorkoutPlan");
 const WorkoutDailyStatus = require("../../models/WorkoutDailyStatus");
 const EnrolledCourse = require("../../models/EnrolledCourse");
+const Favorite = require("../../models/Favorite");
+const Course = require("../../models/Course");
 
 const safeIsoDate = (value) => {
   const date = new Date(value);
@@ -193,13 +195,19 @@ const getSystemStatus = asyncHandler(async (req, res) => {
   const dayStart = new Date(now);
   dayStart.setHours(0, 0, 0, 0);
   const todayDateKey = safeIsoDate(now);
+  const weekAgo = new Date(now);
+  weekAgo.setDate(weekAgo.getDate() - 7);
+  const monthAgo = new Date(now);
+  monthAgo.setDate(monthAgo.getDate() - 30);
+
+  const vipMatch = { $or: [{ vip_status: true }, { isVip: true }] };
 
   const [
     totalWorkoutPlans,
     completedWorkoutTasks,
     totalDiets,
     totalSchedules,
-    courseEnrollments,
+    courseEnrollmentsActiveCompleted,
     completedCourseDays,
     postsTotal,
     postsToday,
@@ -212,6 +220,29 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     latestCourseProgress,
     latestPost,
     latestCommentRows,
+    totalRegisteredUsers,
+    usersAssessmentCompleted,
+    usersRegisteredLast7Days,
+    usersRegisteredLast30Days,
+    totalVipUsers,
+    vipMonthlyUsers,
+    vipYearlyUsers,
+    vipActivePlanNone,
+    totalCoursesInCatalog,
+    premiumCoursesInCatalog,
+    enrollmentsByStatusRows,
+    topCoursesByEnrollment,
+    totalFavorites,
+    distinctForumAuthors,
+    distinctWorkoutUsers,
+    distinctDietUsers,
+    distinctScheduleUsers,
+    distinctWorkoutPlanUsers,
+    distinctWorkoutDailyUsers,
+    distinctCourseEnrolledUsers,
+    distinctFavoriteUsers,
+    distinctHealthRecordUsers,
+    totalEnrollmentsAllStatuses,
   ] = await Promise.all([
     WorkoutPlan.countDocuments(),
     WorkoutDailyStatus.countDocuments({ is_completed: true }),
@@ -251,6 +282,54 @@ const getSystemStatus = asyncHandler(async (req, res) => {
       { $limit: 1 },
       { $project: { _id: 0, createdAt: "$comments.createdAt" } },
     ]),
+    User.countDocuments(),
+    User.countDocuments({ assessment_completed: true }),
+    User.countDocuments({ createdAt: { $gte: weekAgo } }),
+    User.countDocuments({ createdAt: { $gte: monthAgo } }),
+    User.countDocuments(vipMatch),
+    User.countDocuments({ ...vipMatch, vipPlan: "monthly" }),
+    User.countDocuments({ ...vipMatch, vipPlan: "yearly" }),
+    User.countDocuments({ ...vipMatch, vipPlan: "none" }),
+    Course.countDocuments(),
+    Course.countDocuments({ isPremium: true }),
+    EnrolledCourse.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
+    EnrolledCourse.aggregate([
+      { $group: { _id: "$course_id", enrollments: { $sum: 1 } } },
+      { $sort: { enrollments: -1 } },
+      { $limit: 10 },
+      {
+        $lookup: {
+          from: Course.collection.name,
+          localField: "_id",
+          foreignField: "_id",
+          as: "course",
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          courseId: "$_id",
+          enrollments: 1,
+          title: {
+            $ifNull: [{ $arrayElemAt: ["$course.title", 0] }, ""],
+          },
+          isPremium: {
+            $ifNull: [{ $arrayElemAt: ["$course.isPremium", 0] }, false],
+          },
+        },
+      },
+    ]),
+    Favorite.countDocuments(),
+    ForumPost.distinct("userId"),
+    Workout.distinct("userId"),
+    Diet.distinct("userId"),
+    ScheduleItem.distinct("userId"),
+    WorkoutPlan.distinct("user_id"),
+    WorkoutDailyStatus.distinct("user_id"),
+    EnrolledCourse.distinct("user_id", { status: { $in: ["active", "completed"] } }),
+    Favorite.distinct("userId"),
+    HealthRecord.distinct("userId"),
+    EnrolledCourse.countDocuments(),
   ]);
 
   const likesTotal = likesTotalRows[0]?.total || 0;
@@ -288,14 +367,82 @@ const getSystemStatus = asyncHandler(async (req, res) => {
   };
   const dbStatus = dbStateMap[mongoose.connection.readyState] || "unknown";
 
+  const enrollmentsByStatus = { active: 0, completed: 0, cancelled: 0 };
+  for (const row of enrollmentsByStatusRows || []) {
+    const key = row._id;
+    if (key && Object.prototype.hasOwnProperty.call(enrollmentsByStatus, key)) {
+      enrollmentsByStatus[key] = row.count;
+    }
+  }
+
+  const topCourses = (topCoursesByEnrollment || []).map((row) => ({
+    courseId: row.courseId ? String(row.courseId) : "",
+    title: row.title || "(Course missing or deleted)",
+    enrollments: row.enrollments || 0,
+    isPremium: Boolean(row.isPremium),
+  }));
+
+  const avgEnrollmentsPerCourse =
+    totalCoursesInCatalog > 0 ? Math.round((totalEnrollmentsAllStatuses / totalCoursesInCatalog) * 100) / 100 : 0;
+
+  const registeredUsersPreview = await User.find()
+    .sort({ createdAt: -1 })
+    .limit(12)
+    .select("username email createdAt vip_status isVip vipPlan assessment_completed")
+    .lean();
+
   res.json({
+    users: {
+      totalRegistered: totalRegisteredUsers,
+      assessmentCompleted: usersAssessmentCompleted,
+      registeredLast7Days: usersRegisteredLast7Days,
+      registeredLast30Days: usersRegisteredLast30Days,
+      preview12: (registeredUsersPreview || []).map((u) => ({
+        id: String(u._id),
+        username: u.username || "",
+        email: u.email || "",
+        createdAt: u.createdAt ? new Date(u.createdAt).toISOString() : null,
+        assessmentCompleted: Boolean(u.assessment_completed),
+        isVip: Boolean(u.vip_status || u.isVip),
+        vipPlan: u.vipPlan || "none",
+      })),
+    },
+    vip: {
+      totalVipUsers,
+      monthlyPlanUsers: vipMonthlyUsers,
+      yearlyPlanUsers: vipYearlyUsers,
+      vipButPlanNone: vipActivePlanNone,
+    },
+    catalog: {
+      totalCourses: totalCoursesInCatalog,
+      premiumCourses: premiumCoursesInCatalog,
+    },
+    courseEnrollments: {
+      activeOrCompletedRecords: courseEnrollmentsActiveCompleted,
+      allStatusRecords: totalEnrollmentsAllStatuses,
+      byStatus: enrollmentsByStatus,
+      avgEnrollmentsPerCourse,
+      topByEnrollments: topCourses,
+    },
+    featureAdoption: {
+      distinctUsersWithWorkoutLog: distinctWorkoutUsers.length,
+      distinctUsersWithDiet: distinctDietUsers.length,
+      distinctUsersWithSchedule: distinctScheduleUsers.length,
+      distinctUsersWithWorkoutPlan: distinctWorkoutPlanUsers.length,
+      distinctUsersWithWorkoutDaily: distinctWorkoutDailyUsers.length,
+      distinctUsersWithCourseEnrollment: distinctCourseEnrolledUsers.length,
+      distinctUsersWithForumPost: distinctForumAuthors.length,
+      distinctUsersWithFavorite: distinctFavoriteUsers.length,
+      distinctUsersWithHealthRecord: distinctHealthRecordUsers.length,
+    },
     featureUsage: {
       workoutPlansCreated: totalWorkoutPlans,
       workoutTasksCompleted: completedWorkoutTasks,
       dietEntries: totalDiets,
       scheduleItems: totalSchedules,
-      courseEnrollments,
+      courseEnrollments: courseEnrollmentsActiveCompleted,
       completedCourseDays,
+      favoritesSaved: totalFavorites,
     },
     community: {
       postsToday,
@@ -303,6 +450,7 @@ const getSystemStatus = asyncHandler(async (req, res) => {
       likesTotal,
       commentsTotal,
       totalInteractions: communityInteractions,
+      distinctAuthors: distinctForumAuthors.length,
     },
     systemRuntime: {
       apiStatus: "online",

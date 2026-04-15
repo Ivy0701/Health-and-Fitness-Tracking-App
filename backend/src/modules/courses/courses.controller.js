@@ -77,15 +77,23 @@ const enroll = asyncHandler(async (req, res) => {
   const today = toDateKey(new Date());
   const existing = await EnrolledCourse.findOne({ user_id: req.user.id, course_id });
   if (existing) {
-    if (existing.status === "cancelled") {
+    if (existing.status === "active") {
+      return res.status(409).json({
+        message: "You are already enrolled in this course.",
+        status: existing.status,
+      });
+    }
+
+    // Allow re-enroll when previous enrollment is cancelled or completed.
+    if (existing.status === "completed" || existing.status === "cancelled") {
       existing.status = "active";
       existing.is_completed = false;
       existing.start_date = today;
       existing.current_day = 1;
       await existing.save();
+      await CourseDailyProgress.deleteMany({ user_id: req.user.id, enrolled_course_id: existing._id });
       return res.json(existing);
     }
-    return res.json(existing);
   }
 
   const row = await EnrolledCourse.create({
@@ -128,6 +136,20 @@ const updateProgress = asyncHandler(async (req, res) => {
     { $set: { is_completed, completed_at: is_completed ? new Date() : null } },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
+
+  const enrolledWithCourse = await EnrolledCourse.findById(enrolled._id).populate("course_id", "duration_days");
+  const targetDays = Number(enrolledWithCourse?.course_id?.duration_days || 7);
+  const doneCount = await CourseDailyProgress.countDocuments({ enrolled_course_id: enrolled._id, is_completed: true });
+  const finished = doneCount >= targetDays;
+
+  await EnrolledCourse.findByIdAndUpdate(enrolled._id, {
+    $set: {
+      current_day: Math.min(targetDays, doneCount + 1),
+      is_completed: finished,
+      status: finished ? "completed" : "active",
+    },
+  });
+
   res.json(row);
 });
 

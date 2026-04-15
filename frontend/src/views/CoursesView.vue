@@ -69,6 +69,17 @@ function openCourseDetail(course) {
   detailCourse.value = course;
 }
 
+function openCourseDetailFromBoard(course) {
+  if (course?.isPremium && !auth.vipStatus) {
+    vipLockedModal.value = {
+      open: true,
+      courseTitle: course.title,
+    };
+    return;
+  }
+  openCourseDetail(course);
+}
+
 function closeCourseDetail() {
   detailCourse.value = null;
 }
@@ -84,7 +95,12 @@ function removeSlotRow(i) {
 
 async function refreshEnrolled() {
   const rows = await fetchEnrolledCourses();
-  enrolledCourseIds.value = new Set(rows.map((item) => String(item.course_id?._id || item.course_id)));
+  const ids = (rows || [])
+    .filter((item) => item?.status === "active")
+    .map((item) => item?.course_id?._id || item?.course_id)
+    .filter((id) => id != null && String(id) !== "null" && String(id) !== "undefined")
+    .map((id) => String(id));
+  enrolledCourseIds.value = new Set(ids);
 }
 
 async function loadCourses() {
@@ -119,6 +135,36 @@ async function dropCourseEnrollment(course) {
   }
 }
 
+async function cancelAllEnrollments() {
+  const ids = Array.from(enrolledCourseIds.value || []);
+  if (!ids.length) {
+    window.alert("You do not have any enrolled courses.");
+    return;
+  }
+  const ok = window.confirm(
+    `Cancel all enrolled courses (${ids.length}) and remove all related sessions from your schedule?`
+  );
+  if (!ok) return;
+
+  state.value.error = "";
+  try {
+    await Promise.all(
+      ids.map(async (courseId) => {
+        await dropCourseEnrollmentApi(courseId);
+        await api.delete(`/schedules/course/${courseId}`);
+      })
+    );
+    enrolledCourseIds.value = new Set();
+    if (detailCourse.value && ids.includes(String(detailCourse.value._id || ""))) {
+      detailCourse.value = null;
+    }
+    await refreshEnrolled();
+    window.alert("All enrolled courses have been cancelled and removed from your schedule.");
+  } catch (e) {
+    state.value.error = e?.response?.data?.message || "Failed to cancel all enrolled courses.";
+  }
+}
+
 async function createCourse() {
   state.value.error = "";
   try {
@@ -149,6 +195,13 @@ async function createCourse() {
 
 async function enrollCourse(course) {
   state.value.error = "";
+  if (course?.isPremium && !auth.vipStatus) {
+    vipLockedModal.value = {
+      open: true,
+      courseTitle: course.title,
+    };
+    return;
+  }
   const courseId = String(course?._id || "");
   if (!courseId) {
     state.value.error = "Invalid course.";
@@ -168,12 +221,13 @@ async function enrollCourse(course) {
     if (!endISO) throw new Error("Invalid term start or duration.");
     const me = await api.get("/users/me").then((r) => r.data);
     const { data: existing } = await api.get(`/schedules/${me.id}`);
+    const existingCourseSchedules = (existing || []).filter((item) => item?.courseId);
     const planned = expandCourseToPlannedItemsInRange(course, enrollStartDate.value, endISO);
     if (!planned.length) {
       state.value.error = "No class dates fall in this date range (check weekdays vs term).";
       return;
     }
-    const pairs = findPlannedConflicts(planned, existing);
+    const pairs = findPlannedConflicts(planned, existingCourseSchedules);
     if (pairs.length) {
       const goOn = window.confirm(
         `This course has ${pairs.length} time conflict(s) with your current schedule. Continue anyway and stack overlaps?`
@@ -189,7 +243,12 @@ async function enrollCourse(course) {
     }
     await refreshEnrolled();
   } catch (e) {
-    state.value.error = e?.response?.data?.message || "Failed to enroll this course.";
+    const statusCode = e?.response?.status;
+    const msg = e?.response?.data?.message || "Failed to enroll this course.";
+    state.value.error = msg;
+    if (statusCode === 409) {
+      window.alert(msg);
+    }
   }
 }
 
@@ -237,13 +296,14 @@ async function openAddToSchedule(course) {
 
   const me = await api.get("/users/me").then((r) => r.data);
   const { data: existing } = await api.get(`/schedules/${me.id}`);
+  const existingCourseSchedules = (existing || []).filter((item) => item?.courseId);
   const planned = expandCourseToPlannedItemsInRange(course, enrollStartDate.value, endISO);
   if (!planned.length) {
     state.value.error = "No class dates fall in this date range (check weekdays vs term).";
     return;
   }
 
-  const pairs = findPlannedConflicts(planned, existing);
+  const pairs = findPlannedConflicts(planned, existingCourseSchedules);
   const periodLabel = `${enrollStartDate.value} → ${endISO} · ${planned.length} session(s)`;
 
   conflictModal.value = {
@@ -372,49 +432,6 @@ onMounted(async () => {
   <main class="page">
     <h2 class="title">📚 Courses</h2>
 
-    <section class="panel">
-      <h3>Create Course</h3>
-      <p class="hint">
-        Set weekly class times. Enrollment adds <strong>every session</strong> from the term start through the last day of the
-        chosen month span (e.g. May → Oct for 6 months).
-      </p>
-      <form novalidate @submit.prevent="createCourse">
-        <input v-model="form.title" placeholder="Course title" />
-        <input v-model="form.description" placeholder="Description" />
-        <div class="grid grid-2">
-          <select v-model="form.difficulty">
-            <option value="beginner">Beginner (1🌟)</option>
-            <option value="easy">Easy (2🌟)</option>
-            <option value="intermediate">Intermediate (3🌟)</option>
-            <option value="hard">Hard (4🌟)</option>
-            <option value="expert">Expert (5🌟)</option>
-          </select>
-          <input v-model.number="form.duration" type="number" min="1" placeholder="Duration (minutes)" />
-        </div>
-        <input v-model.number="form.durationDays" type="number" min="1" placeholder="Program duration (days)" />
-        <input v-model="form.category" placeholder="Category" />
-
-        <div class="slots-panel">
-          <div class="slots-head">
-            <span>Weekly class times</span>
-            <button type="button" class="btn-small" @click="addSlotRow">+ Add time</button>
-          </div>
-          <div v-for="(row, i) in form.weeklySlots" :key="i" class="slot-row grid grid-2">
-            <select v-model.number="row.weekday">
-              <option v-for="(lab, w) in WEEKDAY_LABELS" :key="w" :value="w">{{ lab }}</option>
-            </select>
-            <div class="time-row">
-              <input v-model="row.startTime" type="time" />
-              <button v-if="form.weeklySlots.length > 1" type="button" class="btn-remove" @click="removeSlotRow(i)">✕</button>
-            </div>
-          </div>
-        </div>
-
-        <button type="submit">Add Course</button>
-      </form>
-      <p v-if="state.error" class="error">{{ state.error }}</p>
-    </section>
-
     <section class="panel enroll-panel">
       <h3>Enrollment period (all courses)</h3>
       <p class="hint">Default term begins <strong>2026-05-01</strong>. Adjust if needed.</p>
@@ -434,6 +451,17 @@ onMounted(async () => {
         </div>
       </div>
       <p class="preview-line">Calendar span: <strong>{{ enrollPreview }}</strong></p>
+      <div class="enroll-actions">
+        <button
+          type="button"
+          class="btn-danger"
+          :disabled="!enrolledCourseIds.size"
+          @click="cancelAllEnrollments"
+        >
+          Cancel all enrolled courses
+        </button>
+        <span class="enroll-count">Currently enrolled: {{ enrolledCourseIds.size }}</span>
+      </div>
     </section>
 
     <section class="panel catalog-panel">
@@ -449,7 +477,15 @@ onMounted(async () => {
           </div>
           <ul class="course-chip-list">
             <li v-for="c in vipByStars[stars]" :key="c._id">
-              <button type="button" class="course-chip" @click="openCourseDetail(c)">{{ c.title }}</button>
+              <button
+                type="button"
+                class="course-chip"
+                :class="{ locked: c.isPremium && !auth.vipStatus }"
+                :disabled="c.isPremium && !auth.vipStatus"
+                @click="openCourseDetailFromBoard(c)"
+              >
+                {{ c.title }}
+              </button>
             </li>
             <li v-if="!vipByStars[stars].length" class="col-empty">—</li>
           </ul>
@@ -468,7 +504,7 @@ onMounted(async () => {
           </div>
           <ul class="course-chip-list">
             <li v-for="c in freeByStars[stars]" :key="c._id">
-              <button type="button" class="course-chip" @click="openCourseDetail(c)">{{ c.title }}</button>
+              <button type="button" class="course-chip" @click="openCourseDetailFromBoard(c)">{{ c.title }}</button>
             </li>
             <li v-if="!freeByStars[stars].length" class="col-empty">—</li>
           </ul>
@@ -534,6 +570,84 @@ onMounted(async () => {
         </div>
       </div>
     </Teleport>
+
+    <section class="panel">
+      <h3>Create Course</h3>
+      <p class="hint">
+        Set weekly class times. Enrollment adds <strong>every session</strong> from the term start through the last day of the
+        chosen month span (e.g. May → Oct for 6 months).
+      </p>
+      <form novalidate @submit.prevent="createCourse">
+        <div class="field-group">
+          <label class="lbl" for="course-title">Course title</label>
+          <input id="course-title" v-model="form.title" placeholder="e.g. Full Body Beginner Program" />
+          <p class="form-help">Use a short, clear name that users can recognize quickly.</p>
+        </div>
+
+        <div class="field-group">
+          <label class="lbl" for="course-description">Description</label>
+          <input id="course-description" v-model="form.description" placeholder="What users will learn and who this course is for" />
+          <p class="form-help">Write one sentence on the goal, target level, and expected outcome.</p>
+        </div>
+
+        <div class="grid grid-2">
+          <div class="field-group">
+            <label class="lbl" for="course-difficulty">Difficulty</label>
+            <select id="course-difficulty" v-model="form.difficulty">
+              <option value="beginner">Beginner (1🌟)</option>
+              <option value="easy">Easy (2🌟)</option>
+              <option value="intermediate">Intermediate (3🌟)</option>
+              <option value="hard">Hard (4🌟)</option>
+              <option value="expert">Expert (5🌟)</option>
+            </select>
+            <p class="form-help">Choose how hard this course should feel for a normal user.</p>
+          </div>
+          <div class="field-group">
+            <label class="lbl" for="course-duration">Session duration (minutes)</label>
+            <input id="course-duration" v-model.number="form.duration" type="number" min="1" placeholder="e.g. 30" />
+            <p class="form-help">Length of one class session.</p>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label class="lbl" for="course-duration-days">Program duration (days)</label>
+          <input id="course-duration-days" v-model.number="form.durationDays" type="number" min="1" placeholder="e.g. 30" />
+          <p class="form-help">Total number of days for this program.</p>
+        </div>
+
+        <div class="field-group">
+          <label class="lbl" for="course-category">Category</label>
+          <input id="course-category" v-model="form.category" placeholder="e.g. fitness, strength, cardio" />
+          <p class="form-help">Use a simple tag to group similar courses.</p>
+        </div>
+
+        <div class="slots-panel">
+          <div class="slots-head">
+            <span>Weekly class times</span>
+            <button type="button" class="btn-small" @click="addSlotRow">+ Add time</button>
+          </div>
+          <p class="form-help">Add every weekly session time users should attend (weekday + start time).</p>
+          <div v-for="(row, i) in form.weeklySlots" :key="i" class="slot-row grid grid-2">
+            <div class="field-group compact">
+              <label class="lbl">Weekday</label>
+              <select v-model.number="row.weekday">
+                <option v-for="(lab, w) in WEEKDAY_LABELS" :key="w" :value="w">{{ lab }}</option>
+              </select>
+            </div>
+            <div class="time-row">
+              <div class="field-group compact grow">
+                <label class="lbl">Start time</label>
+                <input v-model="row.startTime" type="time" />
+              </div>
+              <button v-if="form.weeklySlots.length > 1" type="button" class="btn-remove" @click="removeSlotRow(i)">✕</button>
+            </div>
+          </div>
+        </div>
+
+        <button type="submit">Add Course</button>
+      </form>
+      <p v-if="state.error" class="error">{{ state.error }}</p>
+    </section>
   </main>
 </template>
 
@@ -630,6 +744,13 @@ onMounted(async () => {
   background: #f0fdfa;
   border-color: var(--c3);
 }
+.course-chip.locked,
+.course-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+  background: #f8f8fb;
+  border-color: #e5e7eb;
+}
 .star-board-vip .course-chip:hover {
   background: #faf5ff;
   border-color: #a78bfa;
@@ -679,6 +800,22 @@ onMounted(async () => {
   font-size: 13px;
   color: #486170;
 }
+.field-group {
+  display: grid;
+  gap: 4px;
+}
+.field-group.compact {
+  gap: 2px;
+}
+.field-group.grow {
+  flex: 1;
+}
+.form-help {
+  margin: 0;
+  font-size: 12px;
+  color: #6b7c8a;
+  line-height: 1.35;
+}
 .slots-panel {
   border: 1px solid #d7e7e6;
   border-radius: 12px;
@@ -709,7 +846,7 @@ onMounted(async () => {
 .time-row {
   display: flex;
   gap: 8px;
-  align-items: center;
+  align-items: flex-end;
 }
 .btn-remove {
   border: none;
@@ -720,6 +857,27 @@ onMounted(async () => {
 }
 .enroll-panel {
   margin-top: 14px;
+}
+.enroll-actions {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.btn-danger {
+  background: #fff5f5;
+  color: #9b2c2c;
+  border: 1px solid #e8a09e;
+}
+.btn-danger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.enroll-count {
+  font-size: 12px;
+  color: #486170;
 }
 .enroll-row {
   margin-top: 10px;
