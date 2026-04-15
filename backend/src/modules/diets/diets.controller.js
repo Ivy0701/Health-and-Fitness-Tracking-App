@@ -71,6 +71,22 @@ function extractNutrient(foodNutrients, keyword) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function buildUsdaDisplayName(item) {
+  const base = String(item?.description || "").replace(/\s+/g, " ").trim();
+  if (!base) return "Unknown food";
+
+  const tokenCount = base.split(/[\s,/-]+/).filter(Boolean).length;
+  const qualifierCandidates = [item?.additionalDescriptions, item?.foodCategory, item?.dataType, item?.brandOwner]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  const qualifier = qualifierCandidates[0] || "";
+
+  // USDA often returns generic one-word names (e.g. "BEEF").
+  // Append a stable USDA qualifier so users can distinguish entries.
+  if (qualifier && tokenCount <= 1) return `${base}, ${qualifier}`;
+  return base;
+}
+
 function mapUsdaFoodItem(item) {
   const caloriesPer100g = extractNutrient(item.foodNutrients, "energy");
   const proteinPer100g = extractNutrient(item.foodNutrients, "protein");
@@ -79,7 +95,7 @@ function mapUsdaFoodItem(item) {
   return {
     id: `usda-${item.fdcId}`,
     fdcId: item.fdcId || null,
-    name: item.description || "Unknown food",
+    name: buildUsdaDisplayName(item),
     caloriesPer100g: roundOne(caloriesPer100g),
     proteinPer100g: roundOne(proteinPer100g),
     carbsPer100g: roundOne(carbsPer100g),

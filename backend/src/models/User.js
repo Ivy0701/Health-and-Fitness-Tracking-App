@@ -30,6 +30,7 @@ const userSchema = new mongoose.Schema(
     height: { type: Number, min: 30, max: 300 },
     weight: { type: Number, min: 1, max: 600 },
     targetWeight: { type: Number, min: 1, max: 600 },
+    targetDays: { type: Number, min: 1, max: 3650 },
     bmi: { type: Number, min: 0, max: 100 },
     heartRate: { type: Number, min: 20, max: 260 },
     goal: { type: String, trim: true, maxlength: 200 },

@@ -35,6 +35,7 @@ const form = reactive({
   height: "",
   weight: "",
   targetWeight: "",
+  targetDays: "",
   activityLevel: "moderate",
   goal: "General Health",
   heartRate: "",
@@ -103,6 +104,7 @@ function fillForm(data) {
   form.height = data.height ?? "";
   form.weight = data.weight ?? "";
   form.targetWeight = data.targetWeight ?? "";
+  form.targetDays = data.targetDays ?? "";
   form.activityLevel = mapDbActivityToForm(data.activityLevel);
   const g = (data.goal || "").trim();
   form.goal = g || "General Health";
@@ -219,6 +221,28 @@ const parsedTargetWeightKg = computed(() => {
   if (form.targetWeight === "" || form.targetWeight == null) return null;
   const t = Number(form.targetWeight);
   return Number.isFinite(t) && t > 0 ? t : null;
+});
+
+const parsedTargetDays = computed(() => {
+  if (form.targetDays === "" || form.targetDays == null) return null;
+  const d = Number(form.targetDays);
+  return Number.isInteger(d) && d > 0 ? d : null;
+});
+
+const targetDaysPaceWarning = computed(() => {
+  const w = parsedWeightKg.value;
+  const t = parsedTargetWeightKg.value;
+  const d = parsedTargetDays.value;
+  if (w == null || t == null || d == null) return "";
+  const weightDifference = Math.abs(w - t);
+  if (weightDifference === 0) return "";
+  const weeks = d / 7;
+  if (weeks <= 0) return "";
+  const weeklyChange = weightDifference / weeks;
+  if (weeklyChange > 1) {
+    return "This goal is too aggressive. Please choose a more realistic timeline.";
+  }
+  return "";
 });
 
 /**
@@ -371,6 +395,13 @@ function validateProfileForm() {
     const t = Number(form.targetWeight);
     if (!Number.isFinite(t) || t <= 0) return "Target weight must be positive, or leave empty.";
   }
+  if (form.targetDays !== "" && form.targetDays != null) {
+    const d = Number(form.targetDays);
+    if (!Number.isInteger(d) || d <= 0) return "Target days must be a positive integer.";
+  }
+  if (targetDaysPaceWarning.value) {
+    return "The target days do not match a healthy weight change pace.";
+  }
   if (form.heartRate !== "" && form.heartRate != null) {
     const hr = Number(form.heartRate);
     if (!Number.isFinite(hr) || hr <= 0) return "Heart rate must be positive, or leave empty.";
@@ -431,6 +462,7 @@ async function save() {
       height: form.height === "" ? undefined : Number(form.height),
       weight: form.weight === "" ? undefined : Number(form.weight),
       targetWeight: form.targetWeight === "" ? undefined : Number(form.targetWeight),
+      targetDays: form.targetDays === "" ? undefined : Number(form.targetDays),
       heartRate: form.heartRate === "" ? undefined : Number(form.heartRate),
       goal: form.goal,
       activityLevel: form.activityLevel,
@@ -546,6 +578,14 @@ onMounted(load);
               {{ form.targetWeight !== '' && form.targetWeight != null ? `${form.targetWeight} kg` : 'Not set' }}
             </p>
             <p class="stat-hint">Your goal weight</p>
+          </article>
+          <article class="stat-card">
+            <span class="stat-icon">🗓️</span>
+            <h4>Target days</h4>
+            <p class="stat-value">
+              {{ form.targetDays !== '' && form.targetDays != null ? `${form.targetDays} days` : 'Not set' }}
+            </p>
+            <p class="stat-hint">Days to reach your goal</p>
           </article>
           <article class="stat-card">
             <span class="stat-icon">🔥</span>
@@ -719,6 +759,11 @@ onMounted(load);
               <label class="field">
                 <span class="field-label">Target weight (kg)</span>
                 <input v-model="form.targetWeight" type="number" min="0.1" step="0.1" placeholder="Optional goal" />
+              </label>
+              <label class="field">
+                <span class="field-label">Target days</span>
+                <input v-model="form.targetDays" type="number" min="1" step="1" placeholder="e.g. 90" />
+                <span v-if="targetDaysPaceWarning" class="field-error">{{ targetDaysPaceWarning }}</span>
               </label>
               <label class="field">
                 <span class="field-label">Heart rate (bpm)</span>
@@ -1282,6 +1327,12 @@ onMounted(load);
 .field-hint {
   font-size: 11px;
   color: #7a8d96;
+  line-height: 1.35;
+}
+
+.field-error {
+  font-size: 11px;
+  color: #b42318;
   line-height: 1.35;
 }
 

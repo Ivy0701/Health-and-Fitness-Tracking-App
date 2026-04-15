@@ -21,16 +21,18 @@ function normalizeType(type) {
   if (t === "course") return "Course";
   if (t === "workout") return "Workout";
   if (t === "article") return "Article";
+  if (t === "diet") return "Diet";
   return "Other";
 }
 
 const stats = computed(() => {
-  const out = { total: list.value.length, course: 0, workout: 0, article: 0, other: 0 };
+  const out = { total: list.value.length, course: 0, workout: 0, article: 0, diet: 0, other: 0 };
   for (const item of list.value) {
     const t = String(item?.itemType || "").toLowerCase();
     if (t === "course") out.course += 1;
     else if (t === "workout") out.workout += 1;
     else if (t === "article") out.article += 1;
+    else if (t === "diet") out.diet += 1;
     else out.other += 1;
   }
   return out;
@@ -62,6 +64,10 @@ onMounted(load);
           <span>Articles</span>
           <strong>{{ stats.article }}</strong>
         </div>
+        <div class="stat-chip">
+          <span>Diet</span>
+          <strong>{{ stats.diet }}</strong>
+        </div>
       </div>
     </section>
 
@@ -72,6 +78,12 @@ onMounted(load);
           <span class="type-pill">{{ normalizeType(f.itemType) }}</span>
         </div>
         <p class="muted meta-line">Reference ID: <span class="mono">{{ f.itemId }}</span></p>
+        <p v-if="String(f.itemType).toLowerCase() === 'diet' && Number.isFinite(Number(f.targetCalories))" class="muted meta-line">
+          Target calories: <strong>{{ Math.round(Number(f.targetCalories)) }} kcal/day</strong>
+        </p>
+        <p v-if="String(f.itemType).toLowerCase() === 'diet' && f.description" class="muted meta-line">
+          {{ f.description }}
+        </p>
         <div class="actions">
           <button class="remove-btn" @click="removeFavorite(f._id)">Remove</button>
         </div>

@@ -129,10 +129,14 @@ const records = ref([]);
 const showFoodOverview = ref(false);
 const foodResults = ref([]);
 const foodLibraryRows = ref([]);
+const dietFavoriteIds = ref(new Set());
+const dietFavoriteRowIdByItemId = ref(new Map());
 const overviewFoodRows = ref([]);
 const overviewFoodQuery = ref("");
 const overviewLoading = ref(false);
 const overviewFoodError = ref("");
+const overviewHasSearched = ref(false);
+const expandedOverviewFoodId = ref("");
 const pageError = ref("");
 const pageSuccess = ref("");
 const formError = ref("");
@@ -142,6 +146,7 @@ const selectedPlanId = ref(null);
 const appliedPlanId = ref("");
 const recordMode = ref("recommended");
 let searchTimer = null;
+let focusSyncHandler = null;
 
 const overview = ref({
   target: { calories: 2000, suggestedWorkoutBurn: 160, protein: 120, carbs: 220, fat: 65 },
@@ -169,6 +174,44 @@ const isEditing = computed(() => Boolean(editingId.value));
 const selectedPlan = computed(() => PLAN_DEFINITIONS.find((x) => x.id === selectedPlanId.value) || null);
 const planForRecommendation = computed(() => selectedPlan.value || PLAN_DEFINITIONS[0]);
 const appliedPlan = computed(() => PLAN_DEFINITIONS.find((x) => x.id === appliedPlanId.value) || null);
+const isSelectedPlanApplied = computed(() => Boolean(selectedPlan.value && appliedPlanId.value === selectedPlan.value.id));
+const defaultDynamicPlanType = computed(() => {
+  const direction = estimateGoalDirection();
+  if (direction === "loss") return "weight_loss";
+  if (direction === "gain") return "muscle_gain";
+  return "balanced";
+});
+const defaultDynamicPlan = computed(() => ({
+  id: "default_dynamic",
+  name: "Personalized Daily Plan",
+  type: defaultDynamicPlanType.value,
+  description: "Auto-generated from your current weight, target weight, and target days.",
+}));
+const selectedPlanFavoriteId = computed(() => (selectedPlan.value ? `diet-plan-${selectedPlan.value.id}` : ""));
+const isSelectedPlanFavorited = computed(() => Boolean(selectedPlanFavoriteId.value && dietFavoriteIds.value.has(selectedPlanFavoriteId.value)));
+const displayedOverviewFoods = computed(() => overviewFoodRows.value.slice(0, 10));
+
+function appliedPlanStorageKey() {
+  const userId = String(me.value?.id || "").trim();
+  return userId ? `diet:applied-plan:${userId}` : "";
+}
+
+function restoreAppliedPlanFromStorage() {
+  const key = appliedPlanStorageKey();
+  if (!key) return;
+  const saved = String(window.localStorage.getItem(key) || "").trim();
+  appliedPlanId.value = PLAN_DEFINITIONS.some((plan) => plan.id === saved) ? saved : "";
+}
+
+function persistAppliedPlanToStorage() {
+  const key = appliedPlanStorageKey();
+  if (!key) return;
+  if (appliedPlanId.value) {
+    window.localStorage.setItem(key, appliedPlanId.value);
+  } else {
+    window.localStorage.removeItem(key);
+  }
+}
 
 const calorieRatio = computed(() => {
   const target = Math.max(1, toNumber(overview.value.target?.calories, 1));
@@ -278,6 +321,25 @@ async function loadRecords() {
   records.value = Array.isArray(data) ? data : [];
 }
 
+async function loadDietFavorites() {
+  if (!me.value?.id) return;
+  const rows = await api.get(`/favorites/${me.value.id}`).then((r) => r.data);
+  const map = new Map();
+  const ids = new Set(
+    (Array.isArray(rows) ? rows : [])
+      .filter((row) => String(row?.itemType || "").toLowerCase() === "diet")
+      .map((row) => {
+        const itemId = String(row.itemId || "");
+        const rowId = String(row._id || "");
+        if (itemId && rowId) map.set(itemId, rowId);
+        return itemId;
+      })
+      .filter(Boolean)
+  );
+  dietFavoriteIds.value = ids;
+  dietFavoriteRowIdByItemId.value = map;
+}
+
 async function loadOverview() {
   const { data } = await api.get(`/diets/${me.value.id}/overview`, { params: { date: selectedDate.value } });
   overview.value = data || overview.value;
@@ -297,26 +359,40 @@ async function loadForDate() {
 }
 
 async function fetchOverviewFoods(query = "") {
+  overviewHasSearched.value = true;
+  expandedOverviewFoodId.value = "";
   overviewLoading.value = true;
   overviewFoodError.value = "";
   try {
-    const { data } = await api.get("/diets/foods/search", { params: { query: query.trim(), limit: 40 } });
+    const { data } = await api.get("/diets/foods/search", { params: { query: query.trim(), limit: 10 } });
     overviewFoodRows.value = Array.isArray(data) ? data : [];
   } catch (error) {
     overviewFoodRows.value = [];
-    overviewFoodError.value = error?.response?.data?.message || "Failed to load food data.";
+    overviewFoodError.value = error?.response?.data?.message || "Unable to load food data right now. Please try again.";
   } finally {
     overviewLoading.value = false;
   }
 }
 
 async function toggleFoodOverview() {
-  if (!showFoodOverview.value) await fetchOverviewFoods(overviewFoodQuery.value);
   showFoodOverview.value = !showFoodOverview.value;
 }
 
 async function searchOverviewFoods() {
+  const keyword = overviewFoodQuery.value.trim();
+  if (!keyword) {
+    overviewHasSearched.value = false;
+    overviewFoodRows.value = [];
+    overviewFoodError.value = "";
+    expandedOverviewFoodId.value = "";
+    return;
+  }
   await fetchOverviewFoods(overviewFoodQuery.value);
+}
+
+function toggleOverviewFoodDetails(food) {
+  const key = String(food.id || food.fdcId || food.name || "");
+  expandedOverviewFoodId.value = expandedOverviewFoodId.value === key ? "" : key;
 }
 
 async function searchFoods() {
@@ -346,6 +422,10 @@ function estimateGoalDirection() {
 }
 
 function estimateGoalDays() {
+  const profileDays = Number(me.value?.targetDays);
+  if (Number.isInteger(profileDays) && profileDays > 0) {
+    return clamp(profileDays, 7, 3650);
+  }
   const rawDate = me.value?.targetDate || me.value?.goalDate || "";
   if (rawDate) {
     const end = new Date(rawDate);
@@ -357,7 +437,7 @@ function estimateGoalDays() {
   return 90;
 }
 
-const adjustedPlanCalories = computed(() => {
+function calculatePlanCalories(planType) {
   const base = Math.max(1200, roundToOne(overview.value.target?.calories || 0));
   const direction = estimateGoalDirection();
   const days = estimateGoalDays();
@@ -365,19 +445,37 @@ const adjustedPlanCalories = computed(() => {
   const dailyNeed = weightGap > 0 ? clamp((weightGap * 7700) / Math.max(days, 1), 0, 500) : 0;
   let planAdjusted = base;
 
-  if (planForRecommendation.value.type === "fat_loss" || planForRecommendation.value.type === "weight_loss") {
+  if (planType === "fat_loss" || planType === "weight_loss") {
     planAdjusted -= direction === "loss" ? Math.max(120, dailyNeed * 0.7) : 140;
-  } else if (planForRecommendation.value.type === "muscle_gain") {
+  } else if (planType === "muscle_gain") {
     planAdjusted += direction === "gain" ? Math.max(150, dailyNeed * 0.6) : 180;
-  } else if (planForRecommendation.value.type === "high_protein") {
+  } else if (planType === "high_protein") {
     planAdjusted += direction === "gain" ? 120 : -30;
-  } else if (planForRecommendation.value.type === "balanced") {
+  } else if (planType === "balanced") {
     planAdjusted += 0;
   } else {
     planAdjusted += direction === "gain" ? 90 : direction === "loss" ? -70 : 0;
   }
 
   return clamp(roundToInt(planAdjusted), 1200, 3800);
+}
+
+const adjustedPlanCalories = computed(() => calculatePlanCalories(planForRecommendation.value.type));
+const defaultDynamicCalories = computed(() => calculatePlanCalories(defaultDynamicPlanType.value));
+
+const recommendedSourceMeta = computed(() => {
+  if (appliedPlan.value) {
+    return {
+      source: "applied",
+      name: appliedPlan.value.name,
+      tip: `${appliedPlan.value.name} is applied and is currently shown below.`,
+    };
+  }
+  return {
+    source: "default",
+    name: defaultDynamicPlan.value.name,
+    tip: "Personalized daily recommendation based on your current weight, target weight, and target days.",
+  };
 });
 
 const planCards = computed(() =>
@@ -461,9 +559,9 @@ function createMealRecommendation(mealType, targetCalories, planType, dateKey) {
   return rows;
 }
 
-function buildPlanDetails(planType, dateKey) {
+function buildPlanDetails(planType, dateKey, targetTotalInput) {
   const distribution = PLAN_MEAL_DISTRIBUTION[planType] || PLAN_MEAL_DISTRIBUTION.balanced;
-  const targetTotal = adjustedPlanCalories.value;
+  const targetTotal = Math.max(1200, roundToInt(targetTotalInput ?? calculatePlanCalories(planType)));
   const mealRows = MEAL_TYPES.map((meal) => {
     const mealTarget = roundToInt(targetTotal * (distribution[meal.value] || 0));
     const items = createMealRecommendation(meal.value, mealTarget, planType, dateKey);
@@ -474,18 +572,32 @@ function buildPlanDetails(planType, dateKey) {
 
 const selectedPlanDetails = computed(() => {
   if (!selectedPlan.value) return { targetTotal: 0, meals: [] };
-  return buildPlanDetails(selectedPlan.value.type, selectedDate.value);
+  return buildPlanDetails(selectedPlan.value.type, selectedDate.value, adjustedPlanCalories.value);
 });
 
 const appliedPlanDetails = computed(() => {
   if (!appliedPlan.value) return { targetTotal: 0, meals: [] };
-  return buildPlanDetails(appliedPlan.value.type, selectedDate.value);
+  return buildPlanDetails(appliedPlan.value.type, selectedDate.value, calculatePlanCalories(appliedPlan.value.type));
+});
+
+const defaultDynamicPlanDetails = computed(() =>
+  buildPlanDetails(defaultDynamicPlanType.value, selectedDate.value, defaultDynamicCalories.value)
+);
+
+const activeRecommendedPlan = computed(() => {
+  if (appliedPlan.value) return appliedPlan.value;
+  return defaultDynamicPlan.value;
+});
+
+const activeRecommendedPlanDetails = computed(() => {
+  if (appliedPlan.value) return appliedPlanDetails.value;
+  return defaultDynamicPlanDetails.value;
 });
 
 const recommendedModeMeals = computed(() =>
-  appliedPlanDetails.value.meals.map((meal) => {
+  activeRecommendedPlanDetails.value.meals.map((meal) => {
     const cards = meal.items.map((item) => {
-      const recommendationId = `${appliedPlan.value.id}-${item.recommendationId}`;
+      const recommendationId = `${activeRecommendedPlan.value.id}-${item.recommendationId}`;
       const linked = records.value.find((x) => String(x.recommendationId || "") === recommendationId);
       if (linked) return { key: `record-${linked._id}`, mode: "recorded", recommendation: item, record: linked };
       return { key: `recommend-${item.recommendationId}`, mode: "recommended", recommendation: item, record: null };
@@ -509,9 +621,62 @@ function togglePlanCard(planId) {
 
 function applySelectedPlan() {
   if (!selectedPlan.value) return;
+  if (isSelectedPlanApplied.value) {
+    appliedPlanId.value = "";
+    persistAppliedPlanToStorage();
+    pageSuccess.value = `${selectedPlan.value.name} removed from Recommended Plan mode.`;
+    return;
+  }
   appliedPlanId.value = selectedPlan.value.id;
+  persistAppliedPlanToStorage();
   recordMode.value = "recommended";
   pageSuccess.value = `${selectedPlan.value.name} applied to Recommended Plan mode.`;
+}
+
+async function toggleSelectedPlanFavorite() {
+  if (!selectedPlan.value || !me.value?.id) return;
+  pageError.value = "";
+  try {
+    if (isSelectedPlanFavorited.value) {
+      const rowId = dietFavoriteRowIdByItemId.value.get(selectedPlanFavoriteId.value);
+      if (rowId) {
+        await api.delete(`/favorites/${rowId}`);
+      } else {
+        await loadDietFavorites();
+        const refreshedRowId = dietFavoriteRowIdByItemId.value.get(selectedPlanFavoriteId.value);
+        if (refreshedRowId) await api.delete(`/favorites/${refreshedRowId}`);
+      }
+      const nextIds = new Set(dietFavoriteIds.value);
+      nextIds.delete(selectedPlanFavoriteId.value);
+      dietFavoriteIds.value = nextIds;
+      const nextMap = new Map(dietFavoriteRowIdByItemId.value);
+      nextMap.delete(selectedPlanFavoriteId.value);
+      dietFavoriteRowIdByItemId.value = nextMap;
+      pageSuccess.value = `${selectedPlan.value.name} removed from favorites.`;
+      return;
+    }
+
+    const row = await api.post("/favorites", {
+      userId: me.value.id,
+      itemType: "diet",
+      itemId: selectedPlanFavoriteId.value,
+      title: selectedPlan.value.name,
+      planType: selectedPlan.value.type,
+      targetCalories: adjustedPlanCalories.value,
+      description: selectedPlan.value.description,
+      sourceType: "diet_plan",
+    }).then((r) => r.data);
+
+    const next = new Set(dietFavoriteIds.value);
+    next.add(selectedPlanFavoriteId.value);
+    dietFavoriteIds.value = next;
+    const nextMap = new Map(dietFavoriteRowIdByItemId.value);
+    if (row?._id) nextMap.set(selectedPlanFavoriteId.value, String(row._id));
+    dietFavoriteRowIdByItemId.value = nextMap;
+    pageSuccess.value = `${selectedPlan.value.name} added to favorites.`;
+  } catch (error) {
+    pageError.value = error?.response?.data?.message || "Failed to update favorite status.";
+  }
 }
 
 async function saveManualRecord() {
@@ -642,13 +807,19 @@ watch(
 
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
+  if (focusSyncHandler) window.removeEventListener("focus", focusSyncHandler);
 });
 
 onMounted(async () => {
   try {
     me.value = await api.get("/users/me").then((r) => r.data);
+    restoreAppliedPlanFromStorage();
     form.date = selectedDate.value;
-    await loadForDate();
+    await Promise.all([loadForDate(), loadDietFavorites()]);
+    focusSyncHandler = () => {
+      loadDietFavorites();
+    };
+    window.addEventListener("focus", focusSyncHandler);
   } catch (err) {
     pageError.value = err?.response?.data?.message || "Failed to initialize diet page.";
   }
@@ -666,7 +837,7 @@ onMounted(async () => {
             <span>Custom date</span>
             <input v-model="selectedDate" type="date" @change="loadForDate" />
           </label>
-          <button type="button" class="ghost-btn" @click="toggleFoodOverview">Food Calorie Overview</button>
+          <button type="button" class="ghost-btn" @click="toggleFoodOverview">Food Nutrition Overview</button>
         </div>
       </div>
 
@@ -674,30 +845,55 @@ onMounted(async () => {
 
       <section v-if="showFoodOverview" class="food-overview">
         <div class="food-overview-head">
-          <h3>Food Calorie Overview</h3>
+          <h3>Food Nutrition Overview</h3>
           <div class="food-overview-search-wrap">
             <input v-model.trim="overviewFoodQuery" class="food-overview-search" placeholder="Search food name..." @keyup.enter="searchOverviewFoods" />
             <button type="button" class="tiny-btn" @click="searchOverviewFoods">Search</button>
           </div>
         </div>
-        <p v-if="overviewLoading" class="muted">Loading foods...</p>
+        <p v-if="overviewLoading" class="muted">Searching foods...</p>
         <p v-if="overviewFoodError" class="error">{{ overviewFoodError }}</p>
-        <div class="food-table">
-          <header>
-            <span>Food</span>
-            <span>kcal/100g</span>
-            <span>Protein</span>
-            <span>Carbs</span>
-            <span>Fat</span>
-          </header>
-          <div v-for="food in overviewFoodRows" :key="food.id" class="food-row">
-            <span>{{ food.name }}</span>
-            <span>{{ roundToOne(food.caloriesPer100g) }}</span>
-            <span>{{ roundToOne(food.proteinPer100g) }}g</span>
-            <span>{{ roundToOne(food.carbsPer100g) }}g</span>
-            <span>{{ roundToOne(food.fatPer100g) }}g</span>
+
+        <div v-if="!overviewHasSearched && !overviewLoading" class="food-overview-default">
+          <p class="muted">Search a food to view calories and nutrition facts.</p>
+          <p class="muted">Try searching: chicken, rice, apple</p>
+        </div>
+
+        <div v-else-if="!overviewLoading && !overviewFoodError" class="food-overview-results">
+          <p v-if="!displayedOverviewFoods.length" class="food-empty">No foods found. Try another keyword.</p>
+          <p v-else class="muted result-hint">Showing top {{ displayedOverviewFoods.length }} results.</p>
+
+          <div class="food-cards">
+            <article
+              v-for="food in displayedOverviewFoods"
+              :key="String(food.id || food.fdcId || food.name)"
+              class="food-card"
+              :class="{ expanded: expandedOverviewFoodId === String(food.id || food.fdcId || food.name) }"
+              @click="toggleOverviewFoodDetails(food)"
+            >
+              <div class="food-card-main">
+                <div>
+                  <h4>{{ food.name }}</h4>
+                  <p class="food-kcal">{{ roundToOne(food.caloriesPer100g) }} kcal / 100g</p>
+                </div>
+                <button type="button" class="ghost-btn tiny-btn" @click.stop="toggleOverviewFoodDetails(food)">
+                  {{ expandedOverviewFoodId === String(food.id || food.fdcId || food.name) ? "Hide Details" : "View Details" }}
+                </button>
+              </div>
+              <div class="food-macros">
+                <span>P {{ roundToOne(food.proteinPer100g) }}g</span>
+                <span>C {{ roundToOne(food.carbsPer100g) }}g</span>
+                <span>F {{ roundToOne(food.fatPer100g) }}g</span>
+              </div>
+              <div v-if="expandedOverviewFoodId === String(food.id || food.fdcId || food.name)" class="food-details">
+                <p><strong>Calories:</strong> {{ roundToOne(food.caloriesPer100g) }} kcal / 100g</p>
+                <p><strong>Protein:</strong> {{ roundToOne(food.proteinPer100g) }}g</p>
+                <p><strong>Carbs:</strong> {{ roundToOne(food.carbsPer100g) }}g</p>
+                <p><strong>Fat:</strong> {{ roundToOne(food.fatPer100g) }}g</p>
+                <p><strong>Source:</strong> {{ (food.source || "local").toUpperCase() }}</p>
+              </div>
+            </article>
           </div>
-          <p v-if="!overviewLoading && !overviewFoodRows.length" class="food-empty">No matching foods found.</p>
         </div>
       </section>
 
@@ -773,8 +969,12 @@ onMounted(async () => {
             <p class="muted">Nutrition-focused daily recommendation split by meal.</p>
           </div>
           <div class="selected-head-actions">
-            <button type="button" class="tiny-btn" @click="applySelectedPlan">Apply Plan</button>
-            <button type="button" class="tiny-btn ghost-btn">Add to Favorites</button>
+            <button type="button" :class="['tiny-btn', isSelectedPlanApplied ? 'applied-btn' : 'ghost-btn']" @click="applySelectedPlan">
+              {{ isSelectedPlanApplied ? "Applied" : "Apply Plan" }}
+            </button>
+            <button type="button" :class="['tiny-btn', isSelectedPlanFavorited ? 'saved-btn' : 'ghost-btn']" @click="toggleSelectedPlanFavorite">
+              {{ isSelectedPlanFavorited ? "Saved" : "Add to Favorites" }}
+            </button>
           </div>
         </div>
         <div class="plan-breakdown">
@@ -822,7 +1022,10 @@ onMounted(async () => {
       </div>
 
       <section v-if="recordMode === 'recommended'" class="recommended-wrap">
-        <p v-if="!appliedPlan" class="muted">Select a meal plan above and click <strong>Apply Plan</strong> to populate recommended records.</p>
+        <p class="muted">{{ recommendedSourceMeta.tip }}</p>
+        <p class="muted">
+          Current source: <strong>{{ recommendedSourceMeta.name }}</strong> · {{ roundToOne(activeRecommendedPlanDetails.targetTotal) }} kcal/day
+        </p>
         <div class="recommended-board">
           <section v-for="meal in recommendedModeMeals" :key="meal.mealType" class="meal-board">
             <h4>{{ meal.label }} ({{ meal.targetCalories }} kcal target)</h4>
@@ -841,7 +1044,7 @@ onMounted(async () => {
                   Added at {{ formatRecordTime(card.record.recordedAt || card.record.createdAt) || "--:--" }} · Source: {{ card.record.sourceType || "recommended" }}
                 </span>
               </div>
-              <button v-if="card.mode === 'recommended'" type="button" class="tiny-btn" @click="addRecommendedItem(meal.mealType, card.recommendation, appliedPlan.id)">
+              <button v-if="card.mode === 'recommended'" type="button" class="tiny-btn" @click="addRecommendedItem(meal.mealType, card.recommendation, activeRecommendedPlan.id)">
                 Add to Records
               </button>
               <div v-else-if="card.record" class="record-actions">
@@ -991,36 +1194,112 @@ onMounted(async () => {
   max-width: 260px;
 }
 
-.food-table {
-  display: grid;
-  gap: 6px;
-}
-
-.food-table header,
-.food-row {
-  display: grid;
-  grid-template-columns: 2fr repeat(4, minmax(70px, 1fr));
-  gap: 8px;
-  align-items: center;
-}
-
-.food-table header {
-  font-size: 12px;
-  color: #5a747d;
-  font-weight: 700;
-  border-bottom: 1px solid #e6f0ee;
-  padding-bottom: 4px;
-}
-
-.food-row {
-  font-size: 13px;
-  color: #385866;
-}
-
 .food-empty {
   margin: 8px 0 0;
   font-size: 13px;
   color: #5b727b;
+}
+
+.food-overview-default {
+  border: 1px dashed #d8e8e4;
+  border-radius: 10px;
+  background: #f9fcfb;
+  padding: 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.food-overview-results {
+  display: grid;
+  gap: 8px;
+}
+
+.result-hint {
+  margin: 2px 0 0;
+  font-size: 12px;
+}
+
+.food-cards {
+  display: grid;
+  gap: 10px;
+  max-height: 430px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.food-card {
+  border: 1px solid #dcebe7;
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  cursor: pointer;
+  transition: box-shadow 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+
+.food-card:hover {
+  border-color: #c8ded7;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.06);
+  transform: translateY(-1px);
+}
+
+.food-card.expanded {
+  border-color: var(--c4);
+  box-shadow: 0 8px 18px rgba(52, 139, 147, 0.12);
+}
+
+.food-card-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.food-card h4 {
+  margin: 0;
+  color: var(--c6);
+  font-size: 15px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.food-kcal {
+  margin: 3px 0 0;
+  font-size: 13px;
+  color: var(--c4);
+  font-weight: 700;
+}
+
+.food-macros {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.food-macros span {
+  font-size: 12px;
+  color: #4f6670;
+  background: #eef5f3;
+  border-radius: 8px;
+  padding: 3px 8px;
+  font-weight: 700;
+}
+
+.food-details {
+  border-top: 1px solid #ebf3f1;
+  padding-top: 8px;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: #4f6770;
+}
+
+.food-details p {
+  margin: 0;
 }
 
 .overview-grid {
@@ -1311,6 +1590,16 @@ onMounted(async () => {
   background: #ececec;
 }
 
+.selected-head-actions .applied-btn {
+  border: 1px solid var(--c4);
+  background: var(--c4);
+  color: #fff;
+}
+
+.selected-head-actions .applied-btn:hover {
+  background: var(--c3);
+}
+
 .plan-breakdown {
   margin-top: 16px;
   display: grid;
@@ -1558,6 +1847,13 @@ onMounted(async () => {
   color: var(--c6);
 }
 
+.saved-btn {
+  border: 1px solid var(--c4);
+  background: #e6f3f1;
+  color: var(--c4);
+  font-weight: 700;
+}
+
 .danger-btn {
   background: linear-gradient(90deg, #be3b3b, #a72e2e);
 }
@@ -1595,11 +1891,6 @@ onMounted(async () => {
   .selected-head {
     flex-direction: column;
     align-items: flex-start;
-  }
-
-  .food-table header,
-  .food-row {
-    grid-template-columns: 1.6fr repeat(4, minmax(60px, 1fr));
   }
 
   .food-overview-head {
