@@ -1,7 +1,10 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 import api from "../services/api";
+import { clearAdminSession, getAdminSession } from "../services/adminAuth";
 
+const router = useRouter();
 const loading = ref(true);
 const error = ref("");
 const payload = ref(null);
@@ -22,8 +25,10 @@ const featureAdoption = computed(() => payload.value?.featureAdoption || {});
 const featureUsage = computed(() => payload.value?.featureUsage || {});
 const community = computed(() => payload.value?.community || {});
 const systemRuntime = computed(() => payload.value?.systemRuntime || {});
+const workoutStatusBreakdown = computed(() => payload.value?.workoutStatusBreakdown || {});
 const usersPreview12 = computed(() => users.value.preview12 || []);
 const refundRows = computed(() => refundRequests.value.rows || []);
+const adminSession = computed(() => getAdminSession());
 
 function formatDateTime(value) {
   if (!value) return "—";
@@ -53,13 +58,30 @@ const adoptionRows = computed(() => [
 
 const usageRows = computed(() => [
   { label: "Workout plans created (total rows)", value: n(featureUsage.value.workoutPlansCreated) },
-  { label: "Workout daily tasks marked completed", value: n(featureUsage.value.workoutTasksCompleted) },
-  { label: "Diet entries (total rows)", value: n(featureUsage.value.dietEntries) },
-  { label: "Schedule items (total rows)", value: n(featureUsage.value.scheduleItems) },
+  { label: "Completed workout tasks (plan + manual schedule, all-time)", value: n(featureUsage.value.workoutTasksCompleted) },
+  { label: "Completed manual workout schedule tasks", value: n(featureUsage.value.completedManualWorkoutScheduleTasks) },
+  { label: "Diet entries (total rows, all-time)", value: n(featureUsage.value.dietEntries) },
+  { label: "Schedule items (current effective rows, today+future)", value: n(featureUsage.value.scheduleItems) },
   { label: "Course enrollment rows (active + completed)", value: n(featureUsage.value.courseEnrollments) },
-  { label: "Course daily progress rows completed", value: n(featureUsage.value.completedCourseDays) },
+  { label: "Course daily progress rows completed (course card days)", value: n(featureUsage.value.completedCourseDays) },
+  { label: "Course sub-exercises completed", value: n(featureUsage.value.completedCourseExercises) },
+  { label: "Course sub-exercises total", value: n(featureUsage.value.totalCourseExercises) },
   { label: "Favorites saved (total rows)", value: n(featureUsage.value.favoritesSaved) },
+  { label: "Calories burned logged (Workout, includes course completion, all-time)", value: n(featureUsage.value.totalCaloriesBurned) },
+  { label: "Calories consumed logged (Diet, all-time)", value: n(featureUsage.value.totalCaloriesConsumed) },
 ]);
+
+const workoutStatusRows = computed(() => {
+  const s = workoutStatusBreakdown.value || {};
+  return [
+    { label: "not_started", value: n(s.not_started) },
+    { label: "in_progress", value: n(s.in_progress) },
+    { label: "paused", value: n(s.paused) },
+    { label: "completed", value: n(s.completed) },
+    { label: "missed", value: n(s.missed) },
+    { label: "scheduled", value: n(s.scheduled) },
+  ];
+});
 
 const enrollStatus = computed(() => courseEnrollments.value.byStatus || {});
 
@@ -116,12 +138,21 @@ async function rejectRefund(userId) {
   }
 }
 
+function logout() {
+  clearAdminSession();
+  router.replace("/login");
+}
+
 onMounted(loadSystemStatus);
 </script>
 
 <template>
   <header class="dev-bar">
     <span class="title">System status (internal)</span>
+    <div class="bar-actions">
+      <span class="sub">{{ adminSession?.displayName || adminSession?.email || "Admin" }}</span>
+      <button type="button" class="logout-btn" @click="logout">Logout</button>
+    </div>
   </header>
   <main class="status-wrap">
     <section class="shell">
@@ -215,8 +246,16 @@ onMounted(loadSystemStatus);
               <strong class="kpi-value">{{ n(vip.vipButPlanNone) }}</strong>
             </div>
             <div class="kpi">
+              <span class="kpi-label">Expired VIP flags (plan exists, end date passed)</span>
+              <strong class="kpi-value">{{ n(vip.expiredVipUsers) }}</strong>
+            </div>
+            <div class="kpi">
               <span class="kpi-label">Refund requests pending review</span>
               <strong class="kpi-value">{{ n(vip.refundPendingRequests) }}</strong>
+            </div>
+            <div class="kpi">
+              <span class="kpi-label">Auto-cleaned VIP flag/plan mismatch</span>
+              <strong class="kpi-value">{{ n(vip.autoCleanedVipFlagPlanMismatch) }}</strong>
             </div>
           </div>
         </section>
@@ -365,6 +404,21 @@ onMounted(loadSystemStatus);
           </ul>
         </section>
 
+        <section class="section">
+          <h2 class="section-title">Workout status breakdown</h2>
+          <p class="hint">
+            Status normalization uses current workout rules:
+            <code>not_started / in_progress / paused / completed / missed / scheduled</code>, based on current workout schedule
+            items with persisted workout task status.
+          </p>
+          <ul class="dense-grid">
+            <li v-for="row in workoutStatusRows" :key="row.label">
+              <span>{{ row.label }}</span>
+              <strong>{{ row.value }}</strong>
+            </li>
+          </ul>
+        </section>
+
         <section class="section two-col">
           <div class="card">
             <h2 class="section-title">Community</h2>
@@ -415,6 +469,26 @@ onMounted(loadSystemStatus);
 .dev-bar .sub {
   font-size: 0.8rem;
   opacity: 0.85;
+}
+
+.bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logout-btn {
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: 8px;
+  background: transparent;
+  color: #fff;
+  padding: 5px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.logout-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .status-wrap {
@@ -482,6 +556,15 @@ onMounted(loadSystemStatus);
   background: #f1faee;
   padding: 1px 5px;
   border-radius: 4px;
+}
+
+.small {
+  font-size: 0.78rem;
+}
+
+.recovered-note {
+  margin-top: 3px;
+  color: #52796f;
 }
 
 .kpi-grid {

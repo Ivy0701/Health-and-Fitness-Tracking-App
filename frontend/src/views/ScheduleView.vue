@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
+import { getTodayLocalDate } from "../utils/dateLocal";
 import {
   WEEKDAY_LABELS,
   addDays,
@@ -46,7 +47,7 @@ const hours = computed(() => {
 
 const weekDays = computed(() => {
   const mon = weekStart.value;
-  const todayKey = formatDateKey(new Date());
+  const todayKey = getTodayLocalDate();
   const selectedKey = formatDateKey(selectedDate.value);
   return [0, 1, 2, 3, 4, 5, 6].map((w) => {
     const iso = dateForWeekday(mon, w);
@@ -86,7 +87,7 @@ const weekVipCount = computed(() => weekItems.value.filter((it) => it.courseIsPr
 const weekManualCount = computed(() => weekItems.value.filter((it) => !it.courseId).length);
 const upcomingToday = computed(() => {
   const now = new Date();
-  const todayKey = formatDateKey(now);
+  const todayKey = getTodayLocalDate();
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   return visibleItems.value
     .filter((it) => it.date === todayKey && !it.is_completed)
@@ -142,7 +143,7 @@ function nextWeek() {
 }
 
 function jumpTodayWeek() {
-  const today = new Date();
+  const today = new Date(`${getTodayLocalDate()}T00:00:00`);
   selectedDate.value = today;
   weekStart.value = mondayOfDate(today);
 }
@@ -156,7 +157,7 @@ function selectDay(iso) {
 async function load() {
   me.value = await api.get("/users/me").then((r) => r.data);
   items.value = await api.get(`/schedules/${me.value.id}`).then((r) => r.data);
-  if (!form.date) form.date = formatDateKey(new Date());
+  if (!form.date) form.date = getTodayLocalDate();
   await applyFocusFromQuery();
 }
 
@@ -303,8 +304,8 @@ const filteredListItems = computed(() => {
     const tb = new Date(`${b.date}T${b.time || "00:00"}:00`).getTime();
     return tb - ta;
   });
-  const today = new Date();
-  const todayKey = formatDateKey(today);
+  const today = new Date(`${getTodayLocalDate()}T00:00:00`);
+  const todayKey = getTodayLocalDate();
   if (listFilter.value === "today") return rows.filter((row) => row.date === todayKey);
   if (listFilter.value === "week") {
     const start = mondayOfDate(today);
@@ -356,7 +357,7 @@ async function applyFocusFromQuery() {
   let candidates = base;
   if (focusCourseId) candidates = candidates.filter((it) => String(it.courseId || "") === focusCourseId);
   if (focusTitle) candidates = candidates.filter((it) => displayTitle(it).toLowerCase().includes(focusTitle));
-  const todayKey = formatDateKey(new Date());
+  const todayKey = getTodayLocalDate();
   if (focusDate) {
     const dateMatched = candidates.filter((it) => String(it.date || "") === focusDate);
     if (dateMatched.length) {

@@ -11,6 +11,7 @@ const schedulesRoutes = require("../modules/schedules/schedules.routes");
 const favoritesRoutes = require("../modules/favorites/favorites.routes");
 const forumRoutes = require("../modules/forum/forum.routes");
 const vipRoutes = require("../modules/vip/vip.routes");
+const notificationsRoutes = require("../modules/notifications/notifications.routes");
 
 const router = express.Router();
 
@@ -28,5 +29,6 @@ router.use("/schedules", schedulesRoutes);
 router.use("/favorites", favoritesRoutes);
 router.use("/forum", forumRoutes);
 router.use("/vip", vipRoutes);
+router.use("/notifications", notificationsRoutes);
 
 module.exports = router;

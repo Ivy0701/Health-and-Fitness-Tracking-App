@@ -5,6 +5,8 @@ const favorites = ref([]);
 const loading = ref(false);
 const loaded = ref(false);
 const me = ref(null);
+const activeUserId = ref("");
+const lastToken = ref("");
 
 function normalizeType(type) {
   const value = String(type || "").trim().toLowerCase();
@@ -24,14 +26,28 @@ const byKey = computed(() => {
   return map;
 });
 
-async function ensureMe() {
-  if (me.value?.id) return me.value;
-  me.value = await api.get("/users/me").then((r) => r.data);
+function clearScopedCache() {
+  favorites.value = [];
+  loaded.value = false;
+}
+
+async function ensureMe(force = false) {
+  const token = localStorage.getItem("token") || "";
+  const shouldReloadUser = force || !me.value?.id || token !== lastToken.value;
+  if (shouldReloadUser) {
+    me.value = await api.get("/users/me").then((r) => r.data);
+    lastToken.value = token;
+  }
+  const nextUserId = String(me.value?.id || "");
+  if (activeUserId.value && nextUserId && activeUserId.value !== nextUserId) {
+    clearScopedCache();
+  }
+  activeUserId.value = nextUserId;
   return me.value;
 }
 
 async function refreshFavorites() {
-  const user = await ensureMe();
+  const user = await ensureMe(true);
   loading.value = true;
   try {
     const rows = await api.get(`/favorites/${user.id}`).then((r) => r.data);
@@ -44,7 +60,8 @@ async function refreshFavorites() {
 }
 
 async function ensureFavoritesLoaded() {
-  if (loaded.value) return favorites.value;
+  const user = await ensureMe();
+  if (loaded.value && String(activeUserId.value || "") === String(user?.id || "")) return favorites.value;
   return refreshFavorites();
 }
 

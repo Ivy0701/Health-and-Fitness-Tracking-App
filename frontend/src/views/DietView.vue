@@ -5,6 +5,7 @@ import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
 import { useAuthStore } from "../stores/auth";
 import { useFavorites } from "../services/favorites";
+import { getTodayLocalDate } from "../utils/dateLocal";
 
 const MEAL_TYPES = [
   { value: "breakfast", label: "Breakfast" },
@@ -150,7 +151,7 @@ function mealIcon(mealType) {
   return "🍎";
 }
 
-const todayKey = formatDateKey(new Date());
+const todayKey = getTodayLocalDate();
 const selectedDate = ref(todayKey);
 const DATE_WINDOW_DAYS = 9;
 const DATE_SHIFT_DAYS = 7;

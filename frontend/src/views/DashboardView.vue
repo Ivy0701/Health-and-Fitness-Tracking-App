@@ -5,6 +5,7 @@ import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
 import { useAuthStore } from "../stores/auth";
 import { calculateBmiValue } from "../utils/bmi";
+import { getTodayLocalDate } from "../utils/dateLocal";
 
 const loading = ref(true);
 const route = useRoute();
@@ -155,7 +156,7 @@ function netStatus(value) {
 }
 
 const dashboardSummary = computed(() => dashboardPayload.value?.summary || {});
-const todayKey = computed(() => new Date().toISOString().slice(0, 10));
+const todayKey = computed(() => getTodayLocalDate());
 const weightForBurn = computed(() => asNumber(profile.value?.weight));
 
 const todayWorkoutTasks = computed(() => (Array.isArray(todayWorkout.value?.workout_tasks) ? todayWorkout.value.workout_tasks : []));
@@ -197,6 +198,15 @@ const heroSummary = computed(() => {
   if (remainingTodayTasks.value > 0) return `You still have ${remainingTodayTasks.value} tasks remaining today.`;
   return "You are balanced today.";
 });
+
+const heroUserName = computed(() => {
+  const source = auth.user || profile.value || {};
+  const raw = safeText(source?.displayName || source?.username || source?.name);
+  if (!raw) return "";
+  return raw.length > 28 ? `${raw.slice(0, 28)}...` : raw;
+});
+
+const heroTitle = computed(() => (heroUserName.value ? `Welcome back, ${heroUserName.value}` : "Welcome back"));
 
 const heroProgressLine = computed(() => `You have ${totalTodayTasks.value} tasks planned today.`);
 
@@ -297,13 +307,6 @@ const upcomingToday = computed(() => {
     .slice(0, 3);
 });
 
-function workoutPlanTodayStatus(plan) {
-  const pid = String(plan?._id || plan?.id || "");
-  const todayTask = todayWorkoutTasks.value.find((task) => String(task?.workout_plan_id || "") === pid);
-  if (!todayTask) return { hasTodayTask: false, status: "Not Started" };
-  return { hasTodayTask: true, status: isCompletedTask(todayTask) ? "Completed Today" : "In Progress" };
-}
-
 function normalizePlanProgress(total, completed) {
   const totalSafe = Math.max(1, Math.round(asNumber(total)));
   const completedSafe = Math.max(0, Math.min(totalSafe, Math.round(asNumber(completed))));
@@ -328,50 +331,54 @@ function planActionLabel(statusKey) {
 }
 
 const activePlansDisplay = computed(() => {
-  const courseRows = (Array.isArray(enrolledCourses.value) ? enrolledCourses.value : [])
-    .filter((row) => row && row.status === "active")
-    .map((row) => {
-      const title = cleanPlanTitle(row?.course_id?.title || row?.title);
+  const courseRows = todayCourseTasks.value
+    .map((task) => {
+      const title = cleanPlanTitle(task?.title || task?.course_title || task?.courseName);
       if (!title) return null;
-      const cid = String(row?.course_id?._id || row?.course_id || "");
-      const todayTask = todayCourseTasks.value.find((task) => String(task?.course_id || "") === cid);
-      const total = Math.max(1, Math.round(asNumber(row?.course_id?.duration_days || row?.duration_days || 7)));
-      const day = Math.max(1, Math.min(total, Math.round(asNumber(row?.current_day || 1))));
-      const progress = normalizePlanProgress(todayTask?.total_exercises, todayTask?.completed_exercises);
+      const totalExercises = Math.max(
+        0,
+        Math.round(asNumber(task?.total_exercises || (Array.isArray(task?.exercises) ? task.exercises.length : 0)))
+      );
+      if (totalExercises <= 0) return null;
+      const completedExercises = Math.max(0, Math.round(asNumber(task?.completed_exercises)));
+      const progress = normalizePlanProgress(totalExercises, completedExercises);
+      const durationValue = asNumber(task?.duration || task?.duration_minutes || task?.duration_per_day);
+      const durationText = durationValue > 0 ? `${Math.round(durationValue)} min/day` : "-- min/day";
       return {
-        id: `course-${String(row?._id || row?.id || "")}`,
+        id: `course-${String(task?.enrolled_course_id || task?.course_id || task?._id || title)}`,
         title,
-        dayText: `Day ${day} / ${total}`,
+        dayText: `Day ${Math.max(1, Math.round(asNumber(task?.day || 1)))} / ${Math.max(
+          1,
+          Math.round(asNumber(task?.duration_days || 1))
+        )}`,
         status: progress.statusLabel,
         statusKey: progress.statusKey,
-        hasTodayTask: Boolean(todayTask),
+        hasTodayTask: true,
         progressPercent: progress.percent,
-        totalKcal: Math.round(asNumber(todayTask?.estimated_burn)),
-        durationText: `${Math.max(0, Math.round(asNumber(row?.course_id?.duration || todayTask?.duration || 0)))} min/day`,
+        totalKcal: Math.round(asNumber(task?.estimated_burn)),
+        durationText,
         actionLabel: planActionLabel(progress.statusKey),
       };
     })
     .filter(Boolean);
 
-  const workoutRows = (Array.isArray(workoutPlans.value) ? workoutPlans.value : [])
-    .map((row) => {
-      const title = cleanPlanTitle(row?.exercise_name || row?.exerciseName);
+  const workoutRows = todayWorkoutTasks.value
+    .map((task) => {
+      const title = cleanPlanTitle(task?.exercise_name || task?.exerciseName || task?.title);
       if (!title) return null;
-      const total = Math.max(1, Math.round(asNumber(row?.days || 1)));
-      const start = asDate(row?.start_date || row?.startDate || row?.created_at || row?.createdAt, new Date());
-      const day = Math.max(1, Math.min(total, Math.floor((Date.now() - start.getTime()) / 86400000) + 1));
-      const status = workoutPlanTodayStatus(row);
-      const progress = normalizePlanProgress(1, status.status === "Completed Today" ? 1 : 0);
+      const progress = normalizePlanProgress(1, isCompletedTask(task) ? 1 : 0);
+      const durationValue = asNumber(task?.duration_per_day || task?.durationPerDay || task?.duration);
+      const durationText = durationValue > 0 ? `${Math.round(durationValue)} min/day` : "-- min/day";
       return {
-        id: `workout-${String(row?._id || row?.id || "")}`,
+        id: `workout-${String(task?.schedule_item_id || task?.workout_plan_id || task?._id || title)}`,
         title,
-        dayText: `Day ${day} / ${total}`,
+        dayText: "Today",
         status: progress.statusLabel,
         statusKey: progress.statusKey,
-        hasTodayTask: status.hasTodayTask,
+        hasTodayTask: true,
         progressPercent: progress.percent,
-        totalKcal: Math.round(getTaskBurn(row, weightForBurn.value)),
-        durationText: `${Math.max(0, Math.round(asNumber(row?.duration_per_day || row?.durationPerDay || 0)))} min/day`,
+        totalKcal: Math.round(getTaskBurn(task, weightForBurn.value)),
+        durationText,
         actionLabel: planActionLabel(progress.statusKey),
       };
     })
@@ -568,7 +575,7 @@ watch(
     <section class="dashboard-shell">
       <header class="hero-card">
         <p class="hero-kicker">Dashboard overview</p>
-        <h1>Welcome back</h1>
+        <h1>{{ heroTitle }}</h1>
         <p class="hero-summary">{{ heroSummary }}</p>
         <p class="hero-progress">{{ heroProgressLine }}</p>
         <RouterLink :to="startTodayLink" class="hero-action">Start Today</RouterLink>
@@ -625,7 +632,7 @@ watch(
           </article>
 
           <article class="panel">
-            <h2>Active Plans</h2>
+            <h2>Today's Active Plans</h2>
             <ul v-if="activePlansDisplay.length" class="active-plan-list">
               <li v-for="item in activePlansDisplay" :key="item.id" class="active-plan-card">
                 <div class="active-plan-head">
@@ -645,7 +652,7 @@ watch(
                 </div>
               </li>
             </ul>
-            <p v-else class="empty">No active plans yet</p>
+            <p v-else class="empty">No active plans for today</p>
           </article>
         </section>
 
@@ -668,7 +675,19 @@ watch(
           </article>
 
           <article class="panel">
-            <h2>Calories In vs Out</h2>
+            <div class="panel-title-row">
+              <h2>Calories In vs Out</h2>
+              <div class="inout-legend" aria-label="Calories legend">
+                <span class="legend-item" title="Calories In = food intake">
+                  <i class="legend-dot in"></i>
+                  Calories In (Consumed)
+                </span>
+                <span class="legend-item" title="Calories Out = calories burned">
+                  <i class="legend-dot out"></i>
+                  Calories Out (Burned)
+                </span>
+              </div>
+            </div>
             <div v-if="inOutHasData" class="inout-chart">
               <div v-for="item in caloriesInOutData" :key="item.day" class="inout-row">
                 <span class="day">{{ item.day }}</span>
@@ -1155,6 +1174,44 @@ watch(
   gap: 8px;
 }
 
+.panel-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 8px 12px;
+}
+
+.inout-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.legend-dot.in {
+  background: #6fcf97;
+}
+
+.legend-dot.out {
+  background: #2d9cdb;
+}
+
 .inout-row {
   display: grid;
   grid-template-columns: 38px minmax(0, 1fr) 112px;
@@ -1178,11 +1235,11 @@ watch(
 }
 
 .inout-row .bar.in {
-  background: linear-gradient(90deg, #a7f2ad 0%, #70d1ac 100%);
+  background: linear-gradient(90deg, #8ee3b0 0%, #6fcf97 100%);
 }
 
 .inout-row .bar.out {
-  background: linear-gradient(90deg, #348b93 0%, #316879 100%);
+  background: linear-gradient(90deg, #2d9cdb 0%, #2f7fb8 100%);
 }
 
 .inout-row .value {

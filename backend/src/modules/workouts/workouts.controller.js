@@ -30,6 +30,7 @@ const MET_MAP = {
   badminton: 7,
   tennis: 7,
 };
+const WORKOUT_TASK_STATUSES = new Set(["not_started", "in_progress", "paused", "completed", "missed", "scheduled"]);
 
 function toDateKey(date = new Date()) {
   const y = date.getFullYear();
@@ -74,6 +75,21 @@ function estimateWorkoutBurn({ exerciseName, durationMinutes, weight }) {
   const met = getMetForExerciseName(exerciseName);
   if (!met) return 0;
   return Math.round(met * safeWeight * (safeDuration / 60));
+}
+
+function normalizeTaskStatus(raw) {
+  const value = String(raw || "").trim().toLowerCase();
+  return WORKOUT_TASK_STATUSES.has(value) ? value : "";
+}
+
+function inferTaskStatusByDate({ dateKey, isCompleted, fallbackStatus }) {
+  if (isCompleted) return "completed";
+  const normalizedFallback = normalizeTaskStatus(fallbackStatus);
+  if (normalizedFallback) return normalizedFallback;
+  const today = toDateKey(new Date());
+  if (dateKey > today) return "scheduled";
+  if (dateKey < today) return "missed";
+  return "not_started";
 }
 
 const listPlans = asyncHandler(async (req, res) => {
@@ -195,6 +211,11 @@ const getTodayPlan = asyncHandler(async (req, res) => {
       scheduleWorkoutItems.find((it) => String(it?.title || "").trim() === String(plan.exercise_name || "").trim());
     const progress = statusMap.get(`${plan._id}`);
     const completed = Boolean(progress?.is_completed ?? linkedItem?.is_completed);
+    const taskStatus = inferTaskStatusByDate({
+      dateKey: date,
+      isCompleted: completed,
+      fallbackStatus: progress?.status,
+    });
     return {
       schedule_item_id: linkedItem?._id || null,
       workout_plan_id: plan._id,
@@ -205,6 +226,7 @@ const getTodayPlan = asyncHandler(async (req, res) => {
       is_custom: plan.is_custom,
       date,
       is_completed: completed,
+      task_status: taskStatus,
       remaining_seconds: Number.isFinite(Number(progress?.remaining_seconds))
         ? Number(progress?.remaining_seconds)
         : null,
@@ -227,6 +249,10 @@ const getTodayPlan = asyncHandler(async (req, res) => {
     date,
     subtitle: item.subtitle || "",
     is_completed: Boolean(item.is_completed),
+    task_status: inferTaskStatusByDate({
+      dateKey: date,
+      isCompleted: Boolean(item.is_completed),
+    }),
     remaining_seconds: null,
     completed_at: item.completed_at || null,
   }));
@@ -404,11 +430,26 @@ const getTodayPlan = asyncHandler(async (req, res) => {
 });
 
 const updateTodayStatus = asyncHandler(async (req, res) => {
-  const { workout_plan_id, schedule_item_id, date, is_completed, remaining_seconds } = req.body;
+  const { workout_plan_id, schedule_item_id, date, is_completed, remaining_seconds, task_status } = req.body;
   const normalizedDate = date || toDateKey(new Date());
   if ((!workout_plan_id && !schedule_item_id) || typeof is_completed !== "boolean") {
     return res.status(400).json({ message: "workout_plan_id or schedule_item_id and is_completed are required" });
   }
+  const normalizedTaskStatus = normalizeTaskStatus(task_status);
+  if (task_status != null && !normalizedTaskStatus) {
+    return res.status(400).json({
+      message: "task_status must be one of not_started, in_progress, paused, completed, missed, scheduled",
+    });
+  }
+  const resolvedStatus = inferTaskStatusByDate({
+    dateKey: normalizedDate,
+    isCompleted: Boolean(is_completed),
+    fallbackStatus: normalizedTaskStatus,
+  });
+  const parsedRemaining =
+    remaining_seconds === null || typeof remaining_seconds === "undefined"
+      ? null
+      : Math.max(0, Math.floor(Number(remaining_seconds)));
 
   if (schedule_item_id) {
     const scheduleItem = await ScheduleItem.findOne({
@@ -422,6 +463,24 @@ const updateTodayStatus = asyncHandler(async (req, res) => {
     scheduleItem.is_completed = is_completed;
     scheduleItem.completed_at = is_completed ? new Date() : null;
     await scheduleItem.save();
+    if (scheduleItem.planId) {
+      await WorkoutDailyStatus.findOneAndUpdate(
+        {
+          user_id: req.user.id,
+          workout_plan_id: scheduleItem.planId,
+          date: normalizedDate,
+        },
+        {
+          $set: {
+            is_completed: Boolean(is_completed),
+            status: resolvedStatus,
+            remaining_seconds: is_completed ? 0 : parsedRemaining,
+            completed_at: is_completed ? new Date() : null,
+          },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+    }
     if (becameCompleted) {
       const user = await User.findById(req.user.id).select("weight").lean();
       await Workout.create({
@@ -442,7 +501,8 @@ const updateTodayStatus = asyncHandler(async (req, res) => {
       schedule_item_id: scheduleItem._id,
       date: scheduleItem.date,
       is_completed: scheduleItem.is_completed,
-      remaining_seconds: null,
+      task_status: resolvedStatus,
+      remaining_seconds: is_completed ? 0 : parsedRemaining,
       completed_at: scheduleItem.completed_at,
     });
   }
@@ -452,17 +512,12 @@ const updateTodayStatus = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: "Workout plan not found" });
   }
 
-  const parsedRemaining =
-    remaining_seconds === null || typeof remaining_seconds === "undefined"
-      ? null
-      : Math.max(0, Math.floor(Number(remaining_seconds)));
-
   const previous = await WorkoutDailyStatus.findOne({
     user_id: req.user.id,
     workout_plan_id,
     date: normalizedDate,
   })
-    .select("is_completed")
+    .select("is_completed status")
     .lean();
   const becameCompleted = is_completed && !previous?.is_completed;
   const updated = await WorkoutDailyStatus.findOneAndUpdate(
@@ -474,6 +529,7 @@ const updateTodayStatus = asyncHandler(async (req, res) => {
     {
       $set: {
         is_completed,
+        status: resolvedStatus,
         remaining_seconds: is_completed ? 0 : parsedRemaining,
         completed_at: is_completed ? new Date() : null,
       },
@@ -515,6 +571,7 @@ const updateTodayStatus = asyncHandler(async (req, res) => {
     workout_plan_id: updated.workout_plan_id,
     date: updated.date,
     is_completed: updated.is_completed,
+    task_status: updated.status || resolvedStatus,
     remaining_seconds: updated.remaining_seconds,
     completed_at: updated.completed_at,
   });

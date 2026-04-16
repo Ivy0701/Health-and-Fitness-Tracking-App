@@ -13,6 +13,7 @@ const EnrolledCourse = require("../../models/EnrolledCourse");
 const Favorite = require("../../models/Favorite");
 const Course = require("../../models/Course");
 const REFUND_STATUSES = ["pending", "approved", "rejected"];
+const ACTIVE_VIP_PLANS = ["monthly", "yearly"];
 
 function toRefundRow(user) {
   return {
@@ -37,6 +38,43 @@ const safeIsoDate = (value) => {
   if (Number.isNaN(date.getTime())) return "";
   return date.toISOString().slice(0, 10);
 };
+
+const toLocalDateKey = (value = new Date()) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+};
+
+const VALID_SCHEDULE_FILTER = {
+  itemType: { $ne: "diet" },
+  title: { $exists: true, $type: "string", $ne: "" },
+  date: { $exists: true, $type: "string", $ne: "" },
+  time: { $exists: true, $type: "string", $ne: "" },
+};
+
+function emptyWorkoutStatusBreakdown() {
+  return {
+    not_started: 0,
+    in_progress: 0,
+    paused: 0,
+    completed: 0,
+    missed: 0,
+    scheduled: 0,
+  };
+}
+
+function isUserVipActive(user, now = new Date()) {
+  const flag = Boolean(user?.vip_status || user?.isVip);
+  const plan = String(user?.vipPlan || "none");
+  if (!flag || !ACTIVE_VIP_PLANS.includes(plan)) return false;
+  if (!user?.vipEndAt) return true;
+  const end = new Date(user.vipEndAt);
+  if (Number.isNaN(end.getTime())) return false;
+  return end.getTime() >= now.getTime();
+}
 
 const getDashboard = asyncHandler(async (req, res) => {
   const userId = req.user.id;
@@ -213,21 +251,43 @@ const getSystemStatus = asyncHandler(async (req, res) => {
   const now = new Date();
   const dayStart = new Date(now);
   dayStart.setHours(0, 0, 0, 0);
-  const todayDateKey = safeIsoDate(now);
+  const todayDateKey = toLocalDateKey(now);
   const weekAgo = new Date(now);
   weekAgo.setDate(weekAgo.getDate() - 7);
   const monthAgo = new Date(now);
   monthAgo.setDate(monthAgo.getDate() - 30);
 
-  const vipMatch = { $or: [{ vip_status: true }, { isVip: true }] };
+  const vipFlagMatch = { $or: [{ vip_status: true }, { isVip: true }] };
+  const vipActiveBaseMatch = {
+    ...vipFlagMatch,
+    vipPlan: { $in: ACTIVE_VIP_PLANS },
+  };
+
+  const vipDirtyFixResult = await User.updateMany(
+    {
+      ...vipFlagMatch,
+      vipPlan: "none",
+      refundStatus: { $ne: "pending" },
+    },
+    {
+      $set: {
+        isVip: false,
+        vip_status: false,
+        vipSince: null,
+        vipEndAt: null,
+      },
+    }
+  );
 
   const [
     totalWorkoutPlans,
-    completedWorkoutTasks,
+    completedWorkoutDailyTasks,
+    completedManualWorkoutScheduleTasks,
     totalDiets,
-    totalSchedules,
-    courseEnrollmentsActiveCompleted,
-    completedCourseDays,
+    totalSchedulesRows,
+    courseEnrollmentsActiveCompletedRows,
+    completedCourseDaysByCard,
+    completedCourseExercises,
     postsTotal,
     postsToday,
     likesTotalRows,
@@ -246,6 +306,7 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     totalVipUsers,
     vipMonthlyUsers,
     vipYearlyUsers,
+    vipExpiredUsers,
     vipActivePlanNone,
     totalCoursesInCatalog,
     premiumCoursesInCatalog,
@@ -258,19 +319,101 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     distinctScheduleUsers,
     distinctWorkoutPlanUsers,
     distinctWorkoutDailyUsers,
-    distinctCourseEnrolledUsers,
+    distinctCourseEnrolledUsersRows,
     distinctFavoriteUsers,
     distinctHealthRecordUsers,
-    totalEnrollmentsAllStatuses,
+    totalEnrollmentsAllStatusesRows,
+    workoutStatusRows,
+    totalBurnedCaloriesRows,
+    totalConsumedCaloriesRows,
   ] = await Promise.all([
     WorkoutPlan.countDocuments(),
     WorkoutDailyStatus.countDocuments({ is_completed: true }),
-    Diet.countDocuments(),
-    ScheduleItem.countDocuments(),
-    EnrolledCourse.countDocuments({
-      status: { $in: ["active", "completed"] },
+    ScheduleItem.countDocuments({
+      itemType: "workout",
+      is_completed: true,
+      planId: null,
     }),
+    Diet.countDocuments(),
+    ScheduleItem.aggregate([
+      {
+        $match: {
+          ...VALID_SCHEDULE_FILTER,
+          date: { $gte: todayDateKey },
+        },
+      },
+      {
+        $lookup: {
+          from: WorkoutPlan.collection.name,
+          localField: "planId",
+          foreignField: "_id",
+          as: "linkedPlan",
+        },
+      },
+      {
+        $lookup: {
+          from: Course.collection.name,
+          localField: "courseId",
+          foreignField: "_id",
+          as: "linkedCourse",
+        },
+      },
+      {
+        $match: {
+          $expr: {
+            $and: [
+              {
+                $or: [
+                  { $eq: ["$planId", null] },
+                  { $gt: [{ $size: "$linkedPlan" }, 0] },
+                ],
+              },
+              {
+                $or: [
+                  { $eq: ["$courseId", null] },
+                  { $gt: [{ $size: "$linkedCourse" }, 0] },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      { $count: "total" },
+    ]),
+    EnrolledCourse.aggregate([
+      { $match: { status: { $in: ["active", "completed"] } } },
+      {
+        $lookup: {
+          from: Course.collection.name,
+          localField: "course_id",
+          foreignField: "_id",
+          as: "course",
+        },
+      },
+      { $unwind: { path: "$course", preserveNullAndEmptyArrays: false } },
+      { $group: { _id: { user: "$user_id", course: "$course_id" } } },
+      { $count: "total" },
+    ]),
     CourseDailyProgress.countDocuments({ is_completed: true }),
+    CourseDailyProgress.aggregate([
+      {
+        $project: {
+          exercises: { $ifNull: ["$exercises", []] },
+        },
+      },
+      { $unwind: { path: "$exercises", preserveNullAndEmptyArrays: false } },
+      {
+        $group: {
+          _id: null,
+          completed: {
+            $sum: {
+              $cond: [{ $eq: ["$exercises.status", "completed"] }, 1, 0],
+            },
+          },
+          total: { $sum: 1 },
+        },
+      },
+    ]),
     ForumPost.countDocuments(),
     ForumPost.countDocuments({ createdAt: { $gte: dayStart } }),
     ForumPost.aggregate([
@@ -290,7 +433,7 @@ const getSystemStatus = asyncHandler(async (req, res) => {
       },
     ]),
     Diet.findOne().sort({ date: -1, createdAt: -1 }).select("date createdAt updatedAt").lean(),
-    ScheduleItem.findOne().sort({ createdAt: -1 }).select("date createdAt updatedAt").lean(),
+    ScheduleItem.findOne(VALID_SCHEDULE_FILTER).sort({ createdAt: -1 }).select("date createdAt updatedAt").lean(),
     WorkoutPlan.findOne().sort({ created_at: -1 }).select("created_at").lean(),
     WorkoutDailyStatus.findOne().sort({ updatedAt: -1, createdAt: -1 }).select("updatedAt createdAt").lean(),
     CourseDailyProgress.findOne().sort({ updatedAt: -1, createdAt: -1 }).select("updatedAt createdAt").lean(),
@@ -305,17 +448,48 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     User.countDocuments({ assessment_completed: true }),
     User.countDocuments({ createdAt: { $gte: weekAgo } }),
     User.countDocuments({ createdAt: { $gte: monthAgo } }),
-    User.countDocuments(vipMatch),
-    User.countDocuments({ ...vipMatch, vipPlan: "monthly" }),
-    User.countDocuments({ ...vipMatch, vipPlan: "yearly" }),
-    User.countDocuments({ ...vipMatch, vipPlan: "none" }),
+    User.countDocuments({
+      ...vipActiveBaseMatch,
+      $or: [{ vipEndAt: null }, { vipEndAt: { $gte: now } }],
+    }),
+    User.countDocuments({
+      ...vipActiveBaseMatch,
+      vipPlan: "monthly",
+      $or: [{ vipEndAt: null }, { vipEndAt: { $gte: now } }],
+    }),
+    User.countDocuments({
+      ...vipActiveBaseMatch,
+      vipPlan: "yearly",
+      $or: [{ vipEndAt: null }, { vipEndAt: { $gte: now } }],
+    }),
+    User.countDocuments({
+      ...vipActiveBaseMatch,
+      vipEndAt: { $lt: now },
+    }),
+    User.countDocuments({ ...vipFlagMatch, vipPlan: "none" }),
     Course.countDocuments(),
     Course.countDocuments({ isPremium: true }),
-    EnrolledCourse.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
+    EnrolledCourse.aggregate([
+      {
+        $lookup: {
+          from: Course.collection.name,
+          localField: "course_id",
+          foreignField: "_id",
+          as: "course",
+        },
+      },
+      { $unwind: { path: "$course", preserveNullAndEmptyArrays: false } },
+      {
+        $group: {
+          _id: { user: "$user_id", course: "$course_id" },
+          status: { $first: "$status" },
+        },
+      },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]),
     EnrolledCourse.aggregate([
       { $group: { _id: "$course_id", enrollments: { $sum: 1 } } },
-      { $sort: { enrollments: -1 } },
-      { $limit: 10 },
+      { $match: { _id: { $ne: null } } },
       {
         $lookup: {
           from: Course.collection.name,
@@ -324,17 +498,28 @@ const getSystemStatus = asyncHandler(async (req, res) => {
           as: "course",
         },
       },
+      { $unwind: { path: "$course", preserveNullAndEmptyArrays: false } },
+      {
+        $match: {
+          $expr: {
+            $not: {
+              $and: [
+                { $eq: [{ $toLower: { $ifNull: ["$course.title", ""] } }, "run"] },
+                { $lte: [{ $ifNull: ["$course.duration", 0] }, 1] },
+              ],
+            },
+          },
+        },
+      },
+      { $sort: { enrollments: -1, "course.title": 1 } },
+      { $limit: 10 },
       {
         $project: {
           _id: 0,
           courseId: "$_id",
           enrollments: 1,
-          title: {
-            $ifNull: [{ $arrayElemAt: ["$course.title", 0] }, ""],
-          },
-          isPremium: {
-            $ifNull: [{ $arrayElemAt: ["$course.isPremium", 0] }, false],
-          },
+          title: { $ifNull: ["$course.title", ""] },
+          isPremium: { $ifNull: ["$course.isPremium", false] },
         },
       },
     ]),
@@ -342,18 +527,132 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     ForumPost.distinct("userId"),
     Workout.distinct("userId"),
     Diet.distinct("userId"),
-    ScheduleItem.distinct("userId"),
+    ScheduleItem.distinct("userId", VALID_SCHEDULE_FILTER),
     WorkoutPlan.distinct("user_id"),
     WorkoutDailyStatus.distinct("user_id"),
-    EnrolledCourse.distinct("user_id", { status: { $in: ["active", "completed"] } }),
+    EnrolledCourse.aggregate([
+      { $match: { status: { $in: ["active", "completed"] } } },
+      {
+        $lookup: {
+          from: Course.collection.name,
+          localField: "course_id",
+          foreignField: "_id",
+          as: "course",
+        },
+      },
+      { $unwind: { path: "$course", preserveNullAndEmptyArrays: false } },
+      { $group: { _id: "$user_id" } },
+    ]),
     Favorite.distinct("userId"),
     HealthRecord.distinct("userId"),
-    EnrolledCourse.countDocuments(),
+    EnrolledCourse.aggregate([
+      {
+        $lookup: {
+          from: Course.collection.name,
+          localField: "course_id",
+          foreignField: "_id",
+          as: "course",
+        },
+      },
+      { $unwind: { path: "$course", preserveNullAndEmptyArrays: false } },
+      { $group: { _id: { user: "$user_id", course: "$course_id" } } },
+      { $count: "total" },
+    ]),
+    ScheduleItem.aggregate([
+      {
+        $match: {
+          itemType: "workout",
+          title: { $exists: true, $type: "string", $ne: "" },
+          date: { $exists: true, $type: "string", $ne: "" },
+          time: { $exists: true, $type: "string", $ne: "" },
+        },
+      },
+      {
+        $lookup: {
+          from: WorkoutPlan.collection.name,
+          localField: "planId",
+          foreignField: "_id",
+          as: "plan",
+        },
+      },
+      {
+        $match: {
+          $expr: {
+            $or: [
+              { $eq: ["$planId", null] },
+              { $gt: [{ $size: "$plan" }, 0] },
+            ],
+          },
+        },
+      },
+      {
+        $lookup: {
+          from: WorkoutDailyStatus.collection.name,
+          let: { uid: "$userId", pid: "$planId", d: "$date" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ["$user_id", "$$uid"] },
+                    { $eq: ["$workout_plan_id", "$$pid"] },
+                    { $eq: ["$date", "$$d"] },
+                  ],
+                },
+              },
+            },
+            { $project: { _id: 0, status: 1, is_completed: 1 } },
+            { $limit: 1 },
+          ],
+          as: "dailyStatus",
+        },
+      },
+      { $set: { dailyStatus: { $arrayElemAt: ["$dailyStatus", 0] } } },
+      {
+        $set: {
+          normalizedStatus: {
+            $switch: {
+              branches: [
+                {
+                  case: {
+                    $or: [{ $eq: ["$is_completed", true] }, { $eq: ["$dailyStatus.is_completed", true] }],
+                  },
+                  then: "completed",
+                },
+                { case: { $eq: ["$dailyStatus.status", "paused"] }, then: "paused" },
+                { case: { $eq: ["$dailyStatus.status", "in_progress"] }, then: "in_progress" },
+                { case: { $eq: ["$dailyStatus.status", "scheduled"] }, then: "scheduled" },
+                { case: { $eq: ["$dailyStatus.status", "missed"] }, then: "missed" },
+                { case: { $eq: ["$dailyStatus.status", "not_started"] }, then: "not_started" },
+                { case: { $gt: ["$date", todayDateKey] }, then: "scheduled" },
+                { case: { $lt: ["$date", todayDateKey] }, then: "missed" },
+              ],
+              default: "not_started",
+            },
+          },
+        },
+      },
+      { $group: { _id: "$normalizedStatus", count: { $sum: 1 } } },
+    ]),
+    Workout.aggregate([
+      { $group: { _id: null, total: { $sum: "$caloriesBurned" } } },
+    ]),
+    Diet.aggregate([
+      { $group: { _id: null, total: { $sum: "$calories" } } },
+    ]),
   ]);
 
   const likesTotal = likesTotalRows[0]?.total || 0;
   const commentsTotal = commentsTotalRows[0]?.total || 0;
   const communityInteractions = likesTotal + commentsTotal;
+  const completedWorkoutTasks = Number(completedWorkoutDailyTasks || 0) + Number(completedManualWorkoutScheduleTasks || 0);
+  const completedCourseExercisesTotal = Number(completedCourseExercises?.[0]?.completed || 0);
+  const totalCourseExercisesTotal = Number(completedCourseExercises?.[0]?.total || 0);
+  const burnedCaloriesTotal = Number(totalBurnedCaloriesRows?.[0]?.total || 0);
+  const consumedCaloriesTotal = Number(totalConsumedCaloriesRows?.[0]?.total || 0);
+  const totalSchedules = Number(totalSchedulesRows?.[0]?.total || 0);
+  const courseEnrollmentsActiveCompleted = Number(courseEnrollmentsActiveCompletedRows?.[0]?.total || 0);
+  const totalEnrollmentsAllStatuses = Number(totalEnrollmentsAllStatusesRows?.[0]?.total || 0);
 
   const activityCandidates = [
     latestDiet?.date,
@@ -394,12 +693,22 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     }
   }
 
-  const topCourses = (topCoursesByEnrollment || []).map((row) => ({
-    courseId: row.courseId ? String(row.courseId) : "",
-    title: row.title || "(Course missing or deleted)",
-    enrollments: row.enrollments || 0,
-    isPremium: Boolean(row.isPremium),
-  }));
+  const topCourses = (topCoursesByEnrollment || [])
+    .map((row) => ({
+      courseId: row.courseId ? String(row.courseId) : "",
+      title: String(row.title || "").trim(),
+      enrollments: row.enrollments || 0,
+      isPremium: Boolean(row.isPremium),
+    }))
+    .filter((row) => row.courseId && row.title);
+
+  const workoutStatusBreakdown = emptyWorkoutStatusBreakdown();
+  for (const row of workoutStatusRows || []) {
+    const key = String(row?._id || "");
+    if (Object.prototype.hasOwnProperty.call(workoutStatusBreakdown, key)) {
+      workoutStatusBreakdown[key] = Number(row?.count || 0);
+    }
+  }
 
   const avgEnrollmentsPerCourse =
     totalCoursesInCatalog > 0 ? Math.round((totalEnrollmentsAllStatuses / totalCoursesInCatalog) * 100) / 100 : 0;
@@ -407,7 +716,7 @@ const getSystemStatus = asyncHandler(async (req, res) => {
   const registeredUsersPreview = await User.find()
     .sort({ createdAt: -1 })
     .limit(12)
-    .select("username email createdAt vip_status isVip vipPlan assessment_completed")
+    .select("username email createdAt vip_status isVip vipPlan vipEndAt assessment_completed")
     .lean();
   const refundUsers = await User.find({ refundStatus: { $in: REFUND_STATUSES } })
     .sort({ refundRequestedAt: -1, updatedAt: -1 })
@@ -430,7 +739,7 @@ const getSystemStatus = asyncHandler(async (req, res) => {
         email: u.email || "",
         createdAt: u.createdAt ? new Date(u.createdAt).toISOString() : null,
         assessmentCompleted: Boolean(u.assessment_completed),
-        isVip: Boolean(u.vip_status || u.isVip),
+        isVip: isUserVipActive(u, now),
         vipPlan: u.vipPlan || "none",
       })),
     },
@@ -438,8 +747,10 @@ const getSystemStatus = asyncHandler(async (req, res) => {
       totalVipUsers,
       monthlyPlanUsers: vipMonthlyUsers,
       yearlyPlanUsers: vipYearlyUsers,
+      expiredVipUsers: vipExpiredUsers,
       vipButPlanNone: vipActivePlanNone,
       refundPendingRequests: pendingCount,
+      autoCleanedVipFlagPlanMismatch: Number(vipDirtyFixResult?.modifiedCount || 0),
     },
     refundRequests: {
       pendingCount,
@@ -464,7 +775,7 @@ const getSystemStatus = asyncHandler(async (req, res) => {
       distinctUsersWithSchedule: distinctScheduleUsers.length,
       distinctUsersWithWorkoutPlan: distinctWorkoutPlanUsers.length,
       distinctUsersWithWorkoutDaily: distinctWorkoutDailyUsers.length,
-      distinctUsersWithCourseEnrollment: distinctCourseEnrolledUsers.length,
+      distinctUsersWithCourseEnrollment: distinctCourseEnrolledUsersRows.length,
       distinctUsersWithForumPost: distinctForumAuthors.length,
       distinctUsersWithFavorite: distinctFavoriteUsers.length,
       distinctUsersWithHealthRecord: distinctHealthRecordUsers.length,
@@ -472,12 +783,18 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     featureUsage: {
       workoutPlansCreated: totalWorkoutPlans,
       workoutTasksCompleted: completedWorkoutTasks,
+      completedManualWorkoutScheduleTasks: completedManualWorkoutScheduleTasks || 0,
       dietEntries: totalDiets,
       scheduleItems: totalSchedules,
       courseEnrollments: courseEnrollmentsActiveCompleted,
-      completedCourseDays,
+      completedCourseDays: completedCourseDaysByCard,
+      completedCourseExercises: completedCourseExercisesTotal,
+      totalCourseExercises: totalCourseExercisesTotal,
       favoritesSaved: totalFavorites,
+      totalCaloriesBurned: burnedCaloriesTotal,
+      totalCaloriesConsumed: consumedCaloriesTotal,
     },
+    workoutStatusBreakdown,
     community: {
       postsToday,
       postsTotal,

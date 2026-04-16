@@ -5,6 +5,8 @@ import WorkoutDateSlider from "../components/workout/WorkoutDateSlider.vue";
 import api from "../services/api";
 import { useRoute, useRouter } from "vue-router";
 import { useFavorites } from "../services/favorites";
+import { buildWorkoutSessionTaskId, loadWorkoutSessionState } from "../utils/workoutSessionState";
+import { compareDateKeys, getTodayLocalDate, normalizeDateKey as normalizeLocalDateKey } from "../utils/dateLocal";
 
 const route = useRoute();
 const router = useRouter();
@@ -16,6 +18,7 @@ const plans = ref([]);
 const error = ref("");
 const success = ref("");
 const userWeight = ref(null);
+const currentUserId = ref("");
 const todayInfo = ref({
   date: "",
   hasAnyPlan: false,
@@ -25,8 +28,8 @@ const todayInfo = ref({
   workout_tasks: [],
   course_tasks: [],
 });
-const selectedDate = ref(new Date().toISOString().slice(0, 10));
-const todayDateKey = new Date().toISOString().slice(0, 10);
+const selectedDate = ref(getTodayLocalDate());
+const todayDateKey = computed(() => getTodayLocalDate());
 const focusedPlanId = ref("");
 const expandedCourseIds = ref(new Set());
 const courseExerciseLoadingKeys = ref(new Set());
@@ -190,6 +193,7 @@ async function focusPlanFromQuery() {
 async function loadProfile() {
   const { data } = await api.get("/user/profile");
   userWeight.value = typeof data?.weight === "number" ? data.weight : null;
+  currentUserId.value = String(data?.id || data?._id || "");
 }
 
 async function loadTodayInfo() {
@@ -199,22 +203,7 @@ async function loadTodayInfo() {
 
 const hasPlans = computed(() => plans.value.length > 0);
 function normalizeDateKey(value) {
-  if (!value) return "";
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    const y = value.getFullYear();
-    const m = String(value.getMonth() + 1).padStart(2, "0");
-    const d = String(value.getDate()).padStart(2, "0");
-    return `${y}-${m}-${d}`;
-  }
-  const raw = String(value).trim();
-  const keyHit = raw.match(/^\d{4}-\d{2}-\d{2}/);
-  if (keyHit) return keyHit[0];
-  const parsed = new Date(raw);
-  if (Number.isNaN(parsed.getTime())) return "";
-  const y = parsed.getFullYear();
-  const m = String(parsed.getMonth() + 1).padStart(2, "0");
-  const d = String(parsed.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+  return normalizeLocalDateKey(value);
 }
 
 function taskDateKey(task, fallbackDate = "") {
@@ -248,7 +237,24 @@ const todayStatus = computed(() => {
   }
   return todayTasks.value.every((task) => isCompletedTask(task)) ? "Completed" : "Incomplete";
 });
-const canToggleTasks = computed(() => selectedDate.value === todayDateKey);
+const canToggleTasks = computed(() => normalizeDateKey(selectedDate.value) === normalizeDateKey(todayDateKey.value));
+const selectedDateKey = computed(() => normalizeDateKey(selectedDate.value));
+const todayKey = computed(() => normalizeDateKey(todayDateKey.value));
+const selectedDateMode = computed(() => {
+  if (!selectedDateKey.value || !todayKey.value) return "today";
+  const relation = compareDateKeys(selectedDateKey.value, todayKey.value);
+  if (relation < 0) return "past";
+  if (relation > 0) return "future";
+  return "today";
+});
+const isPastSelectedDate = computed(() => selectedDateMode.value === "past");
+const isFutureSelectedDate = computed(() => selectedDateMode.value === "future");
+const isTodaySelectedDate = computed(() => selectedDateMode.value === "today");
+const dateReadonlyHint = computed(() => {
+  if (isPastSelectedDate.value) return "This is a past record. Tasks are read-only.";
+  if (isFutureSelectedDate.value) return "This is a scheduled plan. Tasks cannot be completed yet.";
+  return "";
+});
 
 function asNumber(value) {
   const n = Number(value);
@@ -348,13 +354,24 @@ function isCourseTaskFullyCompleted(task) {
 }
 
 function courseMainActionLabel(task) {
+  if (isPastSelectedDate.value) return "View Summary";
+  if (isFutureSelectedDate.value) {
+    return hasCourseTaskStarted(task) || isCourseTaskFullyCompleted(task) ? "View" : "Scheduled";
+  }
   if (isCourseTaskFullyCompleted(task)) return "Completed";
   if (!hasCourseTaskStarted(task)) return "Start Course";
   return "Continue";
 }
 
+function shouldDisableCourseMainAction(task) {
+  if (isFutureSelectedDate.value) return !hasCourseTaskStarted(task) && !isCourseTaskFullyCompleted(task);
+  if (isPastSelectedDate.value) return false;
+  return false;
+}
+
 function handleCourseMainAction(task) {
-  if (isCourseTaskFullyCompleted(task)) return;
+  if (isFutureSelectedDate.value && !hasCourseTaskStarted(task) && !isCourseTaskFullyCompleted(task)) return;
+  if (isTodaySelectedDate.value && isCourseTaskFullyCompleted(task)) return;
   const key = courseTaskKey(task);
   if (!key) return;
   const next = new Set(expandedCourseIds.value);
@@ -390,12 +407,15 @@ function getCourseExerciseDurationMinutes(exercise) {
 }
 
 function courseExerciseStatusLabel(exercise) {
+  if (isFutureSelectedDate.value) return "Scheduled";
+  if (isPastSelectedDate.value) return isCourseExerciseCompleted(exercise) ? "Completed" : "Missed";
   if (isCourseExerciseCompleted(exercise)) return "Completed";
   if (isCourseExerciseInProgress(exercise)) return "In Progress";
   return "Not Started";
 }
 
 function courseExerciseActionLabel(exercise) {
+  if (!isTodaySelectedDate.value) return "";
   if (isCourseExerciseCompleted(exercise)) return "Completed";
   if (isCourseExerciseInProgress(exercise)) {
     return isRepsCourseExercise(exercise) ? "Complete" : "Continue Timer";
@@ -417,7 +437,7 @@ function getCourseTaskCompletedBurn(task) {
 
 async function updateCourseExercise(task, exercise, nextStatus) {
   if (!canToggleTasks.value) {
-    window.alert("You can only check plans for today!");
+    window.alert(isPastSelectedDate.value ? "Past records are read-only." : "Scheduled tasks cannot be completed yet.");
     return;
   }
   const enrolledId = task?.enrolled_course_id;
@@ -443,6 +463,7 @@ async function updateCourseExercise(task, exercise, nextStatus) {
 }
 
 async function handleCourseExerciseAction(task, exercise) {
+  if (!isTodaySelectedDate.value) return;
   if (isCourseExerciseCompleted(exercise)) return;
   if (isTimerCourseExercise(exercise)) {
     if (!isCourseExerciseInProgress(exercise)) {
@@ -487,9 +508,21 @@ const hasCustomOrUnknownTask = computed(() =>
 );
 
 function startWorkoutTask(task) {
+  if (!isTodaySelectedDate.value) return;
   const planId = task.workout_plan_id || task.id || task._id;
   const scheduleItemId = task.schedule_item_id || "";
   if (!planId && !scheduleItemId) return;
+  const taskId = buildWorkoutSessionTaskId({
+    planId: planId ? String(planId) : "",
+    scheduleItemId: scheduleItemId ? String(scheduleItemId) : "",
+  });
+  const saved = loadWorkoutSessionState({
+    userId: currentUserId.value,
+    taskId,
+    date: selectedDate.value,
+  });
+  const remainingFromSaved =
+    saved && saved.status === "in_progress" && saved.remainingTime > 0 ? saved.remainingTime : Number(task.remaining_seconds || 0);
   router.push({
     path: "/workout/session",
     query: {
@@ -499,10 +532,27 @@ function startWorkoutTask(task) {
       exercise: task.exercise_name,
       duration: String(task.duration_per_day),
       category: task.category || "",
-      remaining: task.remaining_seconds != null ? String(task.remaining_seconds) : "",
+      remaining: remainingFromSaved > 0 ? String(remainingFromSaved) : "",
       estimatedBurn: String(Math.round(estimateBurnKcal(task))),
     },
   });
+}
+
+function taskRuntimeState(task) {
+  const planId = task?.workout_plan_id || task?.id || task?._id;
+  const scheduleItemId = task?.schedule_item_id || "";
+  const taskId = buildWorkoutSessionTaskId({
+    planId: planId ? String(planId) : "",
+    scheduleItemId: scheduleItemId ? String(scheduleItemId) : "",
+  });
+  if (!taskId) return null;
+  const saved = loadWorkoutSessionState({
+    userId: currentUserId.value,
+    taskId,
+    date: selectedDate.value,
+  });
+  if (!saved || saved.status !== "in_progress" || saved.remainingTime <= 0) return null;
+  return saved;
 }
 
 function taskSourceLabel(task) {
@@ -512,10 +562,28 @@ function taskSourceLabel(task) {
 }
 
 function workoutActionLabel(task) {
+  if (isFutureSelectedDate.value) return "Scheduled";
+  if (isPastSelectedDate.value) return isCompletedTask(task) ? "Completed" : "Missed";
+  if (taskRuntimeState(task)) return "Continue Timer";
   return "Start";
 }
 
+function workoutRuntimeStatusLabel(task) {
+  if (!isTodaySelectedDate.value || isCompletedTask(task)) return "";
+  const saved = taskRuntimeState(task);
+  if (!saved) return "";
+  return "In Progress";
+}
+
+function showCannotAddPastDateAlert() {
+  window.alert("Cannot add to past date\n\nPast dates are read-only. Please choose today or a future date.");
+}
+
 async function savePlan() {
+  if (isPastSelectedDate.value) {
+    showCannotAddPastDateAlert();
+    return;
+  }
   error.value = "";
   success.value = "";
   if (isCustomExercise.value && !form.customExercise.trim()) {
@@ -611,8 +679,11 @@ async function savePlan() {
 }
 
 onMounted(async () => {
-  if (typeof route.query.date === "string" && route.query.date) {
-    selectedDate.value = route.query.date;
+  const routeDate = typeof route.query.date === "string" ? normalizeDateKey(route.query.date) : "";
+  if (route.query.fromSession === "1" && routeDate) {
+    selectedDate.value = routeDate;
+  } else {
+    selectedDate.value = getTodayLocalDate();
   }
   try {
     await Promise.all([loadPlans(), loadProfile(), loadTodayInfo(), ensureFavoritesLoaded()]);
@@ -641,7 +712,11 @@ watch(
   () => route.query.date,
   async (nextDate) => {
     if (typeof nextDate !== "string" || !nextDate) return;
-    selectedDate.value = nextDate;
+    const normalized = normalizeDateKey(nextDate);
+    if (!normalized) return;
+    if (route.query.fromSession === "1") {
+      selectedDate.value = normalized;
+    }
     await loadTodayInfo();
   }
 );
@@ -667,6 +742,7 @@ async function handleDateChange(dateKey) {
         }">
           Status: {{ todayStatus }}
         </p>
+        <p v-if="dateReadonlyHint" class="date-mode-hint">{{ dateReadonlyHint }}</p>
 
         <div class="task-section">
           <h4>Workout Tasks</h4>
@@ -677,13 +753,21 @@ async function handleDateChange(dateKey) {
                 <strong>{{ task.exercise_name }}</strong>
                 <span>- {{ task.duration_per_day }} min</span>
                 <span class="task-source">{{ taskSourceLabel(task) }}</span>
+                <span v-if="workoutRuntimeStatusLabel(task)" class="task-source">{{ workoutRuntimeStatusLabel(task) }}</span>
                 <span class="task-kcal">Estimated burn: {{ formatKcal(estimateBurnKcal(task)) }}</span>
               </div>
               <div class="task-action">
-                <button v-if="!isCompletedTask(task)" class="start-btn" type="button" @click="startWorkoutTask(task)">
+                <button
+                  v-if="!isCompletedTask(task) && (isTodaySelectedDate || isFutureSelectedDate)"
+                  class="start-btn"
+                  type="button"
+                  :disabled="!isTodaySelectedDate"
+                  @click="startWorkoutTask(task)"
+                >
                   {{ workoutActionLabel(task) }}
                 </button>
-                <span v-else class="done-badge">Completed</span>
+                <span v-else-if="isCompletedTask(task)" class="done-badge">Completed</span>
+                <span v-else class="missed-badge">Missed</span>
               </div>
             </li>
           </ul>
@@ -701,9 +785,10 @@ async function handleDateChange(dateKey) {
               </div>
               <div class="task-action">
                 <button
-                  v-if="!isCourseTaskFullyCompleted(task)"
+                  v-if="isPastSelectedDate || isFutureSelectedDate || !isCourseTaskFullyCompleted(task)"
                   class="start-btn"
                   type="button"
+                  :disabled="shouldDisableCourseMainAction(task)"
                   @click="handleCourseMainAction(task)"
                 >
                   {{ courseMainActionLabel(task) }}
@@ -729,7 +814,7 @@ async function handleDateChange(dateKey) {
                     </div>
                     <div class="task-action">
                       <button
-                        v-if="!isCourseExerciseCompleted(exercise)"
+                        v-if="!isCourseExerciseCompleted(exercise) && isTodaySelectedDate"
                         class="start-btn"
                         type="button"
                         :disabled="courseExerciseLoadingKeys.has(courseExerciseLoadingKey(task, exercise))"
@@ -737,7 +822,9 @@ async function handleDateChange(dateKey) {
                       >
                         {{ courseExerciseActionLabel(exercise) }}
                       </button>
-                      <span v-else class="done-badge">Completed</span>
+                      <span v-else-if="isCourseExerciseCompleted(exercise)" class="done-badge">Completed</span>
+                      <span v-else-if="isFutureSelectedDate" class="scheduled-badge">Scheduled</span>
+                      <span v-else class="missed-badge">Missed</span>
                     </div>
                   </li>
                 </ul>
@@ -770,10 +857,17 @@ async function handleDateChange(dateKey) {
       <article class="panel plan-panel">
         <div class="plan-header">
           <h3>📋 Add Workout Plan</h3>
-          <button class="add-btn" type="button" @click="showForm = !showForm">
+          <button
+            class="add-btn"
+            type="button"
+            :disabled="isPastSelectedDate"
+            :title="isPastSelectedDate ? 'Past dates are read-only' : ''"
+            @click="showForm = !showForm"
+          >
             {{ showForm ? "Close" : "+ Add Workout Plan" }}
           </button>
         </div>
+        <p v-if="isPastSelectedDate" class="muted add-plan-disabled-hint">Past dates are read-only.</p>
         <p class="muted">You can add exercises here, and join courses from the Courses page.</p>
 
         <form v-if="showForm" novalidate @submit.prevent="savePlan">
@@ -810,7 +904,7 @@ async function handleDateChange(dateKey) {
             <input v-model="form.startTime" type="time" />
           </label>
 
-          <button type="submit" :disabled="saving">{{ saving ? "Saving..." : "Save Plan" }}</button>
+          <button type="submit" :disabled="saving || isPastSelectedDate">{{ saving ? "Saving..." : "Save Plan" }}</button>
         </form>
 
         <p v-if="error" class="error-text">{{ error }}</p>
@@ -868,6 +962,15 @@ async function handleDateChange(dateKey) {
   font-weight: 600;
 }
 
+.add-btn:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
+.add-plan-disabled-hint {
+  margin-top: -2px;
+}
+
 .estimate-wrap {
   text-align: center;
   padding: 14px;
@@ -907,6 +1010,12 @@ async function handleDateChange(dateKey) {
 
 .goal-status.incomplete {
   color: #b45309;
+}
+
+.date-mode-hint {
+  margin: -6px 0 12px;
+  color: #486170;
+  font-size: 12px;
 }
 
 .task-section {
@@ -1026,6 +1135,12 @@ async function handleDateChange(dateKey) {
   filter: brightness(1.06);
 }
 
+.start-btn:disabled {
+  cursor: not-allowed;
+  filter: grayscale(0.18);
+  opacity: 0.72;
+}
+
 .done-badge {
   background: #e4f4ee;
   color: #1b7e5a;
@@ -1035,6 +1150,26 @@ async function handleDateChange(dateKey) {
   font-weight: 700;
   min-width: 94px;
   text-align: center;
+}
+
+.scheduled-badge,
+.missed-badge {
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  min-width: 94px;
+  text-align: center;
+}
+
+.scheduled-badge {
+  background: #e7f0ef;
+  color: #486170;
+}
+
+.missed-badge {
+  background: #eceff1;
+  color: #6b7280;
 }
 
 .calories-block {

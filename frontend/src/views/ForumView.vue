@@ -1,26 +1,39 @@
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { storeToRefs } from "pinia";
 import { useRoute } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
 import { useFavorites } from "../services/favorites";
 import { formatRelativeTime } from "../utils/formatRelativeTime";
+import { useForumCenterStore } from "../stores/forumCenter";
+import { buildForumMockPosts } from "../mocks/forumMockPosts";
 
-const posts = ref([]);
 const route = useRoute();
 const form = reactive({ title: "", content: "" });
-const me = ref(null);
+const publishErrors = reactive({ title: "", content: "" });
+const publishNotice = ref("");
 const searchQuery = ref("");
 const activeFilter = ref("all");
 const expandedComments = ref({});
 const commentDrafts = ref({});
 const likeLoading = ref({});
 const commentLoading = ref({});
+const replyLoading = ref({});
+const activeReplyTarget = ref({ postId: "", commentId: "" });
+const replyDraft = ref("");
+const replyError = ref("");
 const commentEditDrafts = ref({});
 const commentEditLoading = ref({});
-const { isFavorited, toggleFavorite, ensureFavoritesLoaded } = useFavorites();
+const { favorites, isFavorited, toggleFavorite, ensureFavoritesLoaded } = useFavorites();
 const focusedPostId = ref("");
+const notificationsOpen = ref(false);
+const createModalOpen = ref(false);
+const saveNotice = ref("");
 let focusTimer = null;
+
+const forumCenter = useForumCenterStore();
+const { currentUser: me, posts, notifications, savedPostIds } = storeToRefs(forumCenter);
 
 /** Tag keys stored in API (English slugs). */
 const TAG_OPTIONS = [
@@ -47,6 +60,7 @@ const FILTER_CHIPS = [
   { id: "new", label: "New" },
   { id: "diet", label: "Diet" },
   { id: "train", label: "Training" },
+  { id: "favorites", label: "Favorites" },
 ];
 
 const AVATAR_BG = ["#48aea4", "#70d1ac", "#316879", "#348b93", "#a7f2ad", "#2f4858"];
@@ -93,8 +107,17 @@ function displayTags(p) {
   return raw.length ? raw : ["general"];
 }
 
+function getPostComments(post) {
+  return Array.isArray(post?.comments) ? post.comments : [];
+}
+
+function getCommentCount(post) {
+  // Unified rule: include all comments currently stored (top-level + replies).
+  return getPostComments(post).length;
+}
+
 function engagementScore(p) {
-  return (p.likeCount || 0) + (p.commentCount || 0);
+  return (p.likeCount || 0) + getCommentCount(p);
 }
 
 const visiblePosts = computed(() => {
@@ -130,32 +153,96 @@ const visiblePosts = computed(() => {
   return rows;
 });
 
+const filteredPosts = computed(() => {
+  if (activeFilter.value !== "favorites") return visiblePosts.value;
+  const saved = new Set(savedPostIds.value.map((id) => String(id)));
+  return visiblePosts.value.filter((post) => saved.has(String(post?._id || "")));
+});
+
+const unreadNotificationsCount = computed(() => forumCenter.unreadCount);
+const trimmedTitle = computed(() => String(form.title || "").trim());
+const trimmedContent = computed(() => String(form.content || "").trim());
+const isPublishDisabled = computed(() => !trimmedTitle.value || !trimmedContent.value);
+
+function syncSavedPostIdsFromFavorites() {
+  const ids = (Array.isArray(favorites.value) ? favorites.value : [])
+    .filter((row) => String(row?.itemType || "").toLowerCase() === "forum")
+    .map((row) => String(row?.itemId || ""))
+    .filter(Boolean);
+  forumCenter.setSavedPostIds(ids);
+}
+
 function toggleFormTag(value) {
   const i = selectedTags.value.indexOf(value);
   if (i === -1) selectedTags.value = [...selectedTags.value, value];
   else selectedTags.value = selectedTags.value.filter((t) => t !== value);
 }
 
-async function load() {
-  me.value = await api.get("/users/me").then((r) => r.data);
-  posts.value = await api.get("/forum/posts").then((r) => r.data);
+function handleTitleInput() {
+  if (publishErrors.title) publishErrors.title = "";
+  if (publishNotice.value) publishNotice.value = "";
 }
 
-async function focusPostFromQuery() {
-  const focusId = String(route.query.focusItem || "").trim();
-  if (!focusId) return;
-  const exists = posts.value.some((post) => String(post?._id || "") === focusId);
+function handleContentInput() {
+  if (publishErrors.content) publishErrors.content = "";
+  if (publishNotice.value) publishNotice.value = "";
+}
+
+function validatePublishForm() {
+  publishErrors.title = trimmedTitle.value ? "" : "Title cannot be empty";
+  publishErrors.content = trimmedContent.value ? "" : "Content cannot be empty";
+  const valid = !publishErrors.title && !publishErrors.content;
+  if (!valid) {
+    publishNotice.value = "Please fill in all required fields before publishing";
+  } else {
+    publishNotice.value = "";
+  }
+  return valid;
+}
+
+async function load() {
+  const [user, forumPosts] = await Promise.all([
+    api.get("/users/me").then((r) => r.data),
+    api.get("/forum/posts").then((r) => r.data),
+  ]);
+  forumCenter.setCurrentUser(user);
+  const realPosts = Array.isArray(forumPosts) ? forumPosts : [];
+  const minDisplayCount = 20;
+  const mockPosts = buildForumMockPosts();
+  const remaining = Math.max(0, minDisplayCount - realPosts.length);
+  const mergedPosts = [...realPosts, ...mockPosts.slice(0, remaining)];
+  forumCenter.syncPosts(mergedPosts);
+  syncSavedPostIdsFromFavorites();
+}
+
+async function fetchNotifications() {
+  const rows = await api.get("/notifications").then((r) => (Array.isArray(r.data) ? r.data : []));
+  forumCenter.setNotifications(rows);
+}
+
+async function focusPostById(postId, options = {}) {
+  const targetId = String(postId || "").trim();
+  if (!targetId) return;
+  const exists = posts.value.some((post) => String(post?._id || "") === targetId);
   if (!exists) return;
-  activeFilter.value = "all";
-  searchQuery.value = "";
-  focusedPostId.value = focusId;
+  if (options.resetFilter !== false) {
+    activeFilter.value = "all";
+    searchQuery.value = "";
+  }
+  focusedPostId.value = targetId;
   await nextTick();
-  const el = document.querySelector(`[data-post-id="${focusId}"]`);
+  const el = document.querySelector(`[data-post-id="${targetId}"]`);
   if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
   if (focusTimer) window.clearTimeout(focusTimer);
   focusTimer = window.setTimeout(() => {
     focusedPostId.value = "";
   }, 2200);
+}
+
+async function focusPostFromQuery() {
+  const focusId = String(route.query.focusItem || "").trim();
+  if (!focusId) return;
+  await focusPostById(focusId);
 }
 
 function isCommentsExpanded(postId) {
@@ -178,6 +265,54 @@ function setCommentDraft(postId, value) {
     ...commentDrafts.value,
     [postId]: value,
   };
+}
+
+function commentIdValue(comment) {
+  return String(comment?._id || comment?.id || "");
+}
+
+function commentParentIdValue(comment) {
+  return String(comment?.parentCommentId || "");
+}
+
+function isReplyComment(comment) {
+  return Boolean(commentParentIdValue(comment));
+}
+
+function rootComments(post) {
+  const rows = getPostComments(post);
+  return rows
+    .filter((item) => !isReplyComment(item))
+    .sort((a, b) => new Date(a?.createdAt || 0) - new Date(b?.createdAt || 0));
+}
+
+function repliesForComment(post, rootCommentId) {
+  const target = String(rootCommentId || "");
+  const rows = getPostComments(post);
+  return rows
+    .filter((item) => commentParentIdValue(item) === target)
+    .sort((a, b) => new Date(a?.createdAt || 0) - new Date(b?.createdAt || 0));
+}
+
+function hasAnyComments(post) {
+  return getCommentCount(post) > 0;
+}
+
+function isReplyTarget(postId, commentId) {
+  return String(activeReplyTarget.value.postId || "") === String(postId || "") &&
+    String(activeReplyTarget.value.commentId || "") === String(commentId || "");
+}
+
+function openReplyEditor(postId, commentId) {
+  activeReplyTarget.value = { postId: String(postId || ""), commentId: String(commentId || "") };
+  replyDraft.value = "";
+  replyError.value = "";
+}
+
+function cancelReplyEditor() {
+  activeReplyTarget.value = { postId: "", commentId: "" };
+  replyDraft.value = "";
+  replyError.value = "";
 }
 
 function commentKey(postId, commentId) {
@@ -215,7 +350,24 @@ function setEditDraft(postId, commentId, value) {
 }
 
 function replacePost(updatedPost) {
-  posts.value = posts.value.map((p) => (p._id === updatedPost._id ? updatedPost : p));
+  forumCenter.replacePost(updatedPost);
+}
+
+function postIdOf(post) {
+  const id = String(post?._id || post?.id || "").trim();
+  return id;
+}
+
+function validatePostForFavorite(post) {
+  const postId = postIdOf(post);
+  const title = String(post?.title || "").trim();
+  const content = String(post?.content || "").trim();
+  if (!postId || (!title && !content)) {
+    const error = new Error("This post cannot be saved because required data is missing.");
+    error.code = "MISSING_REQUIRED_FIELDS";
+    throw error;
+  }
+  return { postId, title, content };
 }
 
 async function toggleLike(postId) {
@@ -243,6 +395,28 @@ async function submitComment(postId) {
   }
 }
 
+async function submitReply(postId, parentCommentId) {
+  const content = String(replyDraft.value || "").trim();
+  const key = commentKey(postId, parentCommentId);
+  if (!content) {
+    replyError.value = "Reply cannot be empty";
+    return;
+  }
+  if (replyLoading.value[key]) return;
+  replyLoading.value = { ...replyLoading.value, [key]: true };
+  try {
+    const updated = await api.post(`/forum/posts/${postId}/comments`, {
+      content,
+      parentCommentId,
+    }).then((r) => r.data);
+    replacePost(updated);
+    cancelReplyEditor();
+    expandedComments.value = { ...expandedComments.value, [postId]: true };
+  } finally {
+    replyLoading.value = { ...replyLoading.value, [key]: false };
+  }
+}
+
 async function saveCommentEdit(postId, commentId) {
   const key = commentKey(postId, commentId);
   const content = String(commentEditDrafts.value[key] || "").trim();
@@ -264,18 +438,26 @@ async function deleteComment(postId, commentId) {
   const updated = await api.delete(`/forum/posts/${postId}/comments/${commentId}`).then((r) => r.data);
   replacePost(updated);
   cancelEditComment(postId, commentId);
+  if (isReplyTarget(postId, commentId)) {
+    cancelReplyEditor();
+  }
 }
 
 async function addPost() {
+  if (!validatePublishForm()) return;
   await api.post("/forum/posts", {
-    title: form.title,
-    content: form.content,
+    title: trimmedTitle.value,
+    content: trimmedContent.value,
     tags: selectedTags.value,
   });
   form.title = "";
   form.content = "";
   selectedTags.value = [];
+  publishErrors.title = "";
+  publishErrors.content = "";
+  publishNotice.value = "";
   await load();
+  createModalOpen.value = false;
 }
 
 async function removePost(id) {
@@ -284,28 +466,94 @@ async function removePost(id) {
 }
 
 function isForumFavorited(postId) {
-  return isFavorited("forum", String(postId || ""));
+  const key = String(postId || "").trim();
+  if (!key) return false;
+  return isFavorited("forum", key);
 }
 
 async function toggleForumFavorite(post) {
-  await toggleFavorite({
-    itemType: "forum",
-    itemId: String(post._id),
-    title: post.title,
-    description: String(post.content || "").slice(0, 180),
-    metadata: {
-      authorName: post.authorName || "",
-      likeCount: Number(post.likeCount || 0),
-      commentCount: Number(post.commentCount || 0),
-      tags: Array.isArray(post.tags) ? post.tags : [],
-    },
-    sourceType: "forum_post",
+  try {
+    saveNotice.value = "";
+    const { postId, title, content } = validatePostForFavorite(post);
+    const summary = String(content).slice(0, 180);
+    const result = await toggleFavorite({
+      itemType: "forum",
+      itemId: postId,
+      title: title || summary || "Forum Post",
+      description: summary,
+      metadata: {
+        id: postId,
+        type: "forum",
+        summary,
+        contentPreview: summary,
+        createdAt: post?.createdAt || new Date().toISOString(),
+        sourcePage: "forum",
+        currentUserId: String(me.value?.id || ""),
+        authorName: post.authorName || "",
+        likeCount: Number(post.likeCount || 0),
+        commentCount: Number(getCommentCount(post)),
+        tags: Array.isArray(post.tags) ? post.tags : [],
+      },
+      sourceType: "forum",
+    });
+    if (result?.action === "added") forumCenter.addSavedPostId(postId);
+    if (result?.action === "removed") forumCenter.removeSavedPostId(postId);
+    if (!result?.action) syncSavedPostIdsFromFavorites();
+  } catch (err) {
+    const message = err?.message || "Failed to update favorite status.";
+    console.error("[Forum Save Error]", message, post);
+    saveNotice.value = message;
+  }
+}
+
+function toggleNotificationsPanel() {
+  notificationsOpen.value = !notificationsOpen.value;
+  if (!notificationsOpen.value) return;
+  fetchNotifications().catch(() => {
+    forumCenter.setNotifications([]);
   });
+}
+
+async function openNotification(item) {
+  notificationsOpen.value = false;
+  if (item?.isRead === false) {
+    await api.post("/notifications/read").catch(() => null);
+    forumCenter.markAllNotificationsRead();
+  }
+  if (item?.postId) await focusPostById(item.postId);
+  else if (item?.relatedPostId) await focusPostById(item.relatedPostId);
+}
+
+async function openSavedPost(postId) {
+  await focusPostById(postId);
+}
+
+function openCreateModal() {
+  createModalOpen.value = true;
+}
+
+function closeCreateModal() {
+  createModalOpen.value = false;
+}
+
+function handleGlobalKeydown(event) {
+  if (event.key === "Escape" && createModalOpen.value) {
+    closeCreateModal();
+  }
 }
 
 onMounted(async () => {
   await Promise.all([load(), ensureFavoritesLoaded()]);
+  syncSavedPostIdsFromFavorites();
+  await fetchNotifications().catch(() => {
+    forumCenter.setNotifications([]);
+  });
   await focusPostFromQuery();
+  window.addEventListener("keydown", handleGlobalKeydown);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleGlobalKeydown);
 });
 
 watch(
@@ -314,14 +562,44 @@ watch(
     await focusPostFromQuery();
   }
 );
+
+watch(
+  favorites,
+  () => {
+    syncSavedPostIdsFromFavorites();
+  },
+  { deep: true }
+);
 </script>
 
 <template>
   <AppNavbar />
   <main class="page forum-page">
     <header class="forum-header">
-      <h2 class="title forum-title">💬 Forum</h2>
-      <p class="forum-sub">Share meals, workouts, and habits—stay motivated together.</p>
+      <div class="forum-head-row">
+        <div>
+          <h2 class="title forum-title">💬 Forum</h2>
+          <p class="forum-sub">Share meals, workouts, and habits—stay motivated together.</p>
+        </div>
+        <div class="forum-head-actions">
+          <button type="button" class="notify-btn" @click="toggleNotificationsPanel">
+            <span aria-hidden="true">🔔</span>
+            <span v-if="unreadNotificationsCount > 0" class="notify-badge">{{ unreadNotificationsCount }}</span>
+          </button>
+          <div v-if="notificationsOpen" class="notify-dropdown">
+            <p class="notify-title">Notifications</p>
+            <ul v-if="notifications.length" class="notify-list">
+              <li v-for="item in notifications" :key="item._id || item.id">
+                <button type="button" class="notify-item" @click="openNotification(item)">
+                  <span>{{ item.message }}</span>
+                  <small>{{ formatRelativeTime(item.createdAt) }}</small>
+                </button>
+              </li>
+            </ul>
+            <p v-else class="notify-empty">No notifications yet.</p>
+          </div>
+        </div>
+      </div>
     </header>
 
     <div class="forum-toolbar panel toolbar-panel">
@@ -350,158 +628,364 @@ watch(
         />
       </label>
     </div>
-
-    <section class="panel create-panel">
-      <h3 class="create-heading">Create Post</h3>
-      <form novalidate class="create-form" @submit.prevent="addPost">
-        <input v-model="form.title" placeholder="Post title" />
-        <textarea v-model="form.content" placeholder="Share your thoughts..." rows="4" />
-        <div class="tag-picker">
-          <span class="tag-picker-label">Tags</span>
-          <div class="tag-picker-chips">
-            <button
-              v-for="tag in TAG_OPTIONS"
-              :key="tag.value"
-              type="button"
-              class="pick-chip"
-              :class="{ on: selectedTags.includes(tag.value) }"
-              @click="toggleFormTag(tag.value)"
-            >
-              #{{ tag.label }}
-            </button>
-          </div>
-        </div>
-        <div class="create-actions">
-          <button type="submit" class="publish-btn">Publish Post</button>
-        </div>
-      </form>
-    </section>
+    <p v-if="saveNotice" class="save-notice">{{ saveNotice }}</p>
 
     <section class="post-list">
-      <p v-if="!visiblePosts.length" class="empty-hint muted">No posts match. Try another filter or create one.</p>
-      <article
-        v-for="p in visiblePosts"
-        :key="p._id"
-        class="post-card"
-        :class="{ focused: focusedPostId === String(p._id) }"
-        :data-post-id="String(p._id)"
-      >
-        <div class="post-top">
-          <div class="author-block">
-            <div
-              class="avatar"
-              :style="{ background: avatarColor(p.userId || p.authorName) }"
-              :aria-label="`${displayNickname(p.authorName)} avatar`"
-            >
-              <span class="avatar-letter">{{ avatarInitial(p.authorName) }}</span>
+      <template v-if="filteredPosts.length">
+        <article
+          v-for="p in filteredPosts"
+          :key="p._id"
+          class="post-card"
+          :class="{ focused: focusedPostId === String(p._id) }"
+          :data-post-id="String(p._id)"
+        >
+          <div class="post-top">
+            <div class="author-block">
+              <div
+                class="avatar"
+                :style="{ background: avatarColor(p.userId || p.authorName) }"
+                :aria-label="`${displayNickname(p.authorName)} avatar`"
+              >
+                <span class="avatar-letter">{{ avatarInitial(p.authorName) }}</span>
+              </div>
+              <div class="author-text">
+                <span class="nickname">{{ displayNickname(p.authorName) }}</span>
+                <time class="rel-time" :datetime="p.createdAt">{{ formatRelativeTime(p.createdAt) }}</time>
+              </div>
             </div>
-            <div class="author-text">
-              <span class="nickname">{{ displayNickname(p.authorName) }}</span>
-              <time class="rel-time" :datetime="p.createdAt">{{ formatRelativeTime(p.createdAt) }}</time>
+            <div class="post-top-actions">
+              <button
+                type="button"
+                class="fav-post-btn"
+                :class="{ active: isForumFavorited(postIdOf(p)) }"
+                @click.stop="toggleForumFavorite(p)"
+              >
+                {{ isForumFavorited(postIdOf(p)) ? "★ Saved" : "☆ Save" }}
+              </button>
+              <button
+                v-if="String(p.userId) === String(me?.id)"
+                type="button"
+                class="delete-post"
+                @click="removePost(p._id)"
+              >
+                Delete
+              </button>
             </div>
           </div>
-          <div class="post-top-actions">
-            <button type="button" class="fav-post-btn" :class="{ active: isForumFavorited(p._id) }" @click="toggleForumFavorite(p)">
-              {{ isForumFavorited(p._id) ? "★ Saved" : "☆ Save" }}
-            </button>
+
+          <h3 class="post-title">{{ p.title }}</h3>
+          <div class="tag-row">
+            <span v-for="t in displayTags(p)" :key="t" class="post-tag" :class="tagClass(t)">#{{ tagLabel(t) }}</span>
+          </div>
+          <p class="post-content">{{ p.content }}</p>
+
+          <div class="post-stats" role="group" aria-label="Engagement">
             <button
-              v-if="String(p.userId) === String(me?.id)"
               type="button"
-              class="delete-post"
-              @click="removePost(p._id)"
+              class="stat stat-btn like-btn"
+              :class="{ liked: p.likedByMe }"
+              :disabled="likeLoading[p._id]"
+              @click="toggleLike(p._id)"
             >
-              Delete
+              <span class="stat-icon" aria-hidden="true">{{ p.likedByMe ? "♥" : "♡" }}</span>
+              <span class="stat-num">{{ p.likeCount ?? 0 }}</span>
+            </button>
+            <button type="button" class="stat stat-btn comment-btn" @click="toggleComments(p._id)">
+              <span class="stat-icon" aria-hidden="true">💬</span>
+              <span class="stat-num">{{ getCommentCount(p) }}</span>
+              <span class="comment-expand" aria-hidden="true">{{ isCommentsExpanded(p._id) ? "▴" : "▾" }}</span>
             </button>
           </div>
-        </div>
-
-        <h3 class="post-title">{{ p.title }}</h3>
-        <div class="tag-row">
-          <span v-for="t in displayTags(p)" :key="t" class="post-tag" :class="tagClass(t)">#{{ tagLabel(t) }}</span>
-        </div>
-        <p class="post-content">{{ p.content }}</p>
-
-        <div class="post-stats" role="group" aria-label="Engagement">
-          <button
-            type="button"
-            class="stat stat-btn like-btn"
-            :class="{ liked: p.likedByMe }"
-            :disabled="likeLoading[p._id]"
-            @click="toggleLike(p._id)"
-          >
-            <span class="stat-icon" aria-hidden="true">{{ p.likedByMe ? "♥" : "♡" }}</span>
-            <span class="stat-num">{{ p.likeCount ?? 0 }}</span>
-          </button>
-          <button type="button" class="stat stat-btn comment-btn" @click="toggleComments(p._id)">
-            <span class="stat-icon" aria-hidden="true">💬</span>
-            <span class="stat-num">{{ p.commentCount ?? 0 }}</span>
-            <span class="comment-expand" aria-hidden="true">{{ isCommentsExpanded(p._id) ? "▴" : "▾" }}</span>
-          </button>
-        </div>
-
-        <section v-if="isCommentsExpanded(p._id)" class="comments-panel">
-          <form class="comment-form" @submit.prevent="submitComment(p._id)">
-            <input
-              :value="getCommentDraft(p._id)"
-              type="text"
-              class="comment-input"
-              placeholder="Write a comment..."
-              @input="setCommentDraft(p._id, $event.target.value)"
-            />
-            <button type="submit" class="comment-submit" :disabled="commentLoading[p._id]">Post</button>
-          </form>
-          <div class="comments-divider" aria-hidden="true"></div>
-          <div class="comments-scroll">
-          <p v-if="!(p.comments || []).length" class="comments-empty">No comments yet. Be the first one.</p>
-          <ul v-else class="comment-list">
-            <li v-for="c in p.comments" :key="c._id || `${c.userId}-${c.createdAt}`" class="comment-item">
-              <div class="comment-avatar" :style="{ background: avatarColor(c.userId || c.authorName) }">
-                <span class="avatar-letter comment-avatar-letter">{{ avatarInitial(c.authorName) }}</span>
-              </div>
-              <div class="comment-main">
-                <div class="comment-head">
-                  <span class="comment-author">{{ displayNickname(c.authorName) }}</span>
-                  <time class="comment-time" :datetime="c.createdAt">{{ formatRelativeTime(c.createdAt) }}</time>
-                </div>
-                <p v-if="getEditDraft(p._id, c._id) === null" class="comment-content">{{ c.content }}</p>
-                <div v-else class="comment-edit-row">
-                  <input
-                    :value="getEditDraft(p._id, c._id)"
-                    type="text"
-                    class="comment-edit-input"
-                    @input="setEditDraft(p._id, c._id, $event.target.value)"
-                  />
-                  <button
-                    type="button"
-                    class="comment-action primary"
-                    :disabled="commentEditLoading[`${p._id}:${c._id}`]"
-                    @click="saveCommentEdit(p._id, c._id)"
-                  >
-                    Save
-                  </button>
-                  <button type="button" class="comment-action" @click="cancelEditComment(p._id, c._id)">Cancel</button>
-                </div>
-                <div v-if="isCommentOwner(c) && getEditDraft(p._id, c._id) === null" class="comment-actions">
-                  <button type="button" class="comment-link" @click="startEditComment(p._id, c)">Edit</button>
-                  <button type="button" class="comment-link danger" @click="deleteComment(p._id, c._id)">Delete</button>
-                </div>
-              </div>
-            </li>
-          </ul>
+          <div v-if="activeFilter === 'favorites'" class="favorites-locate-row">
+            <button type="button" class="favorite-locate-btn" @click="openSavedPost(p._id)">Open in feed</button>
           </div>
-        </section>
+
+          <section v-if="isCommentsExpanded(p._id)" class="comments-panel">
+            <form class="comment-form" @submit.prevent="submitComment(p._id)">
+              <input
+                :value="getCommentDraft(p._id)"
+                type="text"
+                class="comment-input"
+                placeholder="Write a comment..."
+                @input="setCommentDraft(p._id, $event.target.value)"
+              />
+              <button type="submit" class="comment-submit" :disabled="commentLoading[p._id]">Post</button>
+            </form>
+            <div class="comments-divider" aria-hidden="true"></div>
+            <div class="comments-scroll">
+            <p v-if="!hasAnyComments(p)" class="comments-empty">No comments yet. Be the first one.</p>
+            <ul v-else class="comment-list">
+              <li v-for="c in rootComments(p)" :key="commentIdValue(c) || `${c.userId}-${c.createdAt}`" class="comment-item">
+                <div class="comment-avatar" :style="{ background: avatarColor(c.userId || c.authorName) }">
+                  <span class="avatar-letter comment-avatar-letter">{{ avatarInitial(c.authorName) }}</span>
+                </div>
+                <div class="comment-main">
+                  <div class="comment-head">
+                    <span class="comment-author">{{ displayNickname(c.authorName) }}</span>
+                    <time class="comment-time" :datetime="c.createdAt">{{ formatRelativeTime(c.createdAt) }}</time>
+                  </div>
+                  <p v-if="getEditDraft(p._id, c._id) === null" class="comment-content">{{ c.content }}</p>
+                  <div v-else class="comment-edit-row">
+                    <input
+                      :value="getEditDraft(p._id, c._id)"
+                      type="text"
+                      class="comment-edit-input"
+                      @input="setEditDraft(p._id, c._id, $event.target.value)"
+                    />
+                    <button
+                      type="button"
+                      class="comment-action primary"
+                      :disabled="commentEditLoading[`${p._id}:${c._id}`]"
+                      @click="saveCommentEdit(p._id, c._id)"
+                    >
+                      Save
+                    </button>
+                    <button type="button" class="comment-action" @click="cancelEditComment(p._id, c._id)">Cancel</button>
+                  </div>
+                  <div v-if="isCommentOwner(c) && getEditDraft(p._id, c._id) === null" class="comment-actions">
+                    <button type="button" class="comment-link" @click="startEditComment(p._id, c)">Edit</button>
+                    <button type="button" class="comment-link danger" @click="deleteComment(p._id, c._id)">Delete</button>
+                  </div>
+                  <div class="comment-actions">
+                    <button type="button" class="comment-link" @click="openReplyEditor(p._id, c._id)">Reply</button>
+                  </div>
+                  <form
+                    v-if="isReplyTarget(p._id, c._id)"
+                    class="reply-form"
+                    @submit.prevent="submitReply(p._id, c._id)"
+                  >
+                    <input
+                      :value="replyDraft"
+                      type="text"
+                      class="comment-input reply-input"
+                      placeholder="Write a reply..."
+                      @input="
+                        replyDraft = $event.target.value;
+                        if (replyError) replyError = '';
+                      "
+                    />
+                    <button
+                      type="submit"
+                      class="comment-submit"
+                      :disabled="replyLoading[`${p._id}:${c._id}`]"
+                    >
+                      Reply
+                    </button>
+                    <button type="button" class="comment-action" @click="cancelReplyEditor">Cancel</button>
+                  </form>
+                  <p v-if="isReplyTarget(p._id, c._id) && replyError" class="reply-error">{{ replyError }}</p>
+                  <ul v-if="repliesForComment(p, c._id).length" class="reply-list">
+                    <li
+                      v-for="reply in repliesForComment(p, c._id)"
+                      :key="commentIdValue(reply) || `${reply.userId}-${reply.createdAt}`"
+                      class="comment-item reply-item"
+                    >
+                      <div class="comment-avatar reply-avatar" :style="{ background: avatarColor(reply.userId || reply.authorName) }">
+                        <span class="avatar-letter comment-avatar-letter">{{ avatarInitial(reply.authorName) }}</span>
+                      </div>
+                      <div class="comment-main">
+                        <div class="comment-head">
+                          <span class="comment-author">{{ displayNickname(reply.authorName) }}</span>
+                          <time class="comment-time" :datetime="reply.createdAt">{{ formatRelativeTime(reply.createdAt) }}</time>
+                        </div>
+                        <p v-if="getEditDraft(p._id, reply._id) === null" class="comment-content">{{ reply.content }}</p>
+                        <div v-else class="comment-edit-row">
+                          <input
+                            :value="getEditDraft(p._id, reply._id)"
+                            type="text"
+                            class="comment-edit-input"
+                            @input="setEditDraft(p._id, reply._id, $event.target.value)"
+                          />
+                          <button
+                            type="button"
+                            class="comment-action primary"
+                            :disabled="commentEditLoading[`${p._id}:${reply._id}`]"
+                            @click="saveCommentEdit(p._id, reply._id)"
+                          >
+                            Save
+                          </button>
+                          <button type="button" class="comment-action" @click="cancelEditComment(p._id, reply._id)">Cancel</button>
+                        </div>
+                        <div v-if="isCommentOwner(reply) && getEditDraft(p._id, reply._id) === null" class="comment-actions">
+                          <button type="button" class="comment-link" @click="startEditComment(p._id, reply)">Edit</button>
+                          <button type="button" class="comment-link danger" @click="deleteComment(p._id, reply._id)">Delete</button>
+                        </div>
+                      </div>
+                    </li>
+                  </ul>
+                </div>
+              </li>
+            </ul>
+            </div>
+          </section>
+        </article>
+      </template>
+      <article v-else class="post-card empty-post-card" aria-live="polite">
+        <div class="empty-icon" aria-hidden="true">🔎</div>
+        <p class="empty-title">No relevant content found.</p>
       </article>
     </section>
+
+    <button type="button" class="create-fab" aria-label="Create post" @click="openCreateModal">+ Create</button>
+
+    <div v-if="createModalOpen" class="create-overlay" @click.self="closeCreateModal">
+      <section class="panel create-modal" role="dialog" aria-modal="true" aria-label="Create Post">
+        <div class="create-modal-head">
+          <h3 class="create-heading">Create Post</h3>
+          <button type="button" class="create-close" aria-label="Close" @click="closeCreateModal">×</button>
+        </div>
+        <form novalidate class="create-form" @submit.prevent="addPost">
+          <input
+            v-model="form.title"
+            placeholder="Post title"
+            :class="{ 'field-error': publishErrors.title }"
+            @input="handleTitleInput"
+          />
+          <p v-if="publishErrors.title" class="field-hint">{{ publishErrors.title }}</p>
+          <textarea
+            v-model="form.content"
+            placeholder="Share your thoughts..."
+            rows="4"
+            :class="{ 'field-error': publishErrors.content }"
+            @input="handleContentInput"
+          />
+          <p v-if="publishErrors.content" class="field-hint">{{ publishErrors.content }}</p>
+          <div class="tag-picker">
+            <span class="tag-picker-label">Tags</span>
+            <div class="tag-picker-chips">
+              <button
+                v-for="tag in TAG_OPTIONS"
+                :key="tag.value"
+                type="button"
+                class="pick-chip"
+                :class="{ on: selectedTags.includes(tag.value) }"
+                @click="toggleFormTag(tag.value)"
+              >
+                #{{ tag.label }}
+              </button>
+            </div>
+          </div>
+          <div class="create-actions">
+            <button type="submit" class="publish-btn" :disabled="isPublishDisabled">Publish Post</button>
+          </div>
+          <p v-if="publishNotice" class="publish-notice">{{ publishNotice }}</p>
+        </form>
+      </section>
+    </div>
   </main>
 </template>
 
 <style scoped>
 .forum-page {
-  max-width: 720px;
+  max-width: 1180px;
 }
 
 .forum-header {
   margin-bottom: 16px;
+  position: relative;
+}
+
+.forum-head-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.forum-head-actions {
+  position: relative;
+}
+
+.notify-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  border: 1px solid #c8dbd7;
+  background: #f7fcfa;
+  color: var(--c6);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.notify-btn:hover {
+  border-color: var(--c3);
+  background: #eef8f4;
+}
+
+.notify-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #ffffff;
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.notify-dropdown {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: min(360px, 86vw);
+  max-height: 320px;
+  overflow: auto;
+  border-radius: 14px;
+  border: 1px solid #d9e9e6;
+  background: #ffffff;
+  box-shadow: 0 8px 18px rgb(47 72 88 / 0.16);
+  padding: 10px;
+  z-index: 12;
+}
+
+.notify-title {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+  color: var(--c6);
+  font-weight: 700;
+}
+
+.notify-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.notify-item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid #dceae6;
+  background: #f7fcfa;
+  border-radius: 10px;
+  padding: 8px 10px;
+  display: grid;
+  gap: 4px;
+}
+
+.notify-item span {
+  color: #34505b;
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+
+.notify-item small {
+  color: #7a919a;
+  font-size: 0.74rem;
+}
+
+.notify-empty {
+  margin: 6px 0 2px;
+  color: #7a919a;
+  font-size: 0.84rem;
 }
 
 .forum-title {
@@ -522,6 +1006,16 @@ watch(
   gap: 12px 16px;
   margin-bottom: 16px;
   box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+}
+
+.save-notice {
+  margin: -8px 0 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #f0c7c7;
+  background: #fff7f7;
+  color: #a55858;
+  font-size: 0.8rem;
 }
 
 .filter-scroll {
@@ -566,7 +1060,7 @@ watch(
 .search-wrap {
   flex: 1 1 180px;
   min-width: 160px;
-  max-width: 320px;
+  max-width: 420px;
 }
 
 .forum-search {
@@ -593,11 +1087,6 @@ watch(
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
-}
-
-.create-panel {
-  margin-bottom: 20px;
-  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
 }
 
 .create-heading {
@@ -678,26 +1167,140 @@ watch(
   transform: scale(0.98);
 }
 
-.post-list {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
+.publish-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  filter: none;
 }
 
-.empty-hint {
+.create-form input.field-error,
+.create-form textarea.field-error {
+  border-color: #e19c9c;
+  background: #fff7f7;
+}
+
+.field-hint {
+  margin: -6px 0 2px;
+  color: #be5f5f;
+  font-size: 0.78rem;
+}
+
+.publish-notice {
+  margin: 2px 0 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #f0c7c7;
+  background: #fff7f7;
+  color: #a55858;
+  font-size: 0.8rem;
+}
+
+.post-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+.empty-post-card {
+  grid-column: 1 / -1;
   text-align: center;
-  padding: 24px;
-  background: #ffffffcc;
-  border-radius: 16px;
-  border: 1px dashed #c8dbd7;
+  padding: 26px 20px;
+}
+
+.empty-icon {
+  font-size: 24px;
+  margin-bottom: 8px;
+  opacity: 0.72;
+}
+
+.empty-title {
+  margin: 0;
+  color: #6b7280;
+  font-size: 0.95rem;
+  font-weight: 500;
 }
 
 .post-card {
+  width: 100%;
+  height: 100%;
+  min-height: 312px;
+  display: flex;
+  flex-direction: column;
   background: #fff;
   border: 1px solid #d9e9e6;
   border-radius: 16px;
   padding: 16px 18px;
   box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+}
+
+.create-fab {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 20;
+  width: auto;
+  min-width: 118px;
+  border-radius: 999px;
+  padding: 12px 18px;
+  border: none;
+  background: linear-gradient(135deg, var(--c5), var(--c6));
+  color: #fff;
+  font-size: 0.92rem;
+  font-weight: 700;
+  box-shadow: 0 12px 20px rgb(47 72 88 / 0.26);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease;
+}
+
+.create-fab:hover {
+  transform: translateY(-2px) scale(1.03);
+  box-shadow: 0 16px 24px rgb(47 72 88 / 0.3);
+  filter: brightness(1.02);
+}
+
+.create-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgb(12 28 35 / 0.36);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+
+.create-modal {
+  width: min(620px, 100%);
+  max-height: min(88vh, 760px);
+  overflow: auto;
+  box-shadow: 0 16px 28px rgb(47 72 88 / 0.24);
+}
+
+.create-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.create-close {
+  border: 1px solid #d5e3df;
+  background: #f4faf7;
+  color: #5d7782;
+  border-radius: 10px;
+  width: 34px;
+  height: 34px;
+  font-size: 22px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.create-close:hover {
+  border-color: var(--c3);
+  color: var(--c6);
 }
 
 .post-card.focused {
@@ -801,6 +1404,11 @@ watch(
   font-size: 1.15rem;
   line-height: 1.35;
   color: var(--text);
+  min-height: calc(1.35em * 2);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 .tag-row {
@@ -808,6 +1416,8 @@ watch(
   flex-wrap: wrap;
   gap: 6px 8px;
   margin-bottom: 12px;
+  min-height: 28px;
+  align-content: flex-start;
 }
 
 .post-tag {
@@ -855,6 +1465,11 @@ watch(
   color: #2c3d45;
   font-size: 0.95rem;
   white-space: pre-wrap;
+  min-height: calc(1.55em * 3);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
 }
 
 .post-stats {
@@ -862,8 +1477,23 @@ watch(
   align-items: center;
   justify-content: flex-start;
   gap: 20px;
+  margin-top: auto;
   padding-top: 12px;
   border-top: 1px solid #e8f0ee;
+}
+
+.favorites-locate-row {
+  margin-top: 8px;
+}
+
+.favorite-locate-btn {
+  border: 1px solid #c8dbd7;
+  background: #f3faf7;
+  color: var(--c5);
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
 }
 
 .stat {
@@ -1091,6 +1721,57 @@ watch(
   background: #f9fcfb;
 }
 
+.reply-form {
+  margin-top: 8px;
+  margin-left: 30px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.reply-input {
+  min-width: 0;
+}
+
+.reply-error {
+  margin: 6px 0 0 30px;
+  color: #be5f5f;
+  font-size: 0.76rem;
+}
+
+.reply-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.reply-item {
+  margin-left: 30px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #f8fbfb;
+  border: 1px solid #e4eeeb;
+}
+
+.reply-avatar {
+  width: 28px;
+  height: 28px;
+}
+
+.reply-item .comment-author {
+  font-size: 0.82rem;
+}
+
+.reply-item .comment-time {
+  font-size: 0.72rem;
+}
+
+.reply-item .comment-content {
+  font-size: 0.82rem;
+}
+
 .comment-input {
   flex: 1;
   border: 1px solid #c8dbd7;
@@ -1105,5 +1786,28 @@ watch(
   border-radius: 10px;
   font-size: 0.84rem;
   padding: 8px 12px;
+}
+
+@media (max-width: 980px) {
+  .post-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .create-fab {
+    right: 16px;
+    bottom: 16px;
+    min-width: 104px;
+    padding: 11px 14px;
+  }
+
+  .forum-head-row {
+    align-items: center;
+  }
+
+  .notify-dropdown {
+    right: -4px;
+  }
 }
 </style>

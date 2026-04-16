@@ -1,6 +1,7 @@
 const asyncHandler = require("../../utils/asyncHandler");
 const ForumPost = require("../../models/ForumPost");
 const User = require("../../models/User");
+const Notification = require("../../models/Notification");
 
 const LEGACY_TAG_TO_EN = {
   饮食: "diet",
@@ -47,6 +48,18 @@ function serializePost(row, userId) {
   };
 }
 
+async function createPostNotification({ receiverUserId, actorUserId, type, message, relatedPostId }) {
+  if (!receiverUserId || !relatedPostId) return;
+  if (String(receiverUserId) === String(actorUserId)) return;
+  await Notification.create({
+    userId: receiverUserId,
+    type,
+    message,
+    relatedPostId,
+    isRead: false,
+  });
+}
+
 const list = asyncHandler(async (req, res) => {
   const rows = await ForumPost.find().sort({ createdAt: -1 });
   res.json(rows.map((row) => serializePost(row, req.user.id)));
@@ -80,6 +93,7 @@ const toggleLike = asyncHandler(async (req, res) => {
   const userId = String(req.user.id);
   const likedBy = Array.isArray(row.likedBy) ? row.likedBy.map((id) => String(id)) : [];
   const hasLiked = likedBy.includes(userId);
+  const becameLiked = !hasLiked;
 
   if (hasLiked) {
     row.likedBy = row.likedBy.filter((id) => String(id) !== userId);
@@ -88,6 +102,15 @@ const toggleLike = asyncHandler(async (req, res) => {
   }
   row.likeCount = row.likedBy.length;
   await row.save();
+  if (becameLiked) {
+    await createPostNotification({
+      receiverUserId: row.userId,
+      actorUserId: req.user.id,
+      type: "like",
+      message: "Someone liked your post",
+      relatedPostId: row._id,
+    });
+  }
 
   res.json(serializePost(row, req.user.id));
 });
@@ -95,18 +118,45 @@ const toggleLike = asyncHandler(async (req, res) => {
 const addComment = asyncHandler(async (req, res) => {
   const content = String(req.body?.content || "").trim();
   if (!content) return res.status(400).json({ message: "comment content is required" });
+  const parentCommentId = String(req.body?.parentCommentId || "").trim();
 
   const row = await ForumPost.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Post not found" });
 
   const user = await User.findById(req.user.id).select("username").lean();
+  let parentComment = null;
+  if (parentCommentId) {
+    parentComment = row.comments.id(parentCommentId);
+    if (!parentComment) return res.status(400).json({ message: "Parent comment not found" });
+    if (parentComment.parentCommentId) {
+      return res.status(400).json({ message: "Only one-level reply is allowed" });
+    }
+  }
   row.comments.push({
     userId: req.user.id,
     authorName: user?.username || "User",
     content,
+    parentCommentId: parentComment ? parentComment._id : null,
   });
   row.commentCount = row.comments.length;
   await row.save();
+  if (parentComment) {
+    await createPostNotification({
+      receiverUserId: parentComment.userId,
+      actorUserId: req.user.id,
+      type: "comment",
+      message: `${user?.username || "Someone"} replied to your comment`,
+      relatedPostId: row._id,
+    });
+  } else {
+    await createPostNotification({
+      receiverUserId: row.userId,
+      actorUserId: req.user.id,
+      type: "comment",
+      message: "Someone commented on your post",
+      relatedPostId: row._id,
+    });
+  }
 
   res.status(201).json(serializePost(row, req.user.id));
 });
@@ -140,7 +190,12 @@ const deleteComment = asyncHandler(async (req, res) => {
     return res.status(403).json({ message: "Forbidden" });
   }
 
+  const deletingCommentId = String(comment._id);
+  const isRootComment = !comment.parentCommentId;
   comment.deleteOne();
+  if (isRootComment) {
+    row.comments = row.comments.filter((item) => String(item?.parentCommentId || "") !== deletingCommentId);
+  }
   row.commentCount = row.comments.length;
   await row.save();
 

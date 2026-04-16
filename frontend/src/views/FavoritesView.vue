@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
+import api from "../services/api";
 import { useFavorites } from "../services/favorites";
 
 const router = useRouter();
@@ -11,7 +12,8 @@ const sortBy = ref("newest");
 const toast = ref("");
 let toastTimer = null;
 
-const { favorites, loading, ensureFavoritesLoaded, normalizeType, removeFavoriteByRowId } = useFavorites();
+const { favorites, loading, ensureFavoritesLoaded, normalizeType, removeFavoriteByRowId, addFavorite, isFavorited } = useFavorites();
+const recommendationPool = ref([]);
 
 const TAB_ITEMS = [
   { id: "all", label: "All" },
@@ -43,10 +45,58 @@ const TYPE_ICON = {
 };
 
 const DEFAULT_RECOMMENDATIONS = {
-  workout: [],
-  course: [],
-  diet: [],
-  forum: [],
+  workout: [
+    {
+      id: "default-workout-hiit",
+      type: "workout",
+      title: "Quick HIIT Session",
+      description: "20-minute high-intensity circuit to boost daily burn and cardio capacity.",
+      tags: ["hiit", "cardio"],
+      category: "Cardio",
+      difficulty: "Intermediate",
+      sourcePage: "workout",
+      route: "/workout",
+    },
+  ],
+  course: [
+    {
+      id: "default-course-foundation",
+      type: "course",
+      title: "Fitness Foundation Course",
+      description: "Build consistency with guided day-by-day training and recovery basics.",
+      tags: ["training", "foundation"],
+      category: "General",
+      difficulty: "Beginner",
+      sourcePage: "courses",
+      route: "/courses",
+    },
+  ],
+  diet: [
+    {
+      id: "default-diet-protein",
+      type: "diet",
+      title: "High Protein Daily Plan",
+      description: "Balanced meals with higher protein and practical prep-friendly structure.",
+      tags: ["diet", "high protein"],
+      category: "high_protein",
+      difficulty: "Easy",
+      sourcePage: "diet",
+      route: "/diet",
+    },
+  ],
+  forum: [
+    {
+      id: "default-forum-habits",
+      type: "forum",
+      title: "How to stay consistent?",
+      description: "Share your routine tips for keeping healthy habits during busy weeks.",
+      tags: ["training", "notes"],
+      category: "forum",
+      difficulty: "",
+      sourcePage: "forum",
+      route: "/forum",
+    },
+  ],
 };
 
 function showToast(message) {
@@ -124,6 +174,9 @@ const filteredFavorites = computed(() => {
 
 const hasAnyFavorites = computed(() => stats.value.total > 0);
 const hasCurrentTabItems = computed(() => filteredFavorites.value.length > 0);
+const recommendationSubtitle = computed(() =>
+  hasAnyFavorites.value ? "Based on your saved items" : "Popular picks to get started"
+);
 
 const recommendationTypes = computed(() => {
   if (!hasAnyFavorites.value) return ["workout", "course", "diet", "forum"];
@@ -131,14 +184,188 @@ const recommendationTypes = computed(() => {
   return sorted;
 });
 
-const recommendations = computed(() => {
-  const cards = [];
-  for (const type of recommendationTypes.value) {
-    cards.push(...(DEFAULT_RECOMMENDATIONS[type] || []));
-    if (cards.length >= 4) break;
+function toText(value) {
+  return String(value || "").trim();
+}
+
+function inferTags(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map((item) => toText(item).toLowerCase()).filter(Boolean);
+  return [toText(value).toLowerCase()].filter(Boolean);
+}
+
+function normalizeRecommendation(item) {
+  if (!item) return null;
+  const id = toText(item.id || item.itemId || item._id);
+  const type = normalizeType(item.type || item.itemType);
+  if (!id || !type) return null;
+  const title = toText(item.title) || "Recommended item";
+  const description = toText(item.description || item.summary || item.content || item.subtitle);
+  const category = toText(item.category || item.planType || item.sourcePage);
+  const difficulty = toText(item.difficulty);
+  const tags = inferTags(item.tags || item.metadata?.tags || category);
+  const sourcePage = toText(item.sourcePage) || type;
+  return {
+    id,
+    type,
+    title,
+    description,
+    category,
+    difficulty,
+    tags,
+    sourcePage,
+    route: item.route || routeByType(type),
+    createdAt: item.createdAt || new Date().toISOString(),
+  };
+}
+
+function flattenDefaults() {
+  return Object.values(DEFAULT_RECOMMENDATIONS)
+    .flatMap((rows) => rows)
+    .map(normalizeRecommendation)
+    .filter(Boolean);
+}
+
+async function loadRecommendationPool() {
+  const [coursesRes, workoutRes, forumRes] = await Promise.all([
+    api.get("/courses").catch(() => ({ data: [] })),
+    api.get("/workout/plan").catch(() => ({ data: [] })),
+    api.get("/forum/posts").catch(() => ({ data: [] })),
+  ]);
+
+  const courseRows = (Array.isArray(coursesRes.data) ? coursesRes.data : []).map((row) =>
+    normalizeRecommendation({
+      id: row?._id || row?.id,
+      type: "course",
+      title: row?.title,
+      description: row?.description,
+      category: row?.category,
+      difficulty: row?.difficulty,
+      tags: [row?.category, row?.difficulty].filter(Boolean),
+      sourcePage: "courses",
+      route: "/courses",
+      createdAt: row?.createdAt,
+    })
+  );
+
+  const workoutRows = (Array.isArray(workoutRes.data) ? workoutRes.data : []).map((row) =>
+    normalizeRecommendation({
+      id: row?._id || row?.id,
+      type: "workout",
+      title: row?.exercise_name || row?.exerciseName || "Workout Plan",
+      description: `${Math.max(0, Number(row?.duration_per_day || row?.durationPerDay || 0))} min/day`,
+      category: row?.category,
+      difficulty: row?.is_custom ? "Custom" : "Standard",
+      tags: [row?.category, row?.is_custom ? "custom" : "standard"].filter(Boolean),
+      sourcePage: "workout",
+      route: "/workout",
+      createdAt: row?.createdAt,
+    })
+  );
+
+  const forumRows = (Array.isArray(forumRes.data) ? forumRes.data : []).map((row) =>
+    normalizeRecommendation({
+      id: row?._id || row?.id,
+      type: "forum",
+      title: row?.title,
+      description: row?.content,
+      tags: row?.tags,
+      category: "forum",
+      sourcePage: "forum",
+      route: "/forum",
+      createdAt: row?.createdAt,
+    })
+  );
+
+  const dietRows = flattenDefaults().filter((row) => row.type === "diet");
+  const merged = [...courseRows, ...workoutRows, ...dietRows, ...forumRows, ...flattenDefaults()].filter(Boolean);
+  const seen = new Set();
+  recommendationPool.value = merged.filter((row) => {
+    const key = `${row.type}::${row.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function hasIntersection(a, b) {
+  if (!a.size || !b.size) return false;
+  for (const item of a) {
+    if (b.has(item)) return true;
   }
-  return cards.slice(0, 4);
+  return false;
+}
+
+const recommendations = computed(() => {
+  const savedKeys = new Set(normalizedFavorites.value.map((row) => `${row.type}::${String(row.itemId || "")}`));
+  const uniquePool = recommendationPool.value.filter((item) => !savedKeys.has(`${item.type}::${item.id}`));
+  const fallbackByType = recommendationTypes.value
+    .flatMap((type) => DEFAULT_RECOMMENDATIONS[type] || [])
+    .map(normalizeRecommendation)
+    .filter((item) => item && !savedKeys.has(`${item.type}::${item.id}`));
+
+  if (!hasAnyFavorites.value) {
+    const picks = [];
+    for (const type of ["course", "workout", "diet", "forum"]) {
+      const hit = uniquePool.find((item) => item.type === type) || fallbackByType.find((item) => item.type === type);
+      if (hit) picks.push(hit);
+    }
+    if (picks.length) return picks.slice(0, 4);
+    return fallbackByType.slice(0, 4);
+  }
+
+  const favoriteTypes = new Map();
+  const favoriteCategories = new Set();
+  const favoriteDifficulties = new Set();
+  const favoriteTags = new Set();
+  for (const row of normalizedFavorites.value) {
+    favoriteTypes.set(row.type, (favoriteTypes.get(row.type) || 0) + 1);
+    const meta = row.metadata || {};
+    if (meta.category) favoriteCategories.add(String(meta.category).toLowerCase());
+    if (meta.difficulty) favoriteDifficulties.add(String(meta.difficulty).toLowerCase());
+    for (const tag of inferTags(meta.tags || meta.planType || row.type)) favoriteTags.add(tag);
+  }
+
+  const scored = uniquePool.map((item) => {
+    let score = 0;
+    score += (favoriteTypes.get(item.type) || 0) * 4;
+    if (favoriteCategories.has(String(item.category || "").toLowerCase())) score += 3;
+    if (favoriteDifficulties.has(String(item.difficulty || "").toLowerCase())) score += 2;
+    if (hasIntersection(new Set(item.tags || []), favoriteTags)) score += 3;
+    return { item, score };
+  });
+
+  const picks = scored
+    .sort((a, b) => b.score - a.score || String(a.item.title).localeCompare(String(b.item.title)))
+    .map((row) => row.item)
+    .slice(0, 4);
+
+  if (picks.length) return picks;
+  return fallbackByType.slice(0, 4);
 });
+
+function isRecommendedSaved(item) {
+  return isFavorited(item.type, item.id);
+}
+
+async function addRecommendedToFavorites(item) {
+  if (isRecommendedSaved(item)) return;
+  await addFavorite({
+    itemType: item.type,
+    itemId: item.id,
+    title: item.title,
+    description: item.description,
+    sourceType: `${item.type}_recommendation`,
+    metadata: {
+      category: item.category,
+      difficulty: item.difficulty,
+      tags: item.tags,
+      sourcePage: item.sourcePage,
+      createdAt: item.createdAt,
+    },
+  });
+  showToast("Added to favorites");
+}
 
 async function removeItem(row) {
   await removeFavoriteByRowId(row._id);
@@ -183,7 +410,7 @@ function detailBadges(row) {
 }
 
 onMounted(async () => {
-  await ensureFavoritesLoaded();
+  await Promise.all([ensureFavoritesLoaded(), loadRecommendationPool()]);
 });
 </script>
 
@@ -300,13 +527,38 @@ onMounted(async () => {
 
     <section class="panel recommendation-panel">
       <h3>You may also like</h3>
+      <p class="muted recommendation-subtitle">{{ recommendationSubtitle }}</p>
       <div class="grid recommend-grid">
         <article v-for="item in recommendations" :key="item.id" class="recommend-card">
+          <div class="recommend-head">
+            <span class="recommend-icon">{{ TYPE_ICON[item.type] || "⭐" }}</span>
+            <span class="type-pill">{{ TYPE_LABEL[item.type] || "Item" }}</span>
+          </div>
           <h4>{{ item.title }}</h4>
-          <p class="muted">{{ item.subtitle }}</p>
-          <button type="button" class="small-btn" @click="router.push(item.route)">Explore</button>
+          <p class="muted">{{ item.description || "Recommended for your goals." }}</p>
+          <div class="meta-badges">
+            <span v-if="item.category" class="meta-chip">{{ item.category }}</span>
+            <span v-if="item.difficulty" class="meta-chip">{{ item.difficulty }}</span>
+            <span v-for="tag in (item.tags || []).slice(0, 2)" :key="`${item.id}-${tag}`" class="meta-chip">#{{ tag }}</span>
+          </div>
+          <div class="quick-actions">
+            <button
+              type="button"
+              class="small-btn"
+              :disabled="isRecommendedSaved(item)"
+              @click="addRecommendedToFavorites(item)"
+            >
+              {{ isRecommendedSaved(item) ? "Saved" : "Add to Favorites" }}
+            </button>
+            <button type="button" class="small-btn ghost" @click="router.push(item.route)">
+              {{ item.type === "course" ? "Go to Courses" : item.type === "workout" ? "Go to Workout" : item.type === "diet" ? "Go to Diet" : "Go to Forum" }}
+            </button>
+          </div>
         </article>
       </div>
+      <p v-if="!recommendations.length" class="muted recommendation-fallback">
+        No suitable recommendations right now. Try exploring courses, workout plans, diet, or forum posts.
+      </p>
     </section>
 
     <div v-if="toast" class="toast">{{ toast }}</div>
@@ -529,7 +781,7 @@ onMounted(async () => {
 }
 
 .recommend-grid {
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .recommend-card {
@@ -537,6 +789,19 @@ onMounted(async () => {
   border-radius: 12px;
   padding: 12px;
   background: #fff;
+  display: grid;
+  gap: 8px;
+}
+
+.recommend-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.recommend-icon {
+  font-size: 18px;
 }
 
 .recommend-card h4 {
@@ -546,7 +811,25 @@ onMounted(async () => {
 
 .recommend-card p {
   margin: 0 0 10px;
-  min-height: 38px;
+  min-height: 40px;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.recommendation-subtitle {
+  margin: -4px 0 10px;
+}
+
+.recommendation-fallback {
+  margin: 10px 0 0;
+}
+
+@media (max-width: 1080px) {
+  .recommend-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .empty-state {
@@ -617,6 +900,10 @@ onMounted(async () => {
 @media (max-width: 760px) {
   .hero-top {
     flex-direction: column;
+  }
+
+  .recommend-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>
