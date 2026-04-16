@@ -108,6 +108,14 @@ function roundToInt(value) {
   return Math.round(toNumber(value));
 }
 
+function formatCalories(value) {
+  return `${roundToInt(value)} kcal`;
+}
+
+function formatCaloriesNumber(value) {
+  return roundToInt(value);
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -331,13 +339,13 @@ const donutFillPercent = computed(() => clamp(caloriePercent.value, 0, 100));
 const calorieStatus = computed(() => {
   const consumed = toNumber(overview.value.consumed?.calories);
   const target = Math.max(1, toNumber(overview.value.target?.calories, 1));
-  const exceeded = Math.max(0, roundToOne(consumed - target));
+  const exceeded = Math.max(0, roundToInt(consumed - target));
   if (calorieRatio.value >= 1) {
     return {
       key: "danger",
       color: "#be3b3b",
-      hint: `You have exceeded today's calorie target by ${exceeded} kcal. Further high-calorie intake is not recommended today.`,
-      extra: `(+${exceeded} kcal)`,
+      hint: `You have exceeded today's calorie target by ${formatCalories(exceeded)}. Further high-calorie intake is not recommended today.`,
+      extra: `(+${formatCalories(exceeded)})`,
     };
   }
   if (calorieRatio.value >= 0.8) {
@@ -1159,7 +1167,7 @@ watch(
             <div class="food-card-main">
               <div>
                 <h4>{{ food.name }}</h4>
-                <p class="food-kcal">{{ roundToOne(food.caloriesPer100g) }} kcal / 100g</p>
+                <p class="food-kcal">{{ formatCaloriesNumber(food.caloriesPer100g) }} kcal / 100g</p>
               </div>
               <button type="button" class="ghost-btn tiny-btn" @click.stop="toggleOverviewFoodDetails(food)">
                 {{ expandedOverviewFoodId === String(food.id || food.fdcId || food.name) ? "Hide Details" : "View Details" }}
@@ -1171,7 +1179,7 @@ watch(
               <span>F {{ roundToOne(food.fatPer100g) }}g</span>
             </div>
             <div v-if="expandedOverviewFoodId === String(food.id || food.fdcId || food.name)" class="food-details">
-              <p><strong>Calories:</strong> {{ roundToOne(food.caloriesPer100g) }} kcal / 100g</p>
+              <p><strong>Calories:</strong> {{ formatCaloriesNumber(food.caloriesPer100g) }} kcal / 100g</p>
               <p><strong>Protein:</strong> {{ roundToOne(food.proteinPer100g) }}g</p>
               <p><strong>Carbs:</strong> {{ roundToOne(food.carbsPer100g) }}g</p>
               <p><strong>Fat:</strong> {{ roundToOne(food.fatPer100g) }}g</p>
@@ -1211,19 +1219,19 @@ watch(
       <div class="overview-grid">
         <article class="overview-card strong">
           <span>Daily calorie target</span>
-          <strong>{{ roundToOne(overview.target.calories) }} kcal</strong>
+          <strong>{{ formatCalories(overview.target.calories) }}</strong>
         </article>
         <article class="overview-card">
           <span>Consumed</span>
-          <strong>{{ roundToOne(overview.consumed.calories) }} kcal</strong>
+          <strong>{{ formatCalories(overview.consumed.calories) }}</strong>
         </article>
         <article class="overview-card">
           <span>Remaining</span>
-          <strong :class="{ warn: overview.remaining.calories < 0 }">{{ roundToOne(overview.remaining.calories) }} kcal</strong>
+          <strong :class="{ warn: overview.remaining.calories < 0 }">{{ formatCalories(overview.remaining.calories) }}</strong>
         </article>
         <article class="overview-card">
           <span>Suggested workout burn</span>
-          <strong>{{ roundToOne(overview.target.suggestedWorkoutBurn) }} kcal</strong>
+          <strong>{{ formatCalories(overview.target.suggestedWorkoutBurn) }}</strong>
         </article>
       </div>
 
@@ -1237,7 +1245,7 @@ watch(
             </div>
           </div>
           <p class="muted">
-            {{ roundToOne(overview.consumed.calories) }} / {{ roundToOne(overview.target.calories) }} kcal
+            {{ formatCaloriesNumber(overview.consumed.calories) }} / {{ formatCaloriesNumber(overview.target.calories) }} kcal
             <span v-if="calorieStatus.extra"> {{ calorieStatus.extra }}</span>
           </p>
           <p class="calorie-hint" :data-status="calorieStatus.key">{{ calorieStatus.hint }}</p>
@@ -1276,7 +1284,7 @@ watch(
             </div>
             <div class="plan-content" :class="{ blurred: plan.isLocked }">
               <p>{{ plan.description }}</p>
-              <strong class="plan-kcal">{{ plan.suggestedCalories }} <small>kcal/day</small></strong>
+              <strong class="plan-kcal">{{ formatCaloriesNumber(plan.suggestedCalories) }} <small>kcal/day</small></strong>
             </div>
             <div v-if="plan.isLocked" class="plan-lock-overlay">
               <span class="lock-icon">🔒 VIP Only</span>
@@ -1289,7 +1297,7 @@ watch(
       <article v-if="selectedPlan" class="selected-plan">
         <div class="selected-head">
           <div>
-            <h4>{{ selectedPlan.name }} · {{ adjustedPlanCalories }} kcal target</h4>
+            <h4>{{ selectedPlan.name }} · {{ formatCaloriesNumber(adjustedPlanCalories) }} kcal target</h4>
             <p class="muted">Nutrition-focused daily recommendation split by meal.</p>
           </div>
           <div class="selected-head-actions">
@@ -1308,7 +1316,7 @@ watch(
                 <span>{{ mealIcon(meal.mealType) }}</span>
                 <h5>{{ meal.label }}</h5>
               </div>
-              <span class="meal-target-tag">{{ meal.targetCalories }} kcal target</span>
+              <span class="meal-target-tag">{{ formatCaloriesNumber(meal.targetCalories) }} kcal target</span>
               <div class="meal-progress" :style="{ background: `conic-gradient(#4caf50 0% ${mealProgressPct(meal)}%, #e9f3ea ${mealProgressPct(meal)}% 100%)` }">
                 <span>{{ mealProgressPct(meal) }}%</span>
               </div>
@@ -1319,10 +1327,10 @@ watch(
                 <div class="meal-main-row">
                   <span class="food-icon">🥬</span>
                   <strong class="food-name">{{ item.foodName }}</strong>
-                  <span class="food-kcal">{{ roundToOne(item.caloriesPer100g) }} kcal / 100g</span>
+                  <span class="food-kcal">{{ formatCaloriesNumber(item.caloriesPer100g) }} kcal / 100g</span>
                 </div>
                 <div class="meal-sub-row">
-                  <span>{{ item.recommendedGrams }} g · {{ roundToOne(item.estimatedCalories) }} kcal</span>
+                  <span>{{ item.recommendedGrams }} g · {{ formatCalories(item.estimatedCalories) }}</span>
                 </div>
                 <div class="macro-tags">
                   <span class="macro-chip">P {{ item.estimatedProtein }}g</span>
@@ -1348,18 +1356,18 @@ watch(
       <section v-if="recordMode === 'recommended'" class="recommended-wrap">
         <p class="muted">{{ recommendedSourceMeta.tip }}</p>
         <p class="muted">
-          Current source: <strong>{{ recommendedSourceMeta.name }}</strong> · {{ roundToOne(activeRecommendedPlanDetails.targetTotal) }} kcal/day
+          Current source: <strong>{{ recommendedSourceMeta.name }}</strong> · {{ formatCaloriesNumber(activeRecommendedPlanDetails.targetTotal) }} kcal/day
         </p>
         <div class="recommended-board">
           <section v-for="meal in recommendedModeMeals" :key="meal.mealType" class="meal-board">
-            <h4>{{ meal.label }} ({{ meal.targetCalories }} kcal target)</h4>
+            <h4>{{ meal.label }} ({{ formatCaloriesNumber(meal.targetCalories) }} kcal target)</h4>
             <p v-if="!meal.cards.length" class="muted">No recommended items.</p>
             <article v-for="card in meal.cards" :key="card.key" class="meal-item">
               <div class="meal-main">
                 <strong>{{ card.recommendation.foodName }}</strong>
-                <span>{{ card.recommendation.caloriesPer100g }} kcal / 100g</span>
-                <span v-if="card.mode === 'recommended'">{{ card.recommendation.recommendedGrams }} g · {{ roundToOne(card.recommendation.estimatedCalories) }} kcal</span>
-                <span v-else-if="card.record">{{ roundToOne(card.record.amountInGrams || card.record.amount || 0) }} g · {{ roundToOne(card.record.calories) }} kcal</span>
+                <span>{{ formatCaloriesNumber(card.recommendation.caloriesPer100g) }} kcal / 100g</span>
+                <span v-if="card.mode === 'recommended'">{{ card.recommendation.recommendedGrams }} g · {{ formatCalories(card.recommendation.estimatedCalories) }}</span>
+                <span v-else-if="card.record">{{ roundToOne(card.record.amountInGrams || card.record.amount || 0) }} g · {{ formatCalories(card.record.calories) }}</span>
                 <span v-if="card.mode === 'recommended'">
                   P {{ card.recommendation.estimatedProtein }}g · C {{ card.recommendation.estimatedCarbs }}g · F {{ card.recommendation.estimatedFat }}g
                 </span>
@@ -1404,7 +1412,7 @@ watch(
           <div v-if="isSearchDropdownOpen && foodResults.length" class="search-list">
             <button v-for="item in foodResults" :key="item.id || item.name" type="button" class="search-item" @click="applyFoodTemplate(item)">
               <strong>{{ item.name }}</strong>
-              <span>{{ item.caloriesPer100g }} kcal / 100g</span>
+              <span>{{ formatCaloriesNumber(item.caloriesPer100g) }} kcal / 100g</span>
             </button>
           </div>
 

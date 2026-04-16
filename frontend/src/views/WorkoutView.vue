@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onMounted, reactive, ref, watch } from "vue";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import WorkoutDateSlider from "../components/workout/WorkoutDateSlider.vue";
 import api from "../services/api";
@@ -55,6 +55,8 @@ const MET_MAP = {
   Swimming: 9,
   "Jump Rope": 11,
   Walking: 4,
+  Walk: 4,
+  HIIT: 10,
   "Weight Lifting": 6,
   "Push-up": 5,
   "Pull-up": 6,
@@ -152,19 +154,55 @@ const todayStatus = computed(() => {
 });
 const canToggleTasks = computed(() => selectedDate.value === todayDateKey);
 
-const knownCalories = computed(() => {
-  if (!workoutTasks.value.length || typeof userWeight.value !== "number") return null;
-  const total = workoutTasks.value.reduce((sum, task) => {
-    const met = MET_MAP[task.exercise_name];
-    if (!met) return sum;
-    const hours = Number(task.duration_per_day || 0) / 60;
-    return sum + met * userWeight.value * hours;
-  }, 0);
-  return Math.round(total);
-});
+function asNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function formatKcal(value) {
+  return `${Math.round(asNumber(value))} kcal`;
+}
+
+function getExerciseName(input) {
+  return String(input?.exercise_name || input?.exerciseName || input?.type || "").trim();
+}
+
+function getDurationMinutes(input) {
+  const raw = input?.duration_per_day ?? input?.durationPerDay ?? input?.duration;
+  return asNumber(raw);
+}
+
+function getMetForExerciseName(name) {
+  const direct = MET_MAP[name];
+  if (direct) return direct;
+  const lower = String(name || "").toLowerCase();
+  const key = Object.keys(MET_MAP).find((k) => k.toLowerCase() === lower);
+  return key ? MET_MAP[key] : 0;
+}
+
+function estimateBurnKcal(input) {
+  const weight = asNumber(userWeight.value);
+  if (weight <= 0) return 0;
+  const met = getMetForExerciseName(getExerciseName(input));
+  if (met <= 0) return 0;
+  const hours = getDurationMinutes(input) / 60;
+  return Math.max(0, met * weight * hours);
+}
+
+function isCompletedTask(task) {
+  return task?.is_completed === true || task?.completed === true || String(task?.status || "").toLowerCase() === "completed";
+}
+
+const plannedBurn = computed(() =>
+  workoutTasks.value.reduce((sum, task) => sum + estimateBurnKcal(task), 0)
+);
+
+const burnedSoFar = computed(() =>
+  workoutTasks.value.reduce((sum, task) => (isCompletedTask(task) ? sum + estimateBurnKcal(task) : sum), 0)
+);
 
 const hasCustomOrUnknownTask = computed(() =>
-  workoutTasks.value.some((task) => !MET_MAP[task.exercise_name])
+  workoutTasks.value.some((task) => getMetForExerciseName(getExerciseName(task)) <= 0)
 );
 
 function startWorkoutTask(task) {
@@ -253,10 +291,27 @@ onMounted(async () => {
   }
 });
 
+onActivated(async () => {
+  try {
+    await Promise.all([loadProfile(), loadTodayInfo()]);
+  } catch (err) {
+    error.value = err?.response?.data?.message || "Failed to refresh workout data.";
+  }
+});
+
 watch(
   () => route.query.focusItem,
   async () => {
     await focusPlanFromQuery();
+  }
+);
+
+watch(
+  () => route.query.date,
+  async (nextDate) => {
+    if (typeof nextDate !== "string" || !nextDate) return;
+    selectedDate.value = nextDate;
+    await loadTodayInfo();
   }
 );
 
@@ -290,9 +345,10 @@ async function handleDateChange(dateKey) {
               <div class="today-text">
                 <strong>{{ task.exercise_name }}</strong>
                 <span>- {{ task.duration_per_day }} min</span>
+                <span class="task-kcal">Estimated burn: {{ formatKcal(estimateBurnKcal(task)) }}</span>
               </div>
               <button
-                v-if="!task.is_completed"
+                v-if="!isCompletedTask(task)"
                 class="start-btn"
                 type="button"
                 @click="startWorkoutTask(task)"
@@ -324,17 +380,23 @@ async function handleDateChange(dateKey) {
           </ul>
         </div>
         <div v-if="workoutTasks.length" class="calories-block">
-          <h4>Calories Estimation</h4>
+          <h4>Workout Tracking</h4>
           <p class="muted">Based on your saved body weight and workout duration.</p>
           <div v-if="typeof userWeight !== 'number'" class="estimate-unavailable">
             Weight not available. Please complete your profile first.
           </div>
-          <div v-else class="estimate-wrap">
-            <div class="estimate-kcal">{{ knownCalories ?? 0 }}</div>
-            <div class="estimate-unit">kcal / day</div>
+          <div v-else class="estimation-grid">
+            <div class="estimate-wrap">
+              <div class="estimate-label">Planned Burn</div>
+              <div class="estimate-value">{{ formatKcal(plannedBurn) }}</div>
+            </div>
+            <div class="estimate-wrap">
+              <div class="estimate-label">Burned So Far</div>
+              <div class="estimate-value">{{ formatKcal(burnedSoFar) }}</div>
+            </div>
           </div>
           <p v-if="hasCustomOrUnknownTask" class="muted custom-note">
-            Calories estimation not available for custom exercise.
+            Some custom exercises use 0 kcal until a mapped type is provided.
           </p>
         </div>
       </article>
@@ -400,6 +462,7 @@ async function handleDateChange(dateKey) {
             <p>Category: {{ plan.category }}</p>
             <p>Days: {{ plan.days }}</p>
             <p>Duration / day: {{ plan.duration_per_day || plan.durationPerDay }} min</p>
+            <p>Estimated burn: {{ formatKcal(estimateBurnKcal(plan)) }}</p>
           </article>
         </section>
       </article>
@@ -435,11 +498,31 @@ async function handleDateChange(dateKey) {
 }
 
 .estimate-wrap {
-  margin-top: 16px;
   text-align: center;
-  padding: 20px;
+  padding: 14px;
   border-radius: 14px;
   background: linear-gradient(140deg, rgba(72, 174, 164, 0.15), rgba(49, 104, 121, 0.2));
+}
+
+.estimation-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.estimate-label {
+  color: var(--c5);
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.estimate-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--c6);
+  line-height: 1.2;
 }
 
 .goal-status {
@@ -487,6 +570,11 @@ async function handleDateChange(dateKey) {
   flex-wrap: wrap;
 }
 
+.task-kcal {
+  color: var(--c5);
+  font-size: 12px;
+}
+
 .check-btn {
   border: none;
   background: transparent;
@@ -524,19 +612,6 @@ async function handleDateChange(dateKey) {
 
 .custom-note {
   margin-top: 8px;
-}
-
-.estimate-kcal {
-  font-size: 48px;
-  font-weight: 700;
-  color: var(--c6);
-  line-height: 1;
-}
-
-.estimate-unit {
-  margin-top: 8px;
-  font-size: 18px;
-  color: var(--c5);
 }
 
 .estimate-unavailable {
@@ -599,6 +674,7 @@ async function handleDateChange(dateKey) {
     flex-basis: 100%;
     width: 100%;
   }
+
 }
 </style>
 
