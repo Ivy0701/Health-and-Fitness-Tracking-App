@@ -4,11 +4,13 @@ const scheduleItemSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
     itemType: { type: String, trim: true, default: "manual" },
+    category: { type: String, trim: true, default: "" },
     meal: { type: String, trim: true, default: "" },
     totalCalories: { type: Number, min: 0, default: 0 },
     timestamp: { type: Date, default: null },
     title: { type: String, required: true, trim: true },
     subtitle: { type: String, trim: true, default: "" },
+    planId: { type: mongoose.Schema.Types.ObjectId, ref: "WorkoutPlan", default: null, index: true },
     date: { type: String, required: true, trim: true },
     time: { type: String, required: true, trim: true },
     note: { type: String, trim: true, default: "" },
@@ -16,6 +18,8 @@ const scheduleItemSchema = new mongoose.Schema(
     linkedDietId: { type: mongoose.Schema.Types.ObjectId, ref: "Diet", default: null, index: true },
     durationMinutes: { type: Number, min: 1, default: 60 },
     overlapAccepted: { type: Boolean, default: false },
+    is_completed: { type: Boolean, default: false },
+    completed_at: { type: Date, default: null },
   },
   { timestamps: true, versionKey: false }
 );

@@ -1,135 +1,406 @@
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { computed, onMounted, reactive, ref } from "vue";
+import { useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
-import CourseCard from "../components/CourseCard.vue";
 import api from "../services/api";
 import { useFavorites } from "../services/favorites";
 import { useAuthStore } from "../stores/auth";
 import {
-  createCourse as createCourseApi,
   dropCourseEnrollment as dropCourseEnrollmentApi,
   enrollCourse as enrollCourseApi,
   fetchCourses,
   fetchEnrolledCourses,
 } from "../services/courses";
-import {
-  DEFAULT_TERM_START_ISO,
-  WEEKDAY_LABELS,
-  expandCourseToPlannedItemsInRange,
-  findPlannedConflicts,
-  inclusiveEndDateAfterMonths,
-} from "../utils/weekSchedule";
+import { expandCourseToPlannedItemsInRange } from "../utils/weekSchedule";
 
 const router = useRouter();
-const route = useRoute();
 const auth = useAuthStore();
-const courses = ref([]);
-const enrolledCourseIds = ref(new Set());
 const { isFavorited, toggleFavorite, ensureFavoritesLoaded } = useFavorites();
-const focusedCourseId = ref("");
-let focusTimer = null;
 
-const form = reactive({
-  title: "",
-  description: "",
-  difficulty: "beginner",
-  duration: 30,
-  durationDays: 7,
-  category: "fitness",
-  weeklySlots: [{ weekday: 1, startTime: "09:00" }],
-});
+const courses = ref([]);
+const enrolledCourseRows = ref([]);
+const workoutPlans = ref([]);
 const state = ref({ error: "" });
+const removingPlanIds = ref(new Set());
+const planActionNotice = ref("");
+const customPlanSaving = ref(false);
 
-/** Term start date + month span: expand all sessions through the last day of that span */
-const enrollStartDate = ref(DEFAULT_TERM_START_ISO);
-const enrollMonths = ref(6);
-
-const conflictModal = ref({
-  open: false,
-  course: null,
-  pairs: [],
-  planned: [],
-  periodLabel: "",
+const customPlanForm = reactive({
+  title: "",
+  category: "Cardio",
+  durationPerDay: 30,
+  days: 7,
+  startDate: "",
+  fixedTime: "",
+  note: "",
 });
 
-const vipLockedModal = ref({
-  open: false,
-  courseTitle: "",
-});
-
-/** Matches CourseCard / API difficulty → star column */
-function difficultyToStars(difficulty) {
-  const k = String(difficulty || "").toLowerCase();
-  const map = { beginner: 1, easy: 2, intermediate: 3, hard: 4, expert: 5, advanced: 5 };
-  return map[k] ?? 3;
+function dateKey(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
-const starColumns = [1, 2, 3, 4, 5];
-
-const detailCourse = ref(null);
-
-function openCourseDetail(course) {
-  detailCourse.value = course;
+function daysSince(startDateRaw) {
+  const start = new Date(startDateRaw);
+  if (Number.isNaN(start.getTime())) return 1;
+  const diff = Math.floor((Date.now() - start.getTime()) / 86400000) + 1;
+  return Math.max(1, diff);
 }
 
-function openCourseDetailFromBoard(course) {
-  if (course?.isPremium && !auth.vipStatus) {
-    vipLockedModal.value = {
-      open: true,
-      courseTitle: course.title,
-    };
-    return;
+function difficultyLabel(value) {
+  const key = String(value || "beginner");
+  return key.charAt(0).toUpperCase() + key.slice(1);
+}
+
+function displayPlanName(input) {
+  const invalidNames = new Set(["untitled plan", "course plan", "workout plan"]);
+  const candidates = [input?.title, input?.name, input?.planName, input?.courseName, input?.exerciseName, input?.exercise_name];
+  for (const v of candidates) {
+    const t = String(v || "").trim();
+    if (t && !invalidNames.has(t.toLowerCase())) return t;
   }
-  openCourseDetail(course);
+  return "";
 }
 
-function closeCourseDetail() {
-  detailCourse.value = null;
+function endDateByDuration(startDateRaw, durationDays) {
+  const start = new Date(startDateRaw);
+  if (Number.isNaN(start.getTime())) return "";
+  const end = new Date(start);
+  end.setDate(end.getDate() + Math.max(1, Number(durationDays || 1)) - 1);
+  return dateKey(end);
 }
 
-async function focusCourseFromQuery() {
-  const focusId = String(route.query.focusItem || "").trim();
-  if (!focusId) return;
-  const match = courses.value.find((course) => String(course?._id || "") === focusId);
-  if (!match) return;
-  openCourseDetailFromBoard(match);
-  focusedCourseId.value = focusId;
-  await nextTick();
-  const el = document.querySelector(`[data-course-id="${focusId}"]`);
-  if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
-  if (focusTimer) window.clearTimeout(focusTimer);
-  focusTimer = window.setTimeout(() => {
-    focusedCourseId.value = "";
-  }, 2200);
-}
-
-function addSlotRow() {
-  form.weeklySlots.push({ weekday: 2, startTime: "10:00" });
-}
-
-function removeSlotRow(i) {
-  if (form.weeklySlots.length <= 1) return;
-  form.weeklySlots.splice(i, 1);
+async function loadCourses() {
+  courses.value = await fetchCourses();
 }
 
 async function refreshEnrolled() {
   const rows = await fetchEnrolledCourses();
-  const ids = (rows || [])
-    .filter((item) => item?.status === "active")
-    .map((item) => item?.course_id?._id || item?.course_id)
-    .filter((id) => id != null && String(id) !== "null" && String(id) !== "undefined")
-    .map((id) => String(id));
-  enrolledCourseIds.value = new Set(ids);
+  enrolledCourseRows.value = Array.isArray(rows) ? rows : [];
 }
 
-async function loadCourses() {
-  const rows = await fetchCourses();
-  courses.value = rows;
+async function loadWorkoutPlans() {
+  const rows = await api.get("/workout/plan").then((r) => r.data).catch(() => []);
+  workoutPlans.value = Array.isArray(rows) ? rows : [];
+}
+
+const recommendedPlans = computed(() =>
+  [...courses.value]
+    .sort((a, b) => Number(Boolean(b.isFeatured)) - Number(Boolean(a.isFeatured)))
+    .slice(0, 6)
+);
+
+const activePlans = computed(() => {
+  const coursePlans = (enrolledCourseRows.value || [])
+    .filter((row) => row && row.status === "active")
+    .map((row) => {
+      const totalDays = Number(row?.course_id?.duration_days || row?.duration_days || 7);
+      const current = Math.max(1, Number(row.current_day || 1));
+      const title = displayPlanName({
+        title: row?.course_id?.title || row?.title,
+        name: row?.name,
+        courseName: row?.courseName,
+      });
+      if (!title) return null;
+      const startDate = String(row?.start_date || dateKey(new Date())).slice(0, 10);
+      return {
+        id: `course-${row._id || row.id}`,
+        type: "course",
+        title,
+        progress: `Day ${Math.min(current, totalDays)} / ${totalDays}`,
+        status: "In Progress",
+        startDate,
+        endDate: endDateByDuration(startDate, totalDays),
+        fixedTime: "",
+        courseId: String(row?.course_id?._id || row?.course_id || ""),
+        focusDate: row?.start_date || dateKey(new Date()),
+        enrolledRow: row,
+      };
+    })
+    .filter(Boolean);
+
+  const customPlans = (workoutPlans.value || [])
+    .map((plan) => {
+      const totalDays = Number(plan.days || 0);
+      const elapsed = daysSince(plan.start_date || plan.created_at);
+      if (totalDays > 0 && elapsed > totalDays) return null;
+      const title = displayPlanName({ title: plan.title, exerciseName: plan.exercise_name });
+      if (!title) return null;
+      const startDate = dateKey(new Date(plan.start_date || plan.created_at || new Date()));
+      return {
+        id: `custom-${plan._id || plan.id}`,
+        type: "custom",
+        title,
+        progress: totalDays > 0 ? `Day ${Math.min(elapsed, totalDays)} / ${totalDays}` : "In Progress",
+        status: "In Progress",
+        startDate,
+        endDate: endDateByDuration(startDate, totalDays || 1),
+        fixedTime: String(plan.fixed_time || "").slice(0, 5),
+        focusDate: startDate,
+        planRow: plan,
+      };
+    })
+    .filter(Boolean);
+
+  return [...coursePlans, ...customPlans].slice(0, 6);
+});
+
+function pushScheduleFocusQuery({ title = "", date = "", courseId = "" } = {}) {
+  router.push({
+    path: "/schedule",
+    query: {
+      focusTitle: title || undefined,
+      focusDate: date || undefined,
+      focusCourseId: courseId || undefined,
+    },
+  });
+}
+
+async function ensureCourseScheduled(row) {
+  const course = courses.value.find((c) => String(c._id) === String(row.courseId));
+  if (!course) return;
+  const me = await api.get("/users/me").then((r) => r.data);
+  const schedules = await api.get(`/schedules/${me.id}`).then((r) => r.data || []);
+  const today = dateKey(new Date());
+  const exists = schedules.some((it) => String(it.courseId || "") === String(row.courseId) && String(it.date || "") >= today);
+  if (exists) return;
+  const end = new Date(`${today}T00:00:00`);
+  end.setDate(end.getDate() + Math.max(1, Number(course.duration_days || 7)) - 1);
+  const sessions = expandCourseToPlannedItemsInRange(course, today, dateKey(end));
+  const items = sessions.map((s, idx) => ({
+    title: s.title,
+    itemType: "course",
+    subtitle: `Plan Day ${idx + 1}`,
+    date: s.date,
+    time: s.time,
+    note: s.note,
+    category: course.category || "Course",
+    courseId: course._id,
+    durationMinutes: s.durationMinutes,
+    overlapAccepted: true,
+  }));
+  if (items.length) await api.post("/schedules/batch", { userId: me.id, items });
+}
+
+async function ensureCustomScheduled(row) {
+  const plan = row.planRow;
+  if (!plan) return;
+  const me = await api.get("/users/me").then((r) => r.data);
+  const schedules = await api.get(`/schedules/${me.id}`).then((r) => r.data || []);
+  const planId = String(plan?._id || plan?.id || "");
+  const title = displayPlanName({ title: plan.title, exerciseName: plan.exercise_name });
+  if (!title) return;
+  const exists = schedules.some(
+    (it) =>
+      String(it.itemType || "") === "workout" &&
+      (String(it?.planId || "") === planId || String(it.title || "").trim() === title)
+  );
+  if (exists) return;
+  const start = dateKey(new Date(plan.start_date || new Date()));
+  const days = Math.max(1, Number(plan.days || 1));
+  const time = String(plan.fixed_time || "07:00").slice(0, 5);
+  const items = [];
+  for (let i = 0; i < days; i += 1) {
+    const d = new Date(`${start}T00:00:00`);
+    d.setDate(d.getDate() + i);
+    items.push({
+      title,
+      itemType: "workout",
+      planId: planId || null,
+      subtitle: `Plan Day ${i + 1}`,
+      date: dateKey(d),
+      time,
+      note: plan.note || "",
+      category: plan.category || "Custom",
+      durationMinutes: Number(plan.duration_per_day || 30),
+      overlapAccepted: true,
+    });
+  }
+  await api.post("/schedules/batch", { userId: me.id, items });
+}
+
+async function enrollPlan(course) {
+  state.value.error = "";
+  planActionNotice.value = "";
+  try {
+    if (course?.isPremium && !auth.vipStatus) {
+      state.value.error = "This is a VIP plan. Upgrade to start it.";
+      return;
+    }
+    await enrollCourseApi(course._id);
+    const today = dateKey(new Date());
+    const end = new Date(`${today}T00:00:00`);
+    end.setDate(end.getDate() + Math.max(1, Number(course.duration_days || 7)) - 1);
+    const sessions = expandCourseToPlannedItemsInRange(course, today, dateKey(end));
+    const me = await api.get("/users/me").then((r) => r.data);
+    const items = sessions.map((s, idx) => ({
+      title: s.title,
+      itemType: "course",
+      subtitle: `Plan Day ${idx + 1}`,
+      date: s.date,
+      time: s.time,
+      note: s.note,
+      category: course.category || "Course",
+      courseId: course._id,
+      durationMinutes: s.durationMinutes,
+      overlapAccepted: true,
+    }));
+    if (items.length) await api.post("/schedules/batch", { userId: me.id, items });
+    await refreshEnrolled();
+    planActionNotice.value = "Plan started.";
+  } catch (e) {
+    state.value.error = e?.response?.data?.message || "Failed to start plan.";
+  }
+}
+
+async function createCustomPlan() {
+  state.value.error = "";
+  planActionNotice.value = "";
+  customPlanSaving.value = true;
+  try {
+    const title = String(customPlanForm.title || "").trim();
+    if (!title) throw new Error("Plan title is required.");
+    const startDate = customPlanForm.startDate || dateKey(new Date());
+    const fixedTime = customPlanForm.fixedTime || "07:00";
+    const plan = await api.post("/workout/plan", {
+      exerciseName: title,
+      category: customPlanForm.category || "Custom",
+      durationPerDay: Number(customPlanForm.durationPerDay || 30),
+      days: Number(customPlanForm.days || 7),
+      isCustom: true,
+      startDate,
+      fixedTime,
+      note: customPlanForm.note || "",
+    });
+    const createdPlanId = String(plan?.data?._id || plan?.data?.id || "");
+    const me = await api.get("/users/me").then((r) => r.data);
+    const days = Math.max(1, Number(customPlanForm.days || 1));
+    const items = [];
+    for (let i = 0; i < days; i += 1) {
+      const d = new Date(`${startDate}T00:00:00`);
+      d.setDate(d.getDate() + i);
+      items.push({
+        title,
+        itemType: "workout",
+        planId: createdPlanId || null,
+        subtitle: `Plan Day ${i + 1}`,
+        category: customPlanForm.category || "Custom",
+        date: dateKey(d),
+        time: fixedTime,
+        note: customPlanForm.note || "",
+        durationMinutes: Number(customPlanForm.durationPerDay || 30),
+        overlapAccepted: true,
+      });
+    }
+    await api.post("/schedules/batch", { userId: me.id, items });
+    await Promise.all([loadWorkoutPlans(), refreshEnrolled()]);
+    customPlanForm.title = "";
+    customPlanForm.category = "Cardio";
+    customPlanForm.durationPerDay = 30;
+    customPlanForm.days = 7;
+    customPlanForm.startDate = "";
+    customPlanForm.fixedTime = "";
+    customPlanForm.note = "";
+    if (plan?.data?._id) planActionNotice.value = "Plan created.";
+  } catch (e) {
+    state.value.error = e?.response?.data?.message || e?.message || "Failed to create custom plan.";
+  } finally {
+    customPlanSaving.value = false;
+  }
+}
+
+async function viewPlanInSchedule(row) {
+  try {
+    if (row.type === "course") await ensureCourseScheduled(row);
+    if (row.type === "custom") await ensureCustomScheduled(row);
+    pushScheduleFocusQuery({ title: row.title, date: row.focusDate, courseId: row.courseId });
+  } catch (e) {
+    state.value.error = e?.response?.data?.message || "Failed to open schedule.";
+  }
+}
+
+async function removeActivePlan(row) {
+  const ok = window.confirm(`Stop "${row.title}" and remove its future pending tasks?`);
+  if (!ok) return;
+  const rowId = String(row.id || "");
+  removingPlanIds.value = new Set([...removingPlanIds.value, rowId]);
+  planActionNotice.value = "";
+  state.value.error = "";
+  try {
+    if (row.type === "course") {
+      enrolledCourseRows.value = (enrolledCourseRows.value || []).filter(
+        (it) => String(it?._id || it?.id || "") !== String(row?.enrolledRow?._id || row?.enrolledRow?.id || "")
+      );
+      await dropCourseEnrollmentApi(row.courseId);
+      const me = await api.get("/users/me").then((r) => r.data);
+      const schedules = await api.get(`/schedules/${me.id}`).then((r) => r.data || []);
+      const today = dateKey(new Date());
+      const targets = schedules.filter(
+        (it) =>
+          String(it.date || "") >= today &&
+          !Boolean(it.is_completed) &&
+          String(it.courseId || "") === String(row.courseId)
+      );
+      await Promise.allSettled(targets.map((it) => api.delete(`/schedules/${it._id}`)));
+    } else {
+      const planId = String(row?.planRow?._id || row?.planRow?.id || "");
+      if (!planId) throw new Error("Invalid plan id.");
+      workoutPlans.value = (workoutPlans.value || []).filter((it) => String(it?._id || it?.id || "") !== planId);
+      await api.delete(`/workout/plan/${planId}`);
+    }
+    await Promise.allSettled([loadWorkoutPlans(), refreshEnrolled()]);
+    planActionNotice.value = "Plan removed.";
+  } catch (e) {
+    state.value.error = e?.response?.data?.message || e?.message || "Failed to remove plan.";
+  } finally {
+    const next = new Set(removingPlanIds.value);
+    next.delete(rowId);
+    removingPlanIds.value = next;
+  }
+}
+
+async function cleanupInvalidUntitledPlans() {
+  const invalidCourseRows = (enrolledCourseRows.value || []).filter((row) => {
+    if (String(row?.status || "") !== "active") return false;
+    const title = displayPlanName({
+      title: row?.course_id?.title || row?.title,
+      name: row?.name,
+      courseName: row?.courseName,
+    });
+    return !title;
+  });
+  const invalidCustomRows = (workoutPlans.value || []).filter((plan) => {
+    const title = displayPlanName({ title: plan?.title, exerciseName: plan?.exercise_name });
+    return !title;
+  });
+  if (!invalidCourseRows.length && !invalidCustomRows.length) return;
+  const me = await api.get("/users/me").then((r) => r.data).catch(() => null);
+  const today = dateKey(new Date());
+
+  for (const row of invalidCourseRows) {
+    const courseId = String(row?.course_id?._id || row?.course_id || "");
+    if (courseId) {
+      await dropCourseEnrollmentApi(courseId).catch(() => null);
+      if (me?.id) {
+        const schedules = await api.get(`/schedules/${me.id}`).then((r) => r.data || []).catch(() => []);
+        const futurePending = schedules.filter(
+          (it) => String(it?.courseId || "") === courseId && String(it?.date || "") >= today && !Boolean(it?.is_completed)
+        );
+        await Promise.allSettled(futurePending.map((it) => api.delete(`/schedules/${it._id}`)));
+      }
+    }
+  }
+  for (const plan of invalidCustomRows) {
+    const planId = String(plan?._id || plan?.id || "");
+    if (planId) await api.delete(`/workout/plan/${planId}`).catch(() => null);
+  }
+  await Promise.allSettled([loadWorkoutPlans(), refreshEnrolled()]);
 }
 
 function courseFavoriteState(courseId) {
-  return isFavorited("course", courseId);
+  return isFavorited("course", String(courseId || ""));
 }
 
 async function toggleCourseFavorite(course) {
@@ -140,782 +411,240 @@ async function toggleCourseFavorite(course) {
     description: course.description,
     metadata: {
       difficulty: course.difficulty,
-      duration: course.duration,
-      durationDays: course.duration_days,
-      category: course.category,
+      durationDays: Number(course.duration_days || 7),
+      duration: Number(course.duration || 30),
+      category: course.category || "General",
       isPremium: Boolean(course.isPremium),
     },
     sourceType: "course_catalog",
   });
 }
 
-async function dropCourseEnrollment(course) {
-  const courseId = String(course?._id || "");
-  if (!courseId || !enrolledCourseIds.value.has(courseId)) return;
-  if (!confirm(`Remove all scheduled sessions for “${course.title}” from your calendar?`)) return;
-  try {
-    await dropCourseEnrollmentApi(courseId);
-    await api.delete(`/schedules/course/${course._id}`);
-    enrolledCourseIds.value.delete(courseId);
-    enrolledCourseIds.value = new Set(enrolledCourseIds.value);
-    await refreshEnrolled();
-  } catch (e) {
-    state.value.error = e?.response?.data?.message || "Could not drop this course.";
-  }
-}
-
-async function cancelAllEnrollments() {
-  const ids = Array.from(enrolledCourseIds.value || []);
-  if (!ids.length) {
-    window.alert("You do not have any enrolled courses.");
-    return;
-  }
-  const ok = window.confirm(
-    `Cancel all enrolled courses (${ids.length}) and remove all related sessions from your schedule?`
-  );
-  if (!ok) return;
-
-  state.value.error = "";
-  try {
-    await Promise.all(
-      ids.map(async (courseId) => {
-        await dropCourseEnrollmentApi(courseId);
-        await api.delete(`/schedules/course/${courseId}`);
-      })
-    );
-    enrolledCourseIds.value = new Set();
-    if (detailCourse.value && ids.includes(String(detailCourse.value._id || ""))) {
-      detailCourse.value = null;
-    }
-    await refreshEnrolled();
-    window.alert("All enrolled courses have been cancelled and removed from your schedule.");
-  } catch (e) {
-    state.value.error = e?.response?.data?.message || "Failed to cancel all enrolled courses.";
-  }
-}
-
-async function createCourse() {
-  state.value.error = "";
-  try {
-    await createCourseApi({
-      title: form.title,
-      description: form.description,
-      difficulty: form.difficulty,
-      duration: form.duration,
-      duration_days: Number(form.durationDays),
-      category: form.category,
-      weeklySlots: form.weeklySlots.map((s) => ({
-        weekday: Number(s.weekday),
-        startTime: s.startTime,
-      })),
-    });
-    form.title = "";
-    form.description = "";
-    form.difficulty = "beginner";
-    form.duration = 30;
-    form.durationDays = 7;
-    form.category = "fitness";
-    form.weeklySlots = [{ weekday: 1, startTime: "09:00" }];
-    await loadCourses();
-  } catch (e) {
-    state.value.error = e?.response?.data?.message || "Failed to create course.";
-  }
-}
-
-async function enrollCourse(course) {
-  state.value.error = "";
-  if (course?.isPremium && !auth.vipStatus) {
-    vipLockedModal.value = {
-      open: true,
-      courseTitle: course.title,
-    };
-    return;
-  }
-  const courseId = String(course?._id || "");
-  if (!courseId) {
-    state.value.error = "Invalid course.";
-    return;
-  }
-  if (enrolledCourseIds.value.has(courseId)) {
-    state.value.error = "You already enrolled in this course.";
-    return;
-  }
-  try {
-    const slots = course.weeklySlots || [];
-    if (!slots.length) {
-      state.value.error = "This course has no weekly class times yet.";
-      return;
-    }
-    const endISO = inclusiveEndDateAfterMonths(enrollStartDate.value, enrollMonths.value);
-    if (!endISO) throw new Error("Invalid term start or duration.");
-    const me = await api.get("/users/me").then((r) => r.data);
-    const { data: existing } = await api.get(`/schedules/${me.id}`);
-    const existingCourseSchedules = (existing || []).filter((item) => item?.courseId);
-    const planned = expandCourseToPlannedItemsInRange(course, enrollStartDate.value, endISO);
-    if (!planned.length) {
-      state.value.error = "No class dates fall in this date range (check weekdays vs term).";
-      return;
-    }
-    const pairs = findPlannedConflicts(planned, existingCourseSchedules);
-    if (pairs.length) {
-      const goOn = window.confirm(
-        `This course has ${pairs.length} time conflict(s) with your current schedule. Continue anyway and stack overlaps?`
-      );
-      if (!goOn) return;
-    }
-
-    await enrollCourseApi(course._id);
-    const mode = pairs.length ? "stack" : "all";
-    const batchItems = buildBatchItems(planned, mode, pairs);
-    if (batchItems.length) {
-      await api.post("/schedules/batch", { userId: me.id, items: batchItems });
-    }
-    await refreshEnrolled();
-  } catch (e) {
-    const statusCode = e?.response?.status;
-    const msg = e?.response?.data?.message || "Failed to enroll this course.";
-    state.value.error = msg;
-    if (statusCode === 409) {
-      window.alert(msg);
-    }
-  }
-}
-
-function handleStartLearning(course) {
-  if (!course.isPremium) {
-    router.push(`/courses/${course._id}/learn`);
-    return;
-  }
-  if (auth.vipStatus) {
-    router.push(`/courses/${course._id}/learn`);
-    return;
-  }
-  vipLockedModal.value = {
-    open: true,
-    courseTitle: course.title,
-  };
-}
-
-function closeVipLockedModal() {
-  vipLockedModal.value = { open: false, courseTitle: "" };
-}
-
-function slotLabel(slot) {
-  return `${WEEKDAY_LABELS[slot.weekday]} ${slot.startTime}`;
-}
-
-function courseSlotsText(course) {
-  const slots = course.weeklySlots || [];
-  if (!slots.length) return "No weekly times set";
-  return slots.map(slotLabel).join(" · ");
-}
-
-async function openAddToSchedule(course) {
-  const slots = course.weeklySlots || [];
-  if (!slots.length) {
-    state.value.error = "This course has no weekly class times yet.";
-    return;
-  }
-  state.value.error = "";
-  const endISO = inclusiveEndDateAfterMonths(enrollStartDate.value, enrollMonths.value);
-  if (!endISO) {
-    state.value.error = "Invalid term start or duration.";
-    return;
-  }
-
-  const me = await api.get("/users/me").then((r) => r.data);
-  const { data: existing } = await api.get(`/schedules/${me.id}`);
-  const existingCourseSchedules = (existing || []).filter((item) => item?.courseId);
-  const planned = expandCourseToPlannedItemsInRange(course, enrollStartDate.value, endISO);
-  if (!planned.length) {
-    state.value.error = "No class dates fall in this date range (check weekdays vs term).";
-    return;
-  }
-
-  const pairs = findPlannedConflicts(planned, existingCourseSchedules);
-  const periodLabel = `${enrollStartDate.value} → ${endISO} · ${planned.length} session(s)`;
-
-  conflictModal.value = {
-    open: true,
-    course,
-    pairs,
-    planned,
-    periodLabel,
-  };
-}
-
-function closeConflictModal() {
-  conflictModal.value = { open: false, course: null, pairs: [], planned: [], periodLabel: "" };
-}
-
-function plannedKey(p) {
-  return `${p.date}|${p.time}|${p.title}`;
-}
-
-function buildBatchItems(planned, mode, pairs) {
-  const conflictKeys = new Set(pairs.map((x) => plannedKey(x.planned)));
-  let list = planned;
-  if (pairs.length && mode === "free") {
-    const bad = new Set(pairs.map((x) => plannedKey(x.planned)));
-    list = planned.filter((p) => !bad.has(plannedKey(p)));
-  }
-  return list.map((p) => ({
-    title: p.title,
-    date: p.date,
-    time: p.time,
-    note: p.note,
-    courseId: p.courseId,
-    durationMinutes: p.durationMinutes,
-    overlapAccepted: mode === "stack" && conflictKeys.has(plannedKey(p)),
-  }));
-}
-
-async function submitScheduleEnroll(mode) {
-  const { pairs, planned } = conflictModal.value;
-  if (!planned?.length) {
-    closeConflictModal();
-    return;
-  }
-  const me = await api.get("/users/me").then((r) => r.data);
-  const items = buildBatchItems(planned, mode, pairs);
-  if (!items.length) {
-    state.value.error = "Nothing to add (all sessions conflicted).";
-    closeConflictModal();
-    return;
-  }
-  try {
-    await api.post("/schedules/batch", { userId: me.id, items });
-    closeConflictModal();
-    await refreshEnrolled();
-    router.push("/schedule");
-  } catch (e) {
-    state.value.error = e?.response?.data?.message || "Failed to add to schedule.";
-  }
-}
-
-const conflictSummary = computed(() => {
-  const pairs = conflictModal.value.pairs || [];
-  if (!pairs.length) return "";
-  const lines = pairs.slice(0, 8).map(
-    (x) =>
-      `“${x.planned.title}” ${x.planned.date} ${x.planned.time} ↔ already: “${x.existing.title}” ${x.existing.time}`
-  );
-  const more = pairs.length > 8 ? `\n… +${pairs.length - 8} more` : "";
-  return lines.join("\n") + more;
-});
-
-const enrollPreview = computed(() => {
-  const end = inclusiveEndDateAfterMonths(enrollStartDate.value, enrollMonths.value);
-  if (!end) return "";
-  return `${enrollStartDate.value} → ${end}`;
-});
-
-/** VIP first; within each tier sort easiest → hardest */
-function difficultySortKey(difficulty) {
-  const d = String(difficulty || "").toLowerCase();
-  const order = {
-    beginner: 0,
-    easy: 1,
-    intermediate: 2,
-    hard: 3,
-    advanced: 4,
-    expert: 5,
-  };
-  return order[d] ?? 2;
-}
-
-const sortedCourses = computed(() =>
-  [...courses.value].sort((a, b) => {
-    const pa = a.isPremium ? 0 : 1;
-    const pb = b.isPremium ? 0 : 1;
-    if (pa !== pb) return pa - pb;
-    return difficultySortKey(a.difficulty) - difficultySortKey(b.difficulty);
-  })
-);
-
-const freeCoursesList = computed(() => sortedCourses.value.filter((c) => !c.isPremium));
-const vipCoursesList = computed(() => sortedCourses.value.filter((c) => c.isPremium));
-
-function bucketCoursesByStars(list) {
-  const buckets = { 1: [], 2: [], 3: [], 4: [], 5: [] };
-  for (const c of list) {
-    const s = difficultyToStars(c.difficulty);
-    if (buckets[s]) buckets[s].push(c);
-  }
-  for (const k of Object.keys(buckets)) {
-    buckets[k].sort((a, b) => String(a.title || "").localeCompare(String(b.title || "")));
-  }
-  return buckets;
-}
-
-const vipByStars = computed(() => bucketCoursesByStars(vipCoursesList.value));
-const freeByStars = computed(() => bucketCoursesByStars(freeCoursesList.value));
-
 onMounted(async () => {
-  await Promise.all([loadCourses(), ensureFavoritesLoaded(), refreshEnrolled()]);
-  await focusCourseFromQuery();
+  await Promise.all([loadCourses(), loadWorkoutPlans(), refreshEnrolled(), ensureFavoritesLoaded()]);
+  await cleanupInvalidUntitledPlans();
 });
-
-watch(
-  () => route.query.focusItem,
-  async () => {
-    await focusCourseFromQuery();
-  }
-);
 </script>
 
 <template>
   <AppNavbar />
-  <main class="page">
-    <h2 class="title">📚 Courses</h2>
+  <main class="page courses-page">
+    <h2 class="title">Courses</h2>
 
-    <section class="panel enroll-panel">
-      <h3>Enrollment period (all courses)</h3>
-      <p class="hint">Default term begins <strong>2026-05-01</strong>. Adjust if needed.</p>
-      <div class="grid grid-2 enroll-row">
-        <div>
-          <label class="lbl">Term starts</label>
-          <input v-model="enrollStartDate" type="date" />
-        </div>
-        <div>
-          <label class="lbl">Run for</label>
-          <select v-model.number="enrollMonths">
-            <option :value="3">3 months</option>
-            <option :value="6">6 months (e.g. May–Oct)</option>
-            <option :value="9">9 months</option>
-            <option :value="12">12 months</option>
-          </select>
-        </div>
-      </div>
-      <p class="preview-line">Calendar span: <strong>{{ enrollPreview }}</strong></p>
-      <div class="enroll-actions">
-        <button
-          type="button"
-          class="btn-danger"
-          :disabled="!enrolledCourseIds.size"
-          @click="cancelAllEnrollments"
-        >
-          Cancel all enrolled courses
-        </button>
-        <span class="enroll-count">Currently enrolled: {{ enrolledCourseIds.size }}</span>
+    <section class="panel section-block">
+      <h3 class="section-title">Recommended Plans</h3>
+      <p class="section-subtitle">Choose a long-term plan to start today.</p>
+      <div class="recommended-grid">
+        <article v-for="plan in recommendedPlans" :key="plan._id" class="recommended-card">
+          <h4>{{ plan.title }}</h4>
+          <p class="meta-line">Category: {{ plan.category || "General" }}</p>
+          <p class="meta-line">Duration: {{ plan.duration_days || 7 }} days</p>
+          <p class="meta-line">Minutes/day: {{ plan.duration || 30 }}</p>
+          <p class="meta-line">Difficulty: {{ difficultyLabel(plan.difficulty) }}</p>
+          <div class="row-actions">
+            <button type="button" class="btn-primary" @click="enrollPlan(plan)">Start Plan</button>
+            <button type="button" class="btn-muted" @click="toggleCourseFavorite(plan)">
+              {{ courseFavoriteState(plan._id) ? "Saved" : "Add to Favorites" }}
+            </button>
+          </div>
+        </article>
       </div>
     </section>
 
-    <section class="panel catalog-panel">
-      <h3 class="catalog-title">👑 VIP courses</h3>
-      <p class="hint catalog-hint">
-        Columns by difficulty: 1🌟 easiest through 5🌟 hardest. Click a course name to open details and enroll.
-      </p>
-      <div class="star-board star-board-vip">
-        <div v-for="stars in starColumns" :key="'vip-' + stars" class="star-col">
-          <div class="star-col-head" :aria-label="stars + ' stars'">
-            <span class="stars-label">{{ "🌟".repeat(stars) }}</span>
-            <span class="stars-caption">({{ stars }}/5)</span>
-          </div>
-          <ul class="course-chip-list">
-            <li v-for="c in vipByStars[stars]" :key="c._id">
-              <button
-                type="button"
-                class="course-chip"
-                :class="{ locked: c.isPremium && !auth.vipStatus, focused: focusedCourseId === String(c._id) }"
-                :disabled="c.isPremium && !auth.vipStatus"
-                :data-course-id="String(c._id)"
-                @click="openCourseDetailFromBoard(c)"
-              >
-                {{ c.title }}
-              </button>
-            </li>
-            <li v-if="!vipByStars[stars].length" class="col-empty">—</li>
-          </ul>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel catalog-panel">
-      <h3 class="catalog-title">📖 Standard courses</h3>
-      <p class="hint catalog-hint">Open to all members, also grouped in 1–5🌟 columns. Click a course to view details.</p>
-      <div class="star-board star-board-free">
-        <div v-for="stars in starColumns" :key="'free-' + stars" class="star-col">
-          <div class="star-col-head">
-            <span class="stars-label">{{ "🌟".repeat(stars) }}</span>
-            <span class="stars-caption">({{ stars }}/5)</span>
-          </div>
-          <ul class="course-chip-list">
-            <li v-for="c in freeByStars[stars]" :key="c._id">
-              <button
-                type="button"
-                class="course-chip"
-                :class="{ focused: focusedCourseId === String(c._id) }"
-                :data-course-id="String(c._id)"
-                @click="openCourseDetailFromBoard(c)"
-              >
-                {{ c.title }}
-              </button>
-            </li>
-            <li v-if="!freeByStars[stars].length" class="col-empty">—</li>
-          </ul>
-        </div>
-      </div>
-    </section>
-
-    <Teleport to="body">
-      <div v-if="detailCourse" class="modal-backdrop" @click.self="closeCourseDetail">
-        <div class="modal modal-course-detail panel">
-          <button type="button" class="detail-close" aria-label="Close" @click="closeCourseDetail">×</button>
-          <CourseCard
-            :course="detailCourse"
-            :slot-text="courseSlotsText(detailCourse)"
-            :is-vip-user="auth.vipStatus"
-            :is-favorited="courseFavoriteState(detailCourse._id)"
-            :is-enrolled="enrolledCourseIds.has(String(detailCourse._id))"
-            @start="handleStartLearning"
-            @enroll="enrollCourse"
-            @drop="dropCourseEnrollment"
-            @favorite="toggleCourseFavorite"
-          />
-        </div>
-      </div>
-    </Teleport>
-
-    <Teleport to="body">
-      <div v-if="conflictModal.open" class="modal-backdrop" @click.self="closeConflictModal">
-        <div class="modal panel">
-          <h3>Enroll in this course?</h3>
-          <p class="period">{{ conflictModal.periodLabel }}</p>
-          <template v-if="conflictModal.pairs.length">
-            <p class="conflict-warn">Some sessions overlap <strong>existing items that already have a time</strong> on your schedule:</p>
-            <pre class="conflict-pre">{{ conflictSummary }}</pre>
-            <p class="muted small">If the calendar was empty, you should not see this — invalid old rows are ignored.</p>
-          </template>
-          <p v-else class="ok-msg">No time conflicts with your current schedule in this period.</p>
-          <p class="muted small">You can add only free slots, or add everything and stack overlaps on the timetable.</p>
-          <div class="modal-actions">
-            <button type="button" class="btn-muted" @click="closeConflictModal">Cancel</button>
-            <template v-if="conflictModal.pairs.length">
-              <button type="button" class="btn-muted" @click="submitScheduleEnroll('free')">Add free slots only</button>
-              <button type="button" class="btn-warn" @click="submitScheduleEnroll('stack')">Add all (stacked)</button>
-            </template>
-            <button v-else type="button" class="btn-primary" @click="submitScheduleEnroll('all')">Add to schedule</button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
-
-    <Teleport to="body">
-      <div v-if="vipLockedModal.open" class="modal-backdrop" @click.self="closeVipLockedModal">
-        <div class="modal panel">
-          <h3>VIP Members Only</h3>
-          <p class="muted">
-            “{{ vipLockedModal.courseTitle }}” is for VIP members only.
-          </p>
-          <p>Please upgrade to unlock this premium content.</p>
-          <div class="modal-actions">
-            <button type="button" class="btn-muted" @click="closeVipLockedModal">Not now</button>
-            <button type="button" class="btn-primary" @click="router.push('/vip')">Go to VIP Page</button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
-
-    <section class="panel">
-      <h3>Create Course</h3>
-      <p class="hint">
-        Set weekly class times. Enrollment adds <strong>every session</strong> from the term start through the last day of the
-        chosen month span (e.g. May → Oct for 6 months).
-      </p>
-      <form novalidate @submit.prevent="createCourse">
-        <div class="field-group">
-          <label class="lbl" for="course-title">Course title</label>
-          <input id="course-title" v-model="form.title" placeholder="e.g. Full Body Beginner Program" />
-          <p class="form-help">Use a short, clear name that users can recognize quickly.</p>
-        </div>
-
-        <div class="field-group">
-          <label class="lbl" for="course-description">Description</label>
-          <input id="course-description" v-model="form.description" placeholder="What users will learn and who this course is for" />
-          <p class="form-help">Write one sentence on the goal, target level, and expected outcome.</p>
-        </div>
-
-        <div class="grid grid-2">
-          <div class="field-group">
-            <label class="lbl" for="course-difficulty">Difficulty</label>
-            <select id="course-difficulty" v-model="form.difficulty">
-              <option value="beginner">Beginner (1🌟)</option>
-              <option value="easy">Easy (2🌟)</option>
-              <option value="intermediate">Intermediate (3🌟)</option>
-              <option value="hard">Hard (4🌟)</option>
-              <option value="expert">Expert (5🌟)</option>
+    <section class="panel section-block">
+      <h3 class="section-title">Create Your Own Plan</h3>
+      <p class="section-subtitle">Create a custom long-term plan that starts from today.</p>
+      <form class="create-plan-form" novalidate @submit.prevent="createCustomPlan">
+        <div class="form-row two-col">
+          <label class="field-group">
+            <span class="lbl">Plan name</span>
+            <input v-model.trim="customPlanForm.title" placeholder="e.g. My Running Plan" />
+          </label>
+          <label class="field-group">
+            <span class="lbl">Category</span>
+            <select v-model="customPlanForm.category">
+              <option>Cardio</option>
+              <option>Strength</option>
+              <option>Flexibility</option>
+              <option>Recovery</option>
+              <option>HIIT</option>
+              <option>Custom</option>
             </select>
-            <p class="form-help">Choose how hard this course should feel for a normal user.</p>
-          </div>
-          <div class="field-group">
-            <label class="lbl" for="course-duration">Session duration (minutes)</label>
-            <input id="course-duration" v-model.number="form.duration" type="number" min="1" placeholder="e.g. 30" />
-            <p class="form-help">Length of one class session.</p>
-          </div>
+          </label>
         </div>
-
-        <div class="field-group">
-          <label class="lbl" for="course-duration-days">Program duration (days)</label>
-          <input id="course-duration-days" v-model.number="form.durationDays" type="number" min="1" placeholder="e.g. 30" />
-          <p class="form-help">Total number of days for this program.</p>
+        <div class="form-row two-col">
+          <label class="field-group">
+            <span class="lbl">Minutes/day</span>
+            <input v-model.number="customPlanForm.durationPerDay" type="number" min="1" />
+          </label>
+          <label class="field-group">
+            <span class="lbl">Duration days</span>
+            <input v-model.number="customPlanForm.days" type="number" min="1" max="30" />
+          </label>
         </div>
-
-        <div class="field-group">
-          <label class="lbl" for="course-category">Category</label>
-          <input id="course-category" v-model="form.category" placeholder="e.g. fitness, strength, cardio" />
-          <p class="form-help">Use a simple tag to group similar courses.</p>
+        <div class="form-row two-col">
+          <label class="field-group">
+            <span class="lbl">Start date</span>
+            <input v-model="customPlanForm.startDate" type="date" />
+          </label>
+          <label class="field-group">
+            <span class="lbl">Fixed time (optional)</span>
+            <input v-model="customPlanForm.fixedTime" type="time" />
+          </label>
         </div>
-
-        <div class="slots-panel">
-          <div class="slots-head">
-            <span>Weekly class times</span>
-            <button type="button" class="btn-small" @click="addSlotRow">+ Add time</button>
-          </div>
-          <p class="form-help">Add every weekly session time users should attend (weekday + start time).</p>
-          <div v-for="(row, i) in form.weeklySlots" :key="i" class="slot-row grid grid-2">
-            <div class="field-group compact">
-              <label class="lbl">Weekday</label>
-              <select v-model.number="row.weekday">
-                <option v-for="(lab, w) in WEEKDAY_LABELS" :key="w" :value="w">{{ lab }}</option>
-              </select>
-            </div>
-            <div class="time-row">
-              <div class="field-group compact grow">
-                <label class="lbl">Start time</label>
-                <input v-model="row.startTime" type="time" />
-              </div>
-              <button v-if="form.weeklySlots.length > 1" type="button" class="btn-remove" @click="removeSlotRow(i)">✕</button>
-            </div>
-          </div>
-        </div>
-
-        <button type="submit">Add Course</button>
+        <label class="field-group">
+          <span class="lbl">Note</span>
+          <input v-model="customPlanForm.note" placeholder="Optional note" />
+        </label>
+        <button type="submit" class="btn-primary create-submit-btn" :disabled="customPlanSaving">
+          {{ customPlanSaving ? "Creating..." : "Create Plan" }}
+        </button>
       </form>
+    </section>
+
+    <section class="panel section-block">
+      <h3 class="section-title">My Active Plans</h3>
+      <p class="section-subtitle">Your ongoing long-term plans.</p>
+      <p v-if="planActionNotice" class="ok-msg">{{ planActionNotice }}</p>
       <p v-if="state.error" class="error">{{ state.error }}</p>
+      <div v-if="activePlans.length" class="active-plans-grid">
+        <article v-for="row in activePlans" :key="row.id" class="active-plan-card">
+          <div class="active-card-content">
+            <h4>{{ row.title }}</h4>
+            <p class="meta-line">{{ row.progress }}</p>
+            <span class="badge status-badge">{{ row.status }}</span>
+            <p class="meta-line">Start: {{ row.startDate }}</p>
+            <p class="meta-line">End: {{ row.endDate }}</p>
+            <p v-if="row.fixedTime" class="meta-line">Time: {{ row.fixedTime }} daily</p>
+          </div>
+          <div class="row-actions">
+            <button type="button" class="btn-primary" @click="router.push('/workout')">Go to Workout</button>
+            <button type="button" class="btn-muted" @click="viewPlanInSchedule(row)">View in Schedule</button>
+            <button
+              type="button"
+              class="btn-muted btn-danger"
+              :disabled="removingPlanIds.has(String(row.id))"
+              @click="removeActivePlan(row)"
+            >
+              {{ removingPlanIds.has(String(row.id)) ? "Removing..." : "Remove Plan" }}
+            </button>
+          </div>
+        </article>
+      </div>
+      <p v-else class="hint">No active plans yet.</p>
     </section>
   </main>
 </template>
 
 <style scoped>
-.catalog-panel {
-  margin-top: 14px;
-}
-.catalog-title {
-  margin: 0 0 4px;
-  color: var(--c6);
-}
-.catalog-hint {
-  margin-bottom: 14px;
-}
-.star-board {
+.courses-page {
+  max-width: 1180px;
+  margin: 0 auto;
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 12px;
-  overflow-x: auto;
-  padding-bottom: 4px;
+  gap: 18px;
 }
-.star-board-vip {
-  background: linear-gradient(180deg, #faf5ff 0%, #f3e8ff55 100%);
-  border: 1px solid #e9d5ff;
-  border-radius: 14px;
-  padding: 12px;
-}
-.star-board-free {
-  background: linear-gradient(180deg, #f8fcfb 0%, #e8f4f2 100%);
-  border: 1px solid #d7e7e6;
-  border-radius: 14px;
-  padding: 12px;
-}
-.star-col {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  border-radius: 12px;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  overflow: hidden;
-  min-height: 120px;
-}
-.star-board-vip .star-col {
-  border-color: #ddd6fe;
-}
-.star-col-head {
-  text-align: center;
-  padding: 10px 6px;
-  border-bottom: 1px solid #eef2f2;
-  background: #fafcfb;
-}
-.star-board-vip .star-col-head {
-  background: linear-gradient(180deg, #f5f3ff, #ede9fe);
-}
-.stars-label {
-  display: block;
-  font-size: 12px;
-  letter-spacing: 0.06em;
-  line-height: 1.2;
-}
-.stars-caption {
-  font-size: 11px;
-  color: #6b7280;
-}
-.course-chip-list {
-  list-style: none;
+.section-block {
   margin: 0;
-  padding: 8px;
-  flex: 1;
+  padding: 18px;
+}
+.section-title {
+  margin: 0;
+  font-size: 20px;
+  color: var(--c6);
+}
+.section-subtitle {
+  margin: 8px 0 16px;
+  font-size: 13px;
+  color: #4f6a76;
+}
+.recommended-grid,
+.active-plans-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+.recommended-card,
+.active-plan-card {
+  border: 1px solid #d9e8e5;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 8px 18px rgba(47, 72, 88, 0.08);
+  padding: 14px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 320px;
-  overflow-y: auto;
+  min-height: 196px;
 }
-.course-chip {
-  width: 100%;
-  text-align: left;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid #d7e7e6;
-  background: #fff;
-  cursor: pointer;
-  font-size: 13px;
+.recommended-card h4,
+.active-card-content h4 {
+  margin: 0;
   color: var(--c6);
-  line-height: 1.35;
-  transition: background 0.15s, border-color 0.15s;
 }
-.star-board-vip .course-chip {
-  border-color: #e9d5ff;
-}
-.course-chip:hover {
-  background: #f0fdfa;
-  border-color: var(--c3);
-}
-.course-chip.focused {
-  border-color: #4ab7a1;
-  background: #e9f8f5;
-  box-shadow: 0 0 0 2px rgba(72, 174, 164, 0.22);
-}
-.course-chip.locked,
-.course-chip:disabled {
-  cursor: not-allowed;
-  opacity: 0.65;
-  background: #f8f8fb;
-  border-color: #e5e7eb;
-}
-.star-board-vip .course-chip:hover {
-  background: #faf5ff;
-  border-color: #a78bfa;
-}
-.col-empty {
-  font-size: 12px;
-  color: #9ca3af;
-  padding: 8px;
-  text-align: center;
-}
-.modal-course-detail {
-  position: relative;
-  max-width: 480px;
-  width: 100%;
-  max-height: 90vh;
-  overflow-y: auto;
-  padding-top: 36px;
-}
-.detail-close {
-  position: absolute;
-  top: 8px;
-  right: 10px;
-  width: 36px;
-  height: 36px;
-  border: none;
-  border-radius: 10px;
-  background: #f3f4f6;
-  color: #374151;
-  font-size: 22px;
-  line-height: 1;
-  cursor: pointer;
-  z-index: 2;
-}
-.detail-close:hover {
-  background: #e5e7eb;
-}
-@media (max-width: 960px) {
-  .star-board {
-    grid-template-columns: repeat(5, minmax(140px, 1fr));
-  }
-}
-.error {
-  color: #b42318;
-}
-.hint {
-  margin: 0 0 12px;
+.meta-line {
+  margin: 0;
   font-size: 13px;
   color: #486170;
+}
+.badge {
+  display: inline-flex;
+  width: fit-content;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #316879;
+  background: #e6f3ef;
+  border: 1px solid #c8e0da;
+}
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 14px;
+}
+.create-plan-form {
+  display: grid;
+  gap: 12px;
+}
+.form-row {
+  display: grid;
+  gap: 12px;
+}
+.form-row.two-col {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .field-group {
   display: grid;
   gap: 4px;
 }
-.field-group.compact {
-  gap: 2px;
-}
-.field-group.grow {
-  flex: 1;
-}
-.form-help {
-  margin: 0;
+.lbl {
   font-size: 12px;
-  color: #6b7c8a;
-  line-height: 1.35;
-}
-.slots-panel {
-  border: 1px solid #d7e7e6;
-  border-radius: 12px;
-  padding: 12px;
-  background: #fafcfb;
-}
-.slots-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 10px;
   font-weight: 600;
-  font-size: 14px;
-  color: var(--c6);
+  color: var(--c5);
 }
-.btn-small {
-  padding: 6px 10px;
-  font-size: 12px;
-  border-radius: 8px;
-  background: var(--c4);
+.create-plan-form input,
+.create-plan-form select {
+  min-height: 42px;
+}
+.create-submit-btn {
+  min-width: 190px;
+  width: fit-content;
+}
+.btn-primary {
+  background: linear-gradient(90deg, var(--c4), var(--c5));
   color: #fff;
   border: none;
+  padding: 10px 14px;
+  border-radius: 10px;
   cursor: pointer;
 }
-.slot-row {
-  margin-bottom: 8px;
-}
-.time-row {
-  display: flex;
-  gap: 8px;
-  align-items: flex-end;
-}
-.btn-remove {
-  border: none;
-  background: #f0e0e0;
-  border-radius: 8px;
-  width: 36px;
+.btn-muted {
+  background: #eef3f2;
+  color: #2f4858;
+  border: 1px solid #d3e1df;
+  padding: 10px 14px;
+  border-radius: 10px;
   cursor: pointer;
-}
-.enroll-panel {
-  margin-top: 14px;
-}
-.enroll-actions {
-  margin-top: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 .btn-danger {
   background: #fff5f5;
@@ -926,94 +655,36 @@ watch(
   opacity: 0.55;
   cursor: not-allowed;
 }
-.enroll-count {
-  font-size: 12px;
-  color: #486170;
-}
-.enroll-row {
-  margin-top: 10px;
-}
-.lbl {
-  display: block;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--c5);
-  margin-bottom: 4px;
-}
-.preview-line {
-  margin: 12px 0 0;
-  font-size: 14px;
-  color: var(--c6);
-}
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(30, 45, 55, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  padding: 16px;
-}
-.modal {
-  max-width: 520px;
-  width: 100%;
-}
-.period {
-  font-size: 14px;
-  color: var(--c5);
-  margin: 0 0 12px;
-}
-.conflict-warn {
-  color: #9b2c2c;
-  font-weight: 600;
-}
-.conflict-pre {
-  background: #fff8f8;
-  border: 1px solid #f0c4c4;
-  border-radius: 10px;
-  padding: 10px;
-  font-size: 12px;
-  white-space: pre-wrap;
-  max-height: 200px;
-  overflow: auto;
+.btn-primary:hover,
+.btn-muted:hover {
+  filter: brightness(1.03);
 }
 .ok-msg {
   color: #117a52;
   font-weight: 600;
 }
-.small {
+.error {
+  color: #b42318;
+}
+.hint {
+  margin: 0;
   font-size: 13px;
+  color: #486170;
 }
-.modal-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 16px;
-  justify-content: flex-end;
+@media (max-width: 960px) {
+  .recommended-grid,
+  .active-plans-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .create-submit-btn {
+    width: 100%;
+  }
 }
-.btn-muted {
-  background: #e8eceb;
-  color: #333;
-  border: none;
-  padding: 10px 14px;
-  border-radius: 10px;
-  cursor: pointer;
-}
-.btn-warn {
-  background: #c45c4a;
-  color: #fff;
-  border: none;
-  padding: 10px 14px;
-  border-radius: 10px;
-  cursor: pointer;
-}
-.btn-primary {
-  background: linear-gradient(90deg, var(--c4), var(--c5));
-  color: #fff;
-  border: none;
-  padding: 10px 14px;
-  border-radius: 10px;
-  cursor: pointer;
+@media (max-width: 760px) {
+  .recommended-grid,
+  .active-plans-grid,
+  .form-row.two-col {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

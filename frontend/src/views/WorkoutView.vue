@@ -76,6 +76,7 @@ const form = reactive({
   customExercise: "",
   days: 7,
   durationPerDay: 30,
+  startTime: "",
 });
 
 function workoutItemId(plan) {
@@ -92,7 +93,7 @@ async function toggleWorkoutFavorite(plan) {
   await toggleFavorite({
     itemType: "workout",
     itemId,
-    title: plan.exercise_name || plan.exerciseName || "Workout Plan",
+    title: plan.exercise_name || plan.exerciseName || "Workout",
     description: `${plan.category || "General"} training`,
     metadata: {
       category: plan.category || "Other",
@@ -105,6 +106,57 @@ async function toggleWorkoutFavorite(plan) {
 }
 
 const isCustomExercise = computed(() => form.exercise === "Other");
+
+const AUTO_TIME_CANDIDATES = ["07:00", "12:00", "18:00", "20:00"];
+
+function parseClockToMinutes(value) {
+  const raw = String(value || "").trim();
+  if (!/^\d{1,2}:\d{2}$/.test(raw)) return null;
+  const [h, m] = raw.split(":").map((n) => Number(n));
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+  return h * 60 + m;
+}
+
+function formatMinutesToClock(totalMinutes) {
+  const normalized = Math.max(0, Math.min(23 * 60 + 59, Number(totalMinutes) || 0));
+  const hh = String(Math.floor(normalized / 60)).padStart(2, "0");
+  const mm = String(normalized % 60).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+function isSportsScheduleItem(item) {
+  const type = String(item?.itemType || "").toLowerCase();
+  return ["workout", "exercise", "course", "course_session"].includes(type) || Boolean(item?.courseId);
+}
+
+function hasScheduleConflict(scheduleRows, dateKey, startMinutes, durationMinutes) {
+  const endMinutes = startMinutes + Math.max(1, Number(durationMinutes) || 1);
+  return scheduleRows.some((row) => {
+    if (String(row?.date || "") !== dateKey) return false;
+    if (!isSportsScheduleItem(row)) return false;
+    const rowStart = parseClockToMinutes(row?.time);
+    if (!Number.isFinite(rowStart)) return false;
+    const rowDuration = Math.max(1, Number(row?.durationMinutes || 60));
+    const rowEnd = rowStart + rowDuration;
+    return startMinutes < rowEnd && rowStart < endMinutes;
+  });
+}
+
+function pickAutoStartMinutes(scheduleRows, dateKey, durationMinutes) {
+  for (const candidate of AUTO_TIME_CANDIDATES) {
+    const mins = parseClockToMinutes(candidate);
+    if (!Number.isFinite(mins)) continue;
+    if (!hasScheduleConflict(scheduleRows, dateKey, mins, durationMinutes)) return mins;
+  }
+  const lastCandidate = parseClockToMinutes(AUTO_TIME_CANDIDATES[AUTO_TIME_CANDIDATES.length - 1]) ?? 20 * 60;
+  let cursor = lastCandidate + 30;
+  while (cursor <= 23 * 60 + 30) {
+    if (!hasScheduleConflict(scheduleRows, dateKey, cursor, durationMinutes)) return cursor;
+    cursor += 30;
+  }
+  return null;
+}
 
 function getCategoryByExercise(exercise) {
   if (exercise === "Other") return "Other";
@@ -144,13 +196,55 @@ async function loadTodayInfo() {
 }
 
 const hasPlans = computed(() => plans.value.length > 0);
-const workoutTasks = computed(() => todayInfo.value.workout_tasks || todayInfo.value.tasks || []);
-const courseTasks = computed(() => todayInfo.value.course_tasks || []);
+function normalizeDateKey(value) {
+  if (!value) return "";
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, "0");
+    const d = String(value.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  const raw = String(value).trim();
+  const keyHit = raw.match(/^\d{4}-\d{2}-\d{2}/);
+  if (keyHit) return keyHit[0];
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const y = parsed.getFullYear();
+  const m = String(parsed.getMonth() + 1).padStart(2, "0");
+  const d = String(parsed.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function taskDateKey(task, fallbackDate = "") {
+  return normalizeDateKey(
+    task?.date ||
+      task?.task_date ||
+      task?.schedule_date ||
+      task?.target_date ||
+      task?.scheduled_for ||
+      fallbackDate
+  );
+}
+
+const workoutTasks = computed(() => {
+  const rows = todayInfo.value.workout_tasks || todayInfo.value.tasks || [];
+  const selectedKey = normalizeDateKey(selectedDate.value);
+  const fallbackDate = normalizeDateKey(todayInfo.value?.date || selectedDate.value);
+  return rows.filter((task) => taskDateKey(task, fallbackDate) === selectedKey);
+});
+
+const courseTasks = computed(() => {
+  const rows = todayInfo.value.course_tasks || [];
+  const selectedKey = normalizeDateKey(selectedDate.value);
+  const fallbackDate = normalizeDateKey(todayInfo.value?.date || selectedDate.value);
+  return rows.filter((task) => taskDateKey(task, fallbackDate) === selectedKey);
+});
 const todayTasks = computed(() => [...workoutTasks.value, ...courseTasks.value]);
 const todayStatus = computed(() => {
-  if (!hasPlans.value && !todayInfo.value.hasAnyCourseEnrollment) return "No workout scheduled";
-  if (!todayTasks.value.length) return "No tasks";
-  return todayInfo.value.status;
+  if (!todayTasks.value.length) {
+    return hasPlans.value || todayInfo.value.hasAnyCourseEnrollment ? "No tasks" : "No workout scheduled";
+  }
+  return todayTasks.value.every((task) => isCompletedTask(task)) ? "Completed" : "Incomplete";
 });
 const canToggleTasks = computed(() => selectedDate.value === todayDateKey);
 
@@ -221,25 +315,51 @@ function startWorkoutTask(task) {
   });
 }
 
-function workoutActionLabel(task) {
-  const total = Number(task.duration_per_day || 0) * 60;
-  const remaining = Number(task.remaining_seconds);
-  if (Number.isFinite(remaining) && remaining > 0 && remaining < total) return "Continue";
-  return "Start";
+function taskSourceLabel(task) {
+  if (task?.source_type === "manual_schedule" || task?.schedule_item_id) return "Manual";
+  if (task?.is_custom) return "Custom";
+  return "Plan";
 }
 
-async function toggleCourseTask(task) {
+function canDirectComplete(task) {
+  return Boolean(task?.schedule_item_id);
+}
+
+async function completeManualTask(task) {
+  if (!task?.schedule_item_id || isCompletedTask(task)) return;
   if (!canToggleTasks.value) {
     window.alert("You can only check plans for today!");
     return;
   }
+  try {
+    await api.post("/workout/today/status", {
+      schedule_item_id: task.schedule_item_id,
+      date: selectedDate.value,
+      is_completed: true,
+    });
+    await loadTodayInfo();
+  } catch (err) {
+    error.value = err?.response?.data?.message || "Failed to complete workout task.";
+  }
+}
+
+function workoutActionLabel(task) {
+  return "Start";
+}
+
+async function completeCourseTask(task) {
+  if (!canToggleTasks.value) {
+    window.alert("You can only check plans for today!");
+    return;
+  }
+  if (task?.is_completed) return;
   const enrolledId = task.enrolled_course_id;
   if (!enrolledId) return;
   try {
     await api.post("/courses/progress", {
       enrolled_course_id: enrolledId,
       date: todayInfo.value.date,
-      is_completed: !task.is_completed,
+      is_completed: true,
     });
     await loadTodayInfo();
   } catch (err) {
@@ -257,16 +377,79 @@ async function savePlan() {
 
   saving.value = true;
   try {
-    await api.post("/workout/plan", {
-      exerciseName: isCustomExercise.value ? form.customExercise.trim() : form.exercise,
-      category: getCategoryByExercise(form.exercise),
-      durationPerDay: Number(form.durationPerDay),
-      days: Number(form.days),
+    const exerciseName = isCustomExercise.value ? form.customExercise.trim() : form.exercise;
+    const category = getCategoryByExercise(form.exercise);
+    const me = await api.get("/users/me").then((r) => r.data).catch(() => null);
+    const existingSchedules = me?.id
+      ? await api.get(`/schedules/${me.id}`).then((r) => (Array.isArray(r.data) ? r.data : [])).catch(() => [])
+      : [];
+    const totalDays = Math.max(1, Number(form.days || 1));
+    const durationMinutes = Math.max(1, Number(form.durationPerDay || 1));
+    const selectedStartMinutes = form.startTime ? parseClockToMinutes(form.startTime) : null;
+    if (form.startTime && !Number.isFinite(selectedStartMinutes)) {
+      error.value = "Invalid start time.";
+      return;
+    }
+    const plannedScheduleRows = [];
+    for (let i = 0; i < totalDays; i += 1) {
+      const d = new Date(`${selectedDate.value}T00:00:00`);
+      d.setDate(d.getDate() + i);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      const dateValue = `${y}-${m}-${day}`;
+      let startMinutes = selectedStartMinutes;
+      if (!Number.isFinite(startMinutes)) {
+        startMinutes = pickAutoStartMinutes(existingSchedules, dateValue, durationMinutes);
+      }
+      if (!Number.isFinite(startMinutes)) {
+        error.value = `No available time slot on ${dateValue}.`;
+        return;
+      }
+      if (Number.isFinite(selectedStartMinutes) && hasScheduleConflict(existingSchedules, dateValue, selectedStartMinutes, durationMinutes)) {
+        window.alert("This time slot is already occupied. Please choose another time.");
+        return;
+      }
+      const startTime = formatMinutesToClock(startMinutes);
+      plannedScheduleRows.push({
+        title: exerciseName,
+        itemType: "workout",
+        category,
+        subtitle: `Plan Day ${i + 1}/${totalDays}`,
+        date: dateValue,
+        time: startTime,
+        durationMinutes,
+        overlapAccepted: true,
+      });
+      existingSchedules.push({
+        date: dateValue,
+        time: startTime,
+        durationMinutes,
+        itemType: "workout",
+      });
+    }
+    const fixedTime = plannedScheduleRows[0]?.time || "07:00";
+    const planRes = await api.post("/workout/plan", {
+      exerciseName,
+      category,
+      durationPerDay: durationMinutes,
+      days: totalDays,
       isCustom: isCustomExercise.value,
+      startDate: selectedDate.value,
+      fixedTime,
     });
+    const createdPlanId = String(planRes?.data?._id || planRes?.data?.id || "");
+    if (me?.id && plannedScheduleRows.length) {
+      const items = plannedScheduleRows.map((row) => ({
+        ...row,
+        planId: createdPlanId || null,
+      }));
+      await api.post("/schedules/batch", { userId: me.id, items });
+    }
     success.value = "Workout plan saved.";
     form.days = 7;
     form.durationPerDay = 30;
+    form.startTime = "";
     form.exercise = "Running";
     form.customExercise = "";
     showForm.value = false;
@@ -341,21 +524,22 @@ async function handleDateChange(dateKey) {
           <h4>Workout Tasks</h4>
           <div v-if="!workoutTasks.length" class="estimate-unavailable">No workout scheduled for this day</div>
           <ul v-else class="today-list">
-            <li v-for="task in workoutTasks" :key="task.workout_plan_id || task.id || task._id" class="today-item">
+            <li v-for="task in workoutTasks" :key="task.workout_plan_id || task.schedule_item_id || task.id || task._id" class="today-item">
               <div class="today-text">
                 <strong>{{ task.exercise_name }}</strong>
                 <span>- {{ task.duration_per_day }} min</span>
+                <span class="task-source">{{ taskSourceLabel(task) }}</span>
                 <span class="task-kcal">Estimated burn: {{ formatKcal(estimateBurnKcal(task)) }}</span>
               </div>
-              <button
-                v-if="!isCompletedTask(task)"
-                class="start-btn"
-                type="button"
-                @click="startWorkoutTask(task)"
-              >
-                {{ workoutActionLabel(task) }}
-              </button>
-              <span v-else class="done-badge">Completed</span>
+              <div class="task-action">
+                <button v-if="!isCompletedTask(task) && !canDirectComplete(task)" class="start-btn" type="button" @click="startWorkoutTask(task)">
+                  {{ workoutActionLabel(task) }}
+                </button>
+                <button v-else-if="!isCompletedTask(task) && canDirectComplete(task)" class="start-btn" type="button" @click="completeManualTask(task)">
+                  Start
+                </button>
+                <span v-else class="done-badge">Completed</span>
+              </div>
             </li>
           </ul>
         </div>
@@ -368,14 +552,12 @@ async function handleDateChange(dateKey) {
               <div class="today-text">
                 <strong>{{ task.title }}</strong>
                 <span>- Day {{ task.day }}/{{ task.duration_days }}</span>
+                <span class="task-source">Course</span>
               </div>
-              <button
-                class="check-btn"
-                type="button"
-                @click="toggleCourseTask(task)"
-              >
-                {{ task.is_completed ? "☑" : "☐" }}
-              </button>
+              <div class="task-action">
+                <button v-if="!task.is_completed" class="start-btn" type="button" @click="completeCourseTask(task)">Start</button>
+                <span v-else class="done-badge">Completed</span>
+              </div>
             </li>
           </ul>
         </div>
@@ -438,6 +620,11 @@ async function handleDateChange(dateKey) {
               <input v-model.number="form.durationPerDay" type="number" min="1" required />
             </label>
           </div>
+
+          <label>
+            Start time (optional)
+            <input v-model="form.startTime" type="time" />
+          </label>
 
           <button type="submit" :disabled="saving">{{ saving ? "Saving..." : "Save Plan" }}</button>
         </form>
@@ -570,17 +757,25 @@ async function handleDateChange(dateKey) {
   flex-wrap: wrap;
 }
 
+.task-action {
+  flex: 0 0 108px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
 .task-kcal {
   color: var(--c5);
   font-size: 12px;
 }
 
-.check-btn {
-  border: none;
-  background: transparent;
-  font-size: 20px;
-  cursor: pointer;
-  color: var(--c6);
+.task-source {
+  font-size: 11px;
+  color: #2f4858;
+  background: #e5f2ef;
+  border: 1px solid #c9e1dc;
+  border-radius: 999px;
+  padding: 1px 8px;
 }
 
 .start-btn {
@@ -591,6 +786,8 @@ async function handleDateChange(dateKey) {
   padding: 8px 16px;
   font-weight: 600;
   cursor: pointer;
+  min-width: 94px;
+  text-align: center;
 }
 
 .start-btn:hover {
@@ -604,6 +801,8 @@ async function handleDateChange(dateKey) {
   border-radius: 999px;
   font-size: 13px;
   font-weight: 700;
+  min-width: 94px;
+  text-align: center;
 }
 
 .calories-block {

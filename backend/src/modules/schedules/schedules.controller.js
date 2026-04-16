@@ -1,9 +1,13 @@
 const mongoose = require("mongoose");
 const asyncHandler = require("../../utils/asyncHandler");
 const ScheduleItem = require("../../models/ScheduleItem");
-const Diet = require("../../models/Diet");
+const ScheduleSkip = require("../../models/ScheduleSkip");
 const Course = require("../../models/Course");
 const User = require("../../models/User");
+const WorkoutDailyStatus = require("../../models/WorkoutDailyStatus");
+const WorkoutPlan = require("../../models/WorkoutPlan");
+const EnrolledCourse = require("../../models/EnrolledCourse");
+const CourseDailyProgress = require("../../models/CourseDailyProgress");
 
 async function isVipUser(userId) {
   const u = await User.findById(userId).select("vip_status isVip").lean();
@@ -23,109 +27,63 @@ async function assertNotJoiningPremiumCourse({ userId, courseIds }) {
   return { ok: true };
 }
 
-const DIET_MEAL_TYPES = new Set(["breakfast", "lunch", "dinner", "snack"]);
-
-function toNumber(value, fallback = 0) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
+function normalizeItemType(value) {
+  const key = String(value || "manual").trim().toLowerCase();
+  if (["workout", "exercise"].includes(key)) return "workout";
+  if (["course", "course_session"].includes(key)) return "course";
+  if (["diet"].includes(key)) return "diet";
+  if (["reminder", "personal"].includes(key)) return "reminder";
+  return "manual";
 }
 
-function roundOne(value) {
-  return Math.round(toNumber(value) * 10) / 10;
+function isPlanBackedItem(row) {
+  const itemType = String(row?.itemType || "").toLowerCase();
+  return Boolean(row?.planId) || Boolean(row?.courseId) || itemType === "course" || itemType === "course_session";
 }
 
-function formatDateKeyFromDate(value) {
-  const dt = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(dt.getTime())) return "";
-  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
-}
+async function removeSingleItemAndLinkedState({ row, userId }) {
+  await row.deleteOne();
 
-function formatTimeKeyFromDate(value) {
-  const dt = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(dt.getTime())) return "12:00";
-  return `${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
-}
-
-function formatMealTypeLabel(mealType) {
-  const key = String(mealType || "").toLowerCase();
-  if (key === "breakfast") return "Breakfast";
-  if (key === "lunch") return "Lunch";
-  if (key === "dinner") return "Dinner";
-  return "Snack";
-}
-
-function formatKcal(value) {
-  const n = roundOne(value);
-  return Number.isInteger(n) ? String(n) : n.toFixed(1);
-}
-
-async function reconcileDietScheduleForUser(userId) {
-  const dietRows = await Diet.find({ userId })
-    .select("date mealType calories recordedAt createdAt")
-    .sort({ recordedAt: 1, createdAt: 1 })
-    .lean();
-
-  const groupMap = new Map();
-  for (const row of dietRows) {
-    const meal = String(row.mealType || "").toLowerCase();
-    if (!DIET_MEAL_TYPES.has(meal)) continue;
-    const dateKey = formatDateKeyFromDate(row.date);
-    if (!dateKey) continue;
-    const key = `${dateKey}|${meal}`;
-    const current = groupMap.get(key) || {
-      date: dateKey,
-      meal,
-      totalCalories: 0,
-      firstTimestamp: null,
-    };
-    current.totalCalories = roundOne(current.totalCalories + toNumber(row.calories));
-    const ts = row.recordedAt || row.createdAt || null;
-    if (ts) {
-      const ms = new Date(ts).getTime();
-      const curMs = current.firstTimestamp ? new Date(current.firstTimestamp).getTime() : Number.POSITIVE_INFINITY;
-      if (Number.isFinite(ms) && ms < curMs) current.firstTimestamp = ts;
-    }
-    groupMap.set(key, current);
-  }
-
-  const keepIds = [];
-  for (const group of groupMap.values()) {
-    const mealLabel = formatMealTypeLabel(group.meal);
-    const ts = group.firstTimestamp || new Date(`${group.date}T12:00:00`);
-    const payload = {
-      userId,
-      itemType: "diet",
-      meal: group.meal,
-      totalCalories: group.totalCalories,
-      timestamp: ts,
-      title: "Diet",
-      subtitle: `${mealLabel} - ${formatKcal(group.totalCalories)} kcal`,
-      date: group.date,
-      time: formatTimeKeyFromDate(ts),
-      note: "",
-      durationMinutes: 15,
-      overlapAccepted: true,
-      courseId: null,
-      linkedDietId: null,
-    };
-    const saved = await ScheduleItem.findOneAndUpdate(
-      { userId, itemType: "diet", date: group.date, meal: group.meal },
-      { $set: payload },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
+  if (row.planId) {
+    await WorkoutDailyStatus.deleteMany({
+      user_id: userId,
+      workout_plan_id: row.planId,
+      date: row.date,
+      is_completed: { $ne: true },
+    });
+    await ScheduleSkip.updateOne(
+      { userId, date: row.date, planId: row.planId },
+      { $setOnInsert: { userId, date: row.date, planId: row.planId } },
+      { upsert: true }
     );
-    keepIds.push(saved._id);
   }
 
-  const cleanupFilter = { userId, itemType: "diet" };
-  if (keepIds.length) cleanupFilter._id = { $nin: keepIds };
-  await ScheduleItem.deleteMany(cleanupFilter);
+  if (row.courseId) {
+    const activeEnrollment = await EnrolledCourse.findOne({
+      user_id: userId,
+      course_id: row.courseId,
+      status: "active",
+    }).select("_id");
+    if (activeEnrollment?._id) {
+      await CourseDailyProgress.deleteMany({
+        user_id: userId,
+        enrolled_course_id: activeEnrollment._id,
+        date: row.date,
+        is_completed: { $ne: true },
+      });
+    }
+    await ScheduleSkip.updateOne(
+      { userId, date: row.date, courseId: row.courseId },
+      { $setOnInsert: { userId, date: row.date, courseId: row.courseId } },
+      { upsert: true }
+    );
+  }
 }
 
 const list = asyncHandler(async (req, res) => {
   const userId = req.params.userId;
   if (String(userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
-  await reconcileDietScheduleForUser(userId);
-  const rows = await ScheduleItem.find({ userId })
+  const rows = await ScheduleItem.find({ userId, itemType: { $ne: "diet" } })
     .populate("courseId", "isPremium")
     .sort({ date: 1, time: 1, createdAt: -1 })
     .lean();
@@ -144,10 +102,11 @@ const list = asyncHandler(async (req, res) => {
 });
 
 const create = asyncHandler(async (req, res) => {
-  const { userId, title, date, time, note, courseId, durationMinutes, overlapAccepted } = req.body;
+  const { userId, title, planName, taskName, date, time, note, courseId, planId, durationMinutes, overlapAccepted, itemType, subtitle, category } = req.body;
   const uid = userId || req.user.id;
   if (String(uid) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
-  if (!title || !date || !time) return res.status(400).json({ message: "title, date and time are required" });
+  const resolvedTitle = String(title || planName || taskName || "").trim();
+  if (!resolvedTitle || !date || !time) return res.status(400).json({ message: "title, date and time are required" });
 
   if (courseId && mongoose.isValidObjectId(courseId)) {
     const r = await assertNotJoiningPremiumCourse({ userId: uid, courseIds: [courseId] });
@@ -161,7 +120,11 @@ const create = asyncHandler(async (req, res) => {
 
   const row = await ScheduleItem.create({
     userId: uid,
-    title,
+    itemType: normalizeItemType(itemType),
+    category: category != null ? String(category).trim() : "",
+    title: resolvedTitle,
+    subtitle: subtitle != null ? String(subtitle).trim() : "",
+    planId: planId || null,
     date,
     time,
     note,
@@ -169,6 +132,16 @@ const create = asyncHandler(async (req, res) => {
     durationMinutes: durationMinutes != null ? Math.max(1, Number(durationMinutes)) : 60,
     overlapAccepted: Boolean(overlapAccepted),
   });
+  if (row.planId || row.courseId) {
+    const or = [];
+    if (row.planId) or.push({ planId: row.planId });
+    if (row.courseId) or.push({ courseId: row.courseId });
+    await ScheduleSkip.deleteMany({
+      userId: uid,
+      date: row.date,
+      ...(or.length ? { $or: or } : {}),
+    });
+  }
   res.status(201).json(row);
 });
 
@@ -176,8 +149,99 @@ const remove = asyncHandler(async (req, res) => {
   const row = await ScheduleItem.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Schedule item not found" });
   if (String(row.userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
-  await row.deleteOne();
-  res.json({ success: true });
+  const scope = String(req.query.scope || "single").trim().toLowerCase();
+  if (!["single", "future"].includes(scope)) {
+    return res.status(400).json({ message: "Invalid scope. Use single or future." });
+  }
+
+  const isPlanItem = isPlanBackedItem(row);
+  if (!isPlanItem || scope === "single") {
+    await removeSingleItemAndLinkedState({ row, userId: req.user.id });
+    return res.json({ success: true, scope: "single" });
+  }
+
+  const fromDate = String(row.date || "").trim();
+  const baseFilter = {
+    userId: req.user.id,
+    date: { $gte: fromDate },
+    is_completed: { $ne: true },
+  };
+
+  if (row.planId) {
+    const deletedSchedules = await ScheduleItem.deleteMany({
+      ...baseFilter,
+      planId: row.planId,
+    });
+    const deletedStatuses = await WorkoutDailyStatus.deleteMany({
+      user_id: req.user.id,
+      workout_plan_id: row.planId,
+      date: { $gte: fromDate },
+      is_completed: { $ne: true },
+    });
+    await ScheduleSkip.deleteMany({
+      userId: req.user.id,
+      planId: row.planId,
+      date: { $gte: fromDate },
+    });
+
+    const remainingFuturePending = await ScheduleItem.exists({
+      userId: req.user.id,
+      planId: row.planId,
+      date: { $gte: fromDate },
+      is_completed: { $ne: true },
+    });
+    if (!remainingFuturePending) {
+      await WorkoutPlan.deleteOne({ _id: row.planId, user_id: req.user.id });
+    }
+    return res.json({
+      success: true,
+      scope: "future",
+      deletedSchedules: deletedSchedules.deletedCount || 0,
+      deletedWorkoutTasks: deletedStatuses.deletedCount || 0,
+    });
+  }
+
+  const courseId = row.courseId || null;
+  if (courseId) {
+    const deletedSchedules = await ScheduleItem.deleteMany({
+      ...baseFilter,
+      courseId,
+    });
+    await ScheduleSkip.deleteMany({
+      userId: req.user.id,
+      courseId,
+      date: { $gte: fromDate },
+    });
+
+    const activeEnrollment = await EnrolledCourse.findOne({
+      user_id: req.user.id,
+      course_id: courseId,
+      status: "active",
+    });
+    let deletedCourseProgress = 0;
+    if (activeEnrollment?._id) {
+      const progressDeleted = await CourseDailyProgress.deleteMany({
+        user_id: req.user.id,
+        enrolled_course_id: activeEnrollment._id,
+        date: { $gte: fromDate },
+        is_completed: { $ne: true },
+      });
+      deletedCourseProgress = progressDeleted.deletedCount || 0;
+      activeEnrollment.status = "cancelled";
+      activeEnrollment.is_completed = false;
+      await activeEnrollment.save();
+    }
+
+    return res.json({
+      success: true,
+      scope: "future",
+      deletedSchedules: deletedSchedules.deletedCount || 0,
+      deletedWorkoutTasks: deletedCourseProgress,
+    });
+  }
+
+  await removeSingleItemAndLinkedState({ row, userId: req.user.id });
+  res.json({ success: true, scope: "single" });
 });
 
 const batchCreate = asyncHandler(async (req, res) => {
@@ -208,12 +272,17 @@ const batchCreate = asyncHandler(async (req, res) => {
 
   const docs = [];
   for (const it of slice) {
-    if (!it.title || !it.date || !it.time) {
+    const resolvedTitle = String(it.title || it.planName || it.taskName || "").trim();
+    if (!resolvedTitle || !it.date || !it.time) {
       return res.status(400).json({ message: "Each item needs title, date, and time" });
     }
     docs.push({
       userId: uid,
-      title: String(it.title).trim(),
+      itemType: normalizeItemType(it.itemType),
+      category: it.category != null ? String(it.category).trim() : "",
+      title: resolvedTitle,
+      subtitle: it.subtitle != null ? String(it.subtitle).trim() : "",
+      planId: it.planId || null,
       date: String(it.date).trim(),
       time: String(it.time).trim().slice(0, 5),
       note: it.note != null ? String(it.note) : "",
@@ -223,6 +292,19 @@ const batchCreate = asyncHandler(async (req, res) => {
     });
   }
   const created = await ScheduleItem.insertMany(docs);
+  await Promise.all(
+    created.map((row) => {
+      if (!row.planId && !row.courseId) return null;
+      const or = [];
+      if (row.planId) or.push({ planId: row.planId });
+      if (row.courseId) or.push({ courseId: row.courseId });
+      return ScheduleSkip.deleteMany({
+        userId: uid,
+        date: row.date,
+        ...(or.length ? { $or: or } : {}),
+      });
+    })
+  );
   res.status(201).json(created);
 });
 

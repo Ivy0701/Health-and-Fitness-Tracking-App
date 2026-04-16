@@ -4,6 +4,9 @@ const WorkoutDailyStatus = require("../../models/WorkoutDailyStatus");
 const User = require("../../models/User");
 const EnrolledCourse = require("../../models/EnrolledCourse");
 const CourseDailyProgress = require("../../models/CourseDailyProgress");
+const ScheduleItem = require("../../models/ScheduleItem");
+const ScheduleSkip = require("../../models/ScheduleSkip");
+const Workout = require("../../models/Workout");
 
 function toDateKey(date = new Date()) {
   const y = date.getFullYear();
@@ -17,7 +20,7 @@ function isValidDateKey(dateKey) {
 }
 
 function isPlanActiveOnDate(plan, targetDateKey) {
-  const startDateKey = toDateKey(new Date(plan.created_at || new Date()));
+  const startDateKey = toDateKey(new Date(plan.start_date || plan.created_at || new Date()));
   const dayCount = Number(plan.days) || 0;
   if (dayCount <= 0) return false;
   const day = diffInDaysInclusive(startDateKey, parseDateKey(targetDateKey));
@@ -47,13 +50,15 @@ const getTaskDetail = asyncHandler(async (req, res) => {
 });
 
 const createPlan = asyncHandler(async (req, res) => {
-  const { exerciseName, category, durationPerDay, days, isCustom } = req.body;
+  const { exerciseName, category, durationPerDay, days, isCustom, startDate, fixedTime, note } = req.body;
   if (!exerciseName || !category || !durationPerDay || !days) {
     return res.status(400).json({ message: "exerciseName, category, durationPerDay and days are required" });
   }
   if (Number(days) < 1 || Number(days) > 30) {
     return res.status(400).json({ message: "days must be between 1 and 30" });
   }
+  const normalizedStartDate = isValidDateKey(startDate) ? startDate : toDateKey(new Date());
+  const normalizedFixedTime = String(fixedTime || "07:00").slice(0, 5);
 
   const row = await WorkoutPlan.create({
     user_id: req.user.id,
@@ -62,6 +67,9 @@ const createPlan = asyncHandler(async (req, res) => {
     duration_per_day: Number(durationPerDay),
     days: Number(days),
     is_custom: Boolean(isCustom),
+    start_date: parseDateKey(normalizedStartDate),
+    fixed_time: normalizedFixedTime,
+    note: String(note || ""),
   });
 
   res.status(201).json(row);
@@ -74,6 +82,65 @@ const getTodayPlan = asyncHandler(async (req, res) => {
   const todayPlans = allPlans.filter((plan) => isPlanActiveOnDate(plan, date));
   const user = await User.findById(req.user.id).select("weight");
   const enrolledCourses = await EnrolledCourse.find({ user_id: req.user.id, status: "active" }).populate("course_id");
+  const activeCourseIds = enrolledCourses
+    .map((enrolled) => String(enrolled?.course_id?._id || enrolled?.course_id || ""))
+    .filter(Boolean);
+  const skips = await ScheduleSkip.find({
+    userId: req.user.id,
+    date,
+    $or: [
+      { planId: { $in: todayPlans.map((plan) => plan._id) } },
+      { courseId: { $in: activeCourseIds } },
+    ],
+  })
+    .select("planId courseId")
+    .lean();
+  const skippedPlanIds = new Set(skips.map((it) => String(it?.planId || "")).filter(Boolean));
+  const skippedCourseIds = new Set(skips.map((it) => String(it?.courseId || "")).filter(Boolean));
+  const todayPlanIdSet = new Set(todayPlans.map((plan) => String(plan._id)));
+
+  let scheduleWorkoutItems = await ScheduleItem.find({
+    userId: req.user.id,
+    date,
+    itemType: "workout",
+  })
+    .select("title subtitle category durationMinutes itemType is_completed completed_at planId time")
+    .sort({ time: 1, createdAt: -1 })
+    .lean();
+
+  const missingPlanScheduleDocs = [];
+  for (const plan of todayPlans) {
+    const pid = String(plan._id);
+    if (skippedPlanIds.has(pid)) continue;
+    const linked = scheduleWorkoutItems.find((it) => String(it?.planId || "") === pid);
+    if (linked) continue;
+    missingPlanScheduleDocs.push({
+      userId: req.user.id,
+      itemType: "workout",
+      title: String(plan.exercise_name || "Workout"),
+      subtitle: "Plan Session",
+      category: String(plan.category || "Plan"),
+      planId: plan._id,
+      date,
+      time: String(plan.fixed_time || "07:00").slice(0, 5),
+      note: String(plan.note || ""),
+      durationMinutes: Number(plan.duration_per_day || 30),
+      overlapAccepted: true,
+      is_completed: false,
+      completed_at: null,
+    });
+  }
+  if (missingPlanScheduleDocs.length) {
+    await ScheduleItem.insertMany(missingPlanScheduleDocs);
+    scheduleWorkoutItems = await ScheduleItem.find({
+      userId: req.user.id,
+      date,
+      itemType: "workout",
+    })
+      .select("title subtitle category durationMinutes itemType is_completed completed_at planId time")
+      .sort({ time: 1, createdAt: -1 })
+      .lean();
+  }
 
   const statuses = await WorkoutDailyStatus.find({
     user_id: req.user.id,
@@ -82,22 +149,49 @@ const getTodayPlan = asyncHandler(async (req, res) => {
   });
   const statusMap = new Map(statuses.map((s) => [`${s.workout_plan_id}`, s]));
 
-  const workoutTasks = todayPlans.map((plan) => {
+  const workoutTasks = todayPlans
+    .filter((plan) => !skippedPlanIds.has(String(plan._id)))
+    .map((plan) => {
+    const linkedItem =
+      scheduleWorkoutItems.find((it) => String(it?.planId || "") === String(plan._id)) ||
+      scheduleWorkoutItems.find((it) => String(it?.title || "").trim() === String(plan.exercise_name || "").trim());
     const progress = statusMap.get(`${plan._id}`);
+    const completed = Boolean(progress?.is_completed ?? linkedItem?.is_completed);
     return {
+      schedule_item_id: linkedItem?._id || null,
       workout_plan_id: plan._id,
-      exercise_name: plan.exercise_name,
-      category: plan.category,
-      duration_per_day: plan.duration_per_day,
+      exercise_name: linkedItem?.title || plan.exercise_name,
+      category: linkedItem?.category || plan.category,
+      duration_per_day: Number(linkedItem?.durationMinutes || plan.duration_per_day),
       days: plan.days,
       is_custom: plan.is_custom,
-      is_completed: Boolean(progress?.is_completed),
+      date,
+      is_completed: completed,
       remaining_seconds: Number.isFinite(Number(progress?.remaining_seconds))
         ? Number(progress?.remaining_seconds)
         : null,
-      completed_at: progress?.completed_at || null,
+      completed_at: progress?.completed_at || linkedItem?.completed_at || null,
     };
-  });
+    });
+
+  const manualWorkoutTasks = scheduleWorkoutItems
+    .filter((item) => !item?.planId || !todayPlanIdSet.has(String(item?.planId || "")))
+    .map((item) => ({
+    schedule_item_id: item._id,
+    workout_plan_id: null,
+    exercise_name: item.title || "Manual Workout",
+    category: item.category || "Manual",
+    duration_per_day: Number(item.durationMinutes) || 30,
+    days: 1,
+    is_custom: true,
+    source_type: "manual_schedule",
+    source_label: item.itemType === "course" ? "Course Session" : "Manual",
+    date,
+    subtitle: item.subtitle || "",
+    is_completed: Boolean(item.is_completed),
+    remaining_seconds: null,
+    completed_at: item.completed_at || null,
+  }));
 
   const rawCourseTasks = enrolledCourses
     .map((enrolled) => {
@@ -112,10 +206,18 @@ const getTodayPlan = asyncHandler(async (req, res) => {
         course_id: enrolled.course_id?._id,
         title: enrolled.course_id?.title || "Course",
         duration_days: durationDays,
+        duration_minutes: Number(enrolled.course_id?.duration || 30),
+        time:
+          enrolled.course_id?.weeklySlots?.find((slot) => Number(slot?.weekday) === targetDate.getDay())?.startTime ||
+          "08:00",
         day,
       };
     })
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((item) => {
+      if (!item?.course_id) return true;
+      return !skippedCourseIds.has(String(item.course_id));
+    });
 
   const courseCompletions = rawCourseTasks.filter((row) => !row.markCompleted);
   const markDoneRows = rawCourseTasks.filter((row) => row.markCompleted).map((row) => row.enrolled._id);
@@ -140,20 +242,65 @@ const getTodayPlan = asyncHandler(async (req, res) => {
     enrolled_course_id: { $in: courseCompletions.map((c) => c.enrolled_course_id) },
   });
   const courseProgressMap = new Map(courseProgressRows.map((x) => [`${x.enrolled_course_id}`, x]));
+  let scheduleCourseItems = await ScheduleItem.find({
+    userId: req.user.id,
+    date,
+    itemType: "course",
+    courseId: { $in: courseCompletions.map((c) => c.course_id).filter(Boolean) },
+  })
+    .select("courseId title durationMinutes is_completed completed_at time")
+    .sort({ time: 1, createdAt: -1 })
+    .lean();
+
+  const missingCourseDocs = courseCompletions
+    .filter((item) => !scheduleCourseItems.some((s) => String(s?.courseId || "") === String(item.course_id || "")))
+    .map((item) => ({
+      userId: req.user.id,
+      itemType: "course",
+      title: item.title,
+      subtitle: `Plan Day ${item.day}`,
+      category: "Course",
+      date,
+      time: String(item.time || "08:00").slice(0, 5),
+      note: "",
+      courseId: item.course_id || null,
+      durationMinutes: Number(item.duration_minutes || 30),
+      overlapAccepted: true,
+      is_completed: false,
+      completed_at: null,
+    }));
+  if (missingCourseDocs.length) {
+    await ScheduleItem.insertMany(missingCourseDocs);
+    scheduleCourseItems = await ScheduleItem.find({
+      userId: req.user.id,
+      date,
+      itemType: "course",
+      courseId: { $in: courseCompletions.map((c) => c.course_id).filter(Boolean) },
+    })
+      .select("courseId title durationMinutes is_completed completed_at time")
+      .sort({ time: 1, createdAt: -1 })
+      .lean();
+  }
+
   const courseTasks = courseCompletions.map((item) => {
+    const linkedItem =
+      scheduleCourseItems.find((s) => String(s?.courseId || "") === String(item.course_id || "")) || null;
     const progress = courseProgressMap.get(`${item.enrolled_course_id}`);
     return {
+      schedule_item_id: linkedItem?._id || null,
       enrolled_course_id: item.enrolled_course_id,
       course_id: item.course_id,
-      title: item.title,
+      title: linkedItem?.title || item.title,
+      date,
       day: item.day,
       duration_days: item.duration_days,
-      is_completed: Boolean(progress?.is_completed),
-      completed_at: progress?.completed_at || null,
+      is_completed: Boolean(progress?.is_completed ?? linkedItem?.is_completed),
+      completed_at: progress?.completed_at || linkedItem?.completed_at || null,
     };
   });
 
-  const allTasks = [...workoutTasks, ...courseTasks];
+  const allWorkoutTasks = [...workoutTasks, ...manualWorkoutTasks];
+  const allTasks = [...allWorkoutTasks, ...courseTasks];
   const hasAnyPlan = allPlans.length > 0;
   const hasAnyCourseEnrollment = enrolledCourses.length > 0 || markDoneRows.length > 0;
   const allCompleted = allTasks.length > 0 && allTasks.every((task) => task.is_completed);
@@ -172,17 +319,48 @@ const getTodayPlan = asyncHandler(async (req, res) => {
     hasAnyCourseEnrollment,
     weight: user?.weight ?? null,
     status,
-    tasks: workoutTasks,
-    workout_tasks: workoutTasks,
+    tasks: allWorkoutTasks,
+    workout_tasks: allWorkoutTasks,
     course_tasks: courseTasks,
   });
 });
 
 const updateTodayStatus = asyncHandler(async (req, res) => {
-  const { workout_plan_id, date, is_completed, remaining_seconds } = req.body;
+  const { workout_plan_id, schedule_item_id, date, is_completed, remaining_seconds } = req.body;
   const normalizedDate = date || toDateKey(new Date());
-  if (!workout_plan_id || typeof is_completed !== "boolean") {
-    return res.status(400).json({ message: "workout_plan_id and is_completed are required" });
+  if ((!workout_plan_id && !schedule_item_id) || typeof is_completed !== "boolean") {
+    return res.status(400).json({ message: "workout_plan_id or schedule_item_id and is_completed are required" });
+  }
+
+  if (schedule_item_id) {
+    const scheduleItem = await ScheduleItem.findOne({
+      _id: schedule_item_id,
+      userId: req.user.id,
+      date: normalizedDate,
+      itemType: { $in: ["workout", "course"] },
+    });
+    if (!scheduleItem) return res.status(404).json({ message: "Schedule workout task not found" });
+    scheduleItem.is_completed = is_completed;
+    scheduleItem.completed_at = is_completed ? new Date() : null;
+    await scheduleItem.save();
+    if (is_completed) {
+      await Workout.create({
+        userId: req.user.id,
+        type: scheduleItem.title || "Workout",
+        duration: Number(scheduleItem.durationMinutes || 30),
+        caloriesBurned: 0,
+        date: new Date(`${normalizedDate}T00:00:00`),
+        note: "Completed from workout task",
+      });
+    }
+    return res.json({
+      id: scheduleItem._id,
+      schedule_item_id: scheduleItem._id,
+      date: scheduleItem.date,
+      is_completed: scheduleItem.is_completed,
+      remaining_seconds: null,
+      completed_at: scheduleItem.completed_at,
+    });
   }
 
   const plan = await WorkoutPlan.findOne({ _id: workout_plan_id, user_id: req.user.id });
@@ -210,6 +388,30 @@ const updateTodayStatus = asyncHandler(async (req, res) => {
     },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
+  await ScheduleItem.updateMany(
+    {
+      userId: req.user.id,
+      itemType: "workout",
+      planId: workout_plan_id,
+      date: normalizedDate,
+    },
+    {
+      $set: {
+        is_completed,
+        completed_at: is_completed ? new Date() : null,
+      },
+    }
+  );
+  if (is_completed) {
+    await Workout.create({
+      userId: req.user.id,
+      type: plan.exercise_name || "Workout",
+      duration: Number(plan.duration_per_day || 30),
+      caloriesBurned: 0,
+      date: new Date(`${normalizedDate}T00:00:00`),
+      note: "Completed from plan task",
+    });
+  }
 
   res.json({
     id: updated._id,
@@ -221,5 +423,33 @@ const updateTodayStatus = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { listPlans, getTaskDetail, createPlan, getTodayPlan, updateTodayStatus };
+const stopPlan = asyncHandler(async (req, res) => {
+  const plan = await WorkoutPlan.findOne({ _id: req.params.id, user_id: req.user.id });
+  if (!plan) return res.status(404).json({ message: "Workout plan not found" });
+
+  const today = toDateKey(new Date());
+  await Promise.all([
+    ScheduleItem.deleteMany({
+      userId: req.user.id,
+      itemType: "workout",
+      date: { $gte: today },
+      is_completed: { $ne: true },
+      $or: [
+        { planId: plan._id },
+        { title: String(plan.exercise_name || "").trim() },
+      ],
+    }),
+    WorkoutDailyStatus.deleteMany({
+      user_id: req.user.id,
+      workout_plan_id: plan._id,
+      date: { $gte: today },
+      is_completed: { $ne: true },
+    }),
+  ]);
+
+  await plan.deleteOne();
+  res.json({ ok: true, removed_plan_id: plan._id });
+});
+
+module.exports = { listPlans, getTaskDetail, createPlan, getTodayPlan, updateTodayStatus, stopPlan };
 

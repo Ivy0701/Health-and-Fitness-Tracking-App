@@ -8,6 +8,9 @@ const workoutPlanSchema = new mongoose.Schema(
     duration_per_day: { type: Number, required: true, min: 1 },
     days: { type: Number, required: true, min: 1, max: 30 },
     is_custom: { type: Boolean, default: false },
+    start_date: { type: Date, default: Date.now, index: true },
+    fixed_time: { type: String, default: "07:00" },
+    note: { type: String, default: "" },
     created_at: { type: Date, default: Date.now, index: true },
   },
   { versionKey: false }

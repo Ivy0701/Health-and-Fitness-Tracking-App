@@ -2,6 +2,8 @@ const asyncHandler = require("../../utils/asyncHandler");
 const Course = require("../../models/Course");
 const EnrolledCourse = require("../../models/EnrolledCourse");
 const CourseDailyProgress = require("../../models/CourseDailyProgress");
+const ScheduleItem = require("../../models/ScheduleItem");
+const Workout = require("../../models/Workout");
 
 function toDateKey(date = new Date()) {
   const y = date.getFullYear();
@@ -137,7 +139,7 @@ const updateProgress = asyncHandler(async (req, res) => {
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
 
-  const enrolledWithCourse = await EnrolledCourse.findById(enrolled._id).populate("course_id", "duration_days");
+  const enrolledWithCourse = await EnrolledCourse.findById(enrolled._id).populate("course_id", "duration_days duration title");
   const targetDays = Number(enrolledWithCourse?.course_id?.duration_days || 7);
   const doneCount = await CourseDailyProgress.countDocuments({ enrolled_course_id: enrolled._id, is_completed: true });
   const finished = doneCount >= targetDays;
@@ -149,6 +151,32 @@ const updateProgress = asyncHandler(async (req, res) => {
       status: finished ? "completed" : "active",
     },
   });
+
+  await ScheduleItem.updateMany(
+    {
+      userId: req.user.id,
+      courseId: enrolled.course_id,
+      date: targetDate,
+    },
+    {
+      $set: {
+        is_completed: is_completed,
+        completed_at: is_completed ? new Date() : null,
+        itemType: "course",
+      },
+    }
+  );
+
+  if (is_completed) {
+    await Workout.create({
+      userId: req.user.id,
+      type: enrolledWithCourse?.course_id?.title || "Course",
+      duration: Number(enrolledWithCourse?.course_id?.duration || 30),
+      caloriesBurned: 0,
+      date: new Date(`${targetDate}T00:00:00`),
+      note: "Completed from course task",
+    });
+  }
 
   res.json(row);
 });

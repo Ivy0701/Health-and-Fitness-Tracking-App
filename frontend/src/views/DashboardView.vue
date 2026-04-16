@@ -16,6 +16,7 @@ const todayDietOverview = ref(null);
 const allSchedules = ref([]);
 const enrolledCourses = ref([]);
 const weeklyWorkoutStats = ref([]);
+const workoutPlans = ref([]);
 
 const MET_MAP = {
   Running: 10,
@@ -129,10 +130,13 @@ function recentDateKeys(days = 7) {
 }
 
 const todayKey = computed(() => new Date().toISOString().slice(0, 10));
-const summary = computed(() => dashboardPayload.value?.summary || {});
 const charts = computed(() => dashboardPayload.value?.charts || {});
 const todayWorkoutTasks = computed(() => {
   const rows = Array.isArray(todayWorkout.value?.workout_tasks) ? todayWorkout.value.workout_tasks : [];
+  return rows;
+});
+const todayCourseTasks = computed(() => {
+  const rows = Array.isArray(todayWorkout.value?.course_tasks) ? todayWorkout.value.course_tasks : [];
   return rows;
 });
 
@@ -160,6 +164,14 @@ function isCompletedTask(task) {
 
 const totalWorkoutTasks = computed(() => todayWorkoutTasks.value.length);
 const completedWorkoutTasks = computed(() => todayWorkoutTasks.value.filter((task) => isCompletedTask(task)).length);
+const totalCourseTasks = computed(() => todayCourseTasks.value.length);
+const completedCourseTasks = computed(() => todayCourseTasks.value.filter((task) => Boolean(task?.is_completed)).length);
+const totalTodayTasks = computed(() => totalWorkoutTasks.value + totalCourseTasks.value);
+const completedTodayTasks = computed(() => completedWorkoutTasks.value + completedCourseTasks.value);
+const todayProgressPercent = computed(() => {
+  if (totalTodayTasks.value <= 0) return 0;
+  return (completedTodayTasks.value / totalTodayTasks.value) * 100;
+});
 const workoutBurnedSoFar = computed(() =>
   todayWorkoutTasks.value.reduce((sum, task) => (isCompletedTask(task) ? sum + getTaskBurn(task) : sum), 0)
 );
@@ -199,9 +211,9 @@ const summaryCards = computed(() => [
     sub: bmiStatus(bmiValue.value),
   },
   {
-    title: "Schedule Completion Rate",
-    value: formatPercent(summary.value.scheduleCompletionRate),
-    sub: "Today completion",
+    title: "Today’s Progress",
+    value: formatPercent(todayProgressPercent.value),
+    sub: `${formatCount(completedTodayTasks.value)} / ${formatCount(totalTodayTasks.value)} tasks completed`,
   },
 ]);
 
@@ -235,8 +247,9 @@ const todayScheduleItems = computed(() => {
   if (!Array.isArray(allSchedules.value)) return [];
   return allSchedules.value.filter((item) => String(item?.date || "") === todayKey.value);
 });
+const todayPendingScheduleItems = computed(() => todayScheduleItems.value.filter((item) => !item?.is_completed));
 
-const schedulePending = computed(() => todayScheduleItems.value.length);
+const schedulePending = computed(() => todayPendingScheduleItems.value.length);
 const dietLoggedToday = computed(() => (Array.isArray(todayDietRecords.value) ? todayDietRecords.value.length : 0) > 0);
 const todayCaloriesConsumed = computed(() => asNumber(todayDietOverview.value?.consumed?.calories));
 const todayCaloriesBurned = computed(() => workoutBurnedSoFar.value);
@@ -248,8 +261,8 @@ const activeCourses = computed(() =>
     .filter((row) => row && (row.status === "active" || row.status === "in_progress"))
     .slice(0, 3)
 );
-const activeCoursesDisplay = computed(() =>
-  activeCourses.value.map((row) => {
+const activeCoursesDisplay = computed(() => {
+  const enrolledPlanRows = activeCourses.value.map((row) => {
     const totalDays = asNumber(row.duration_days || row.durationDays || row.course_id?.duration_days || row.course_id?.durationDays);
     const startDateRaw = row.start_date || row.startDate || row.enrolled_at || row.createdAt;
     const explicitCurrent = asNumber(row.current_day || row.currentDay);
@@ -274,11 +287,27 @@ const activeCoursesDisplay = computed(() =>
       title: row.course_id?.title || row.title || "Course",
       progress: "In progress",
     };
-  })
-);
+  });
+  const customRows = (Array.isArray(workoutPlans.value) ? workoutPlans.value : [])
+    .map((row) => {
+      const totalDays = asNumber(row.days);
+      const startDateRaw = row.start_date || row.startDate || row.created_at || row.createdAt;
+      const start = new Date(startDateRaw);
+      const day = Number.isNaN(start.getTime()) ? 1 : Math.max(1, Math.floor((Date.now() - start.getTime()) / 86400000) + 1);
+      if (totalDays > 0 && day > totalDays) return null;
+      return {
+        id: `wp-${row._id || row.id}`,
+        title: safeText(row.exercise_name || row.exerciseName, "Custom Plan"),
+        progress: totalDays > 0 ? `Day ${Math.min(day, Math.round(totalDays))} / ${Math.round(totalDays)}` : "In progress",
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 2);
+  return [...enrolledPlanRows, ...customRows].slice(0, 3);
+});
 
 const todaySummaryItems = computed(() => [
-  `Workouts: ${formatCount(completedWorkoutTasks.value)} / ${formatCount(totalWorkoutTasks.value)} completed`,
+  `Tasks: ${formatCount(completedTodayTasks.value)} / ${formatCount(totalTodayTasks.value)} completed`,
   `Calories: ${Math.round(todayCaloriesConsumed.value)} in / ${Math.round(todayCaloriesBurned.value)} out`,
   `Schedule: ${formatCount(schedulePending.value)} pending`,
   `Courses: ${formatCount(activeCoursesDisplay.value.length)} active today`,
@@ -287,7 +316,7 @@ const todaySummaryItems = computed(() => [
 const upcomingToday = computed(() => {
   const now = new Date();
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
-  return todayScheduleItems.value
+  return todayPendingScheduleItems.value
     .map((item) => {
       const hh = Number(String(item?.time || "00:00").slice(0, 2));
       const mm = Number(String(item?.time || "00:00").slice(3, 5));
@@ -418,7 +447,7 @@ const smartInsights = computed(() => {
   if (bmiStatus(bmiValue.value) === "Normal") {
     hints.push("Your BMI is in the normal range.");
   }
-  if (asNumber(summary.value.scheduleCompletionRate) < 50 && schedulePending.value > 0) {
+  if (todayProgressPercent.value > 0 && todayProgressPercent.value < 50) {
     hints.push("You are behind today’s plan.");
   }
   const uniqueHints = [...new Set(hints)];
@@ -448,12 +477,13 @@ async function fetchDashboardData() {
       return;
     }
 
-    const [workoutRes, dietRes, dietOverviewRes, schedulesRes, coursesRes] = await Promise.all([
+    const [workoutRes, dietRes, dietOverviewRes, schedulesRes, coursesRes, workoutPlansRes] = await Promise.all([
       api.get("/workout/day", { params: { date: todayKey.value } }).catch(() => ({ data: null })),
       api.get(`/diets/${userId}`, { params: { date: todayKey.value } }).catch(() => ({ data: [] })),
       api.get(`/diets/${userId}/overview`, { params: { date: todayKey.value } }).catch(() => ({ data: null })),
       api.get(`/schedules/${userId}`).catch(() => ({ data: [] })),
       api.get("/courses/enrolled").catch(() => ({ data: [] })),
+      api.get("/workout/plan").catch(() => ({ data: [] })),
     ]);
 
     todayWorkout.value = workoutRes?.data || null;
@@ -461,6 +491,7 @@ async function fetchDashboardData() {
     todayDietOverview.value = dietOverviewRes?.data || null;
     allSchedules.value = Array.isArray(schedulesRes?.data) ? schedulesRes.data : [];
     enrolledCourses.value = Array.isArray(coursesRes?.data) ? coursesRes.data : [];
+    workoutPlans.value = Array.isArray(workoutPlansRes?.data) ? workoutPlansRes.data : [];
 
     const keys = recentDateKeys(7);
     const dailyRows = await Promise.all(
@@ -493,6 +524,7 @@ async function fetchDashboardData() {
     todayDietOverview.value = null;
     allSchedules.value = [];
     enrolledCourses.value = [];
+    workoutPlans.value = [];
     weeklyWorkoutStats.value = [];
   } finally {
     loading.value = false;
@@ -578,20 +610,20 @@ watch(
           </article>
 
           <article class="panel">
-            <h3>Active Courses</h3>
-            <ul v-if="activeCourses.length" class="upcoming-list">
+            <h3>Active Plans</h3>
+            <ul v-if="activeCoursesDisplay.length" class="upcoming-list">
               <li v-for="row in activeCoursesDisplay" :key="row.id">
                 <span>{{ row.title }}</span>
                 <span class="upcoming-time">{{ row.progress }}</span>
               </li>
             </ul>
-            <p v-else class="empty-state">No active courses</p>
+            <p v-else class="empty-state">No active plans</p>
           </article>
         </section>
 
         <section class="charts-grid">
           <article class="panel">
-            <h3>Weekly Workout</h3>
+            <h3>Weekly Activity</h3>
             <div v-if="weeklyWorkoutData.length" class="bar-chart">
               <div v-for="item in weeklyWorkoutData" :key="item.day" class="bar-item" :title="weeklyWorkoutHint(item)">
                 <div class="bar-track">
@@ -664,7 +696,7 @@ watch(
 .dashboard-wrap {
   min-height: calc(100vh - 72px);
   padding: 24px 16px 40px;
-  background: linear-gradient(180deg, #a7f2ad 0%, #ffffff 24%);
+  background: #f5f7f8;
   display: flex;
   justify-content: center;
 }
