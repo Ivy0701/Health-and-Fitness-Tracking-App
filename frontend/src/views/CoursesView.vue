@@ -27,11 +27,31 @@ function dateKey(date = new Date()) {
   return `${y}-${m}-${d}`;
 }
 
-function daysSince(startDateRaw) {
-  const start = new Date(startDateRaw);
-  if (Number.isNaN(start.getTime())) return 1;
-  const diff = Math.floor((Date.now() - start.getTime()) / 86400000) + 1;
-  return Math.max(1, diff);
+function parseDateOnlyLocal(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  const datePart = text.includes("T") ? text.slice(0, 10) : text;
+  const bits = datePart.split("-").map(Number);
+  if (bits.length === 3 && bits.every((n) => Number.isFinite(n))) {
+    const [y, m, d] = bits;
+    return new Date(y, m - 1, d);
+  }
+  const fallback = new Date(text);
+  if (Number.isNaN(fallback.getTime())) return null;
+  return new Date(fallback.getFullYear(), fallback.getMonth(), fallback.getDate());
+}
+
+function computeCourseDay(startDateRaw, totalDaysRaw) {
+  const totalDays = Math.max(1, Number(totalDaysRaw || 1));
+  const startDate = parseDateOnlyLocal(startDateRaw);
+  const today = new Date();
+  const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  if (!startDate) return 1;
+  const diff = Math.floor((todayDate.getTime() - startDate.getTime()) / 86400000);
+  let day = diff + 1;
+  if (day < 1) day = 1;
+  if (day > totalDays) day = totalDays;
+  return day;
 }
 
 function displayPlanName(input) {
@@ -99,7 +119,6 @@ const activePlans = computed(() => {
     .filter((row) => row && row.status === "active")
     .map((row) => {
       const totalDays = Number(row?.course_id?.duration_days || row?.course_id?.durationDays || row?.duration_days || 7);
-      const current = Math.max(1, Number(row.current_day || 1));
       const title = displayPlanName({
         title: row?.course_id?.title || row?.title,
         name: row?.name,
@@ -107,12 +126,13 @@ const activePlans = computed(() => {
       });
       if (!title) return null;
       const startDate = String(row?.start_date || dateKey(new Date())).slice(0, 10);
+      const currentDay = computeCourseDay(startDate, totalDays);
       return {
         id: `course-${row._id || row.id}`,
         type: "course",
         title,
         course: courses.value.find((course) => String(course.id) === String(row?.course_id?._id || row?.course_id || "")) || null,
-        progress: `Day ${Math.min(current, totalDays)} / ${totalDays}`,
+        progress: `Day ${currentDay} / ${totalDays}`,
         status: "In Progress",
         startDate,
         endDate: endDateByDuration(startDate, totalDays),
