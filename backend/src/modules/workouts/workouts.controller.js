@@ -7,6 +7,29 @@ const CourseDailyProgress = require("../../models/CourseDailyProgress");
 const ScheduleItem = require("../../models/ScheduleItem");
 const ScheduleSkip = require("../../models/ScheduleSkip");
 const Workout = require("../../models/Workout");
+const { buildCourseExercises, summarizeCourseExercises } = require("../../utils/courseSession");
+
+const MET_MAP = {
+  running: 10,
+  cycling: 8,
+  swimming: 9,
+  "jump rope": 11,
+  walking: 4,
+  walk: 4,
+  hiit: 10,
+  "weight lifting": 6,
+  "push-up": 5,
+  "pull-up": 6,
+  squat: 6,
+  deadlift: 7,
+  yoga: 3,
+  stretching: 2,
+  pilates: 4,
+  basketball: 8,
+  football: 9,
+  badminton: 7,
+  tennis: 7,
+};
 
 function toDateKey(date = new Date()) {
   const y = date.getFullYear();
@@ -36,6 +59,21 @@ function diffInDaysInclusive(startDateKey, now = new Date()) {
   const today = parseDateKey(toDateKey(now));
   const diff = Math.floor((today - start) / 86400000);
   return diff + 1;
+}
+
+function getMetForExerciseName(name) {
+  const key = String(name || "").trim().toLowerCase();
+  return MET_MAP[key] || 0;
+}
+
+function estimateWorkoutBurn({ exerciseName, durationMinutes, weight }) {
+  const safeWeight = Number(weight);
+  const safeDuration = Number(durationMinutes);
+  if (!Number.isFinite(safeWeight) || safeWeight <= 0) return 0;
+  if (!Number.isFinite(safeDuration) || safeDuration <= 0) return 0;
+  const met = getMetForExerciseName(exerciseName);
+  if (!met) return 0;
+  return Math.round(met * safeWeight * (safeDuration / 60));
 }
 
 const listPlans = asyncHandler(async (req, res) => {
@@ -236,12 +274,45 @@ const getTodayPlan = asyncHandler(async (req, res) => {
     );
   }
 
-  const courseProgressRows = await CourseDailyProgress.find({
-    user_id: req.user.id,
-    date,
-    enrolled_course_id: { $in: courseCompletions.map((c) => c.enrolled_course_id) },
-  });
-  const courseProgressMap = new Map(courseProgressRows.map((x) => [`${x.enrolled_course_id}`, x]));
+  const progressRows = await Promise.all(
+    courseCompletions.map(async (item) => {
+      const existing = await CourseDailyProgress.findOneAndUpdate(
+        { user_id: req.user.id, date, enrolled_course_id: item.enrolled_course_id },
+        {
+          $setOnInsert: {
+            status: "not_started",
+            exercises: buildCourseExercises(
+              {
+                title: item.title,
+                duration: item.duration_minutes,
+                category: enrolledCourses.find((row) => String(row._id) === String(item.enrolled_course_id))?.course_id?.category || "",
+              },
+              item.day
+            ),
+            is_completed: false,
+            completed_at: null,
+          },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+      if (Array.isArray(existing?.exercises) && existing.exercises.length) return existing;
+      existing.exercises = buildCourseExercises(
+        {
+          title: item.title,
+          duration: item.duration_minutes,
+          category: enrolledCourses.find((row) => String(row._id) === String(item.enrolled_course_id))?.course_id?.category || "",
+        },
+        item.day
+      );
+      const summary = summarizeCourseExercises(existing.exercises);
+      existing.status = summary.status;
+      existing.is_completed = summary.status === "completed";
+      existing.completed_at = existing.is_completed ? existing.completed_at || new Date() : null;
+      await existing.save();
+      return existing;
+    })
+  );
+  const courseProgressMap = new Map(progressRows.map((x) => [`${x.enrolled_course_id}`, x]));
   let scheduleCourseItems = await ScheduleItem.find({
     userId: req.user.id,
     date,
@@ -294,6 +365,13 @@ const getTodayPlan = asyncHandler(async (req, res) => {
       date,
       day: item.day,
       duration_days: item.duration_days,
+      duration_per_day: item.duration_minutes,
+      exercises: Array.isArray(progress?.exercises) ? progress.exercises : [],
+      status: progress?.status || (progress?.is_completed ? "completed" : "not_started"),
+      total_exercises: summarizeCourseExercises(progress?.exercises || []).total_exercises,
+      completed_exercises: summarizeCourseExercises(progress?.exercises || []).completed_exercises,
+      estimated_burn: summarizeCourseExercises(progress?.exercises || []).estimated_burn,
+      burned_so_far: summarizeCourseExercises(progress?.exercises || []).burned_so_far,
       is_completed: Boolean(progress?.is_completed ?? linkedItem?.is_completed),
       completed_at: progress?.completed_at || linkedItem?.completed_at || null,
     };
@@ -340,15 +418,21 @@ const updateTodayStatus = asyncHandler(async (req, res) => {
       itemType: { $in: ["workout", "course"] },
     });
     if (!scheduleItem) return res.status(404).json({ message: "Schedule workout task not found" });
+    const becameCompleted = is_completed && !scheduleItem.is_completed;
     scheduleItem.is_completed = is_completed;
     scheduleItem.completed_at = is_completed ? new Date() : null;
     await scheduleItem.save();
-    if (is_completed) {
+    if (becameCompleted) {
+      const user = await User.findById(req.user.id).select("weight").lean();
       await Workout.create({
         userId: req.user.id,
         type: scheduleItem.title || "Workout",
         duration: Number(scheduleItem.durationMinutes || 30),
-        caloriesBurned: 0,
+        caloriesBurned: estimateWorkoutBurn({
+          exerciseName: scheduleItem.title || "Workout",
+          durationMinutes: Number(scheduleItem.durationMinutes || 30),
+          weight: user?.weight,
+        }),
         date: new Date(`${normalizedDate}T00:00:00`),
         note: "Completed from workout task",
       });
@@ -373,6 +457,14 @@ const updateTodayStatus = asyncHandler(async (req, res) => {
       ? null
       : Math.max(0, Math.floor(Number(remaining_seconds)));
 
+  const previous = await WorkoutDailyStatus.findOne({
+    user_id: req.user.id,
+    workout_plan_id,
+    date: normalizedDate,
+  })
+    .select("is_completed")
+    .lean();
+  const becameCompleted = is_completed && !previous?.is_completed;
   const updated = await WorkoutDailyStatus.findOneAndUpdate(
     {
       user_id: req.user.id,
@@ -402,12 +494,17 @@ const updateTodayStatus = asyncHandler(async (req, res) => {
       },
     }
   );
-  if (is_completed) {
+  if (becameCompleted) {
+    const user = await User.findById(req.user.id).select("weight").lean();
     await Workout.create({
       userId: req.user.id,
       type: plan.exercise_name || "Workout",
       duration: Number(plan.duration_per_day || 30),
-      caloriesBurned: 0,
+      caloriesBurned: estimateWorkoutBurn({
+        exerciseName: plan.exercise_name || "Workout",
+        durationMinutes: Number(plan.duration_per_day || 30),
+        weight: user?.weight,
+      }),
       date: new Date(`${normalizedDate}T00:00:00`),
       note: "Completed from plan task",
     });

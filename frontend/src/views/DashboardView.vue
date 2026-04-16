@@ -3,20 +3,23 @@ import { computed, onActivated, onMounted, ref, watch } from "vue";
 import { RouterLink, useRoute } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
+import { useAuthStore } from "../stores/auth";
 import { calculateBmiValue } from "../utils/bmi";
 
 const loading = ref(true);
 const route = useRoute();
+const auth = useAuthStore();
+
 const dashboardPayload = ref(null);
 const profile = ref(null);
-const me = ref(null);
 const todayWorkout = ref(null);
 const todayDietRecords = ref([]);
 const todayDietOverview = ref(null);
 const allSchedules = ref([]);
 const enrolledCourses = ref([]);
-const weeklyWorkoutStats = ref([]);
 const workoutPlans = ref([]);
+const weeklyRows = ref([]);
+const inOutRows = ref([]);
 
 const MET_MAP = {
   Running: 10,
@@ -40,440 +43,445 @@ const MET_MAP = {
   Tennis: 7,
 };
 
-function formatBMI(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "0.00";
-  return n.toFixed(2);
-}
-
-function formatCalories(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "0 kcal";
-  return `${Math.round(n)} kcal`;
-}
-
-function formatWeight(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "0.0 kg";
-  return `${n.toFixed(1)} kg`;
-}
-
-function formatPercent(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "0.0%";
-  return `${n.toFixed(1)}%`;
-}
-
-function formatCount(value) {
-  const n = Math.max(0, Math.round(asNumber(value)));
-  return String(n);
-}
-
 function asNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
 }
 
-function bmiStatus(bmi) {
-  const v = asNumber(bmi);
-  if (v <= 0) return "No data yet";
-  if (v < 18.5) return "Underweight";
-  if (v <= 24.9) return "Normal";
-  if (v <= 29.9) return "Overweight";
-  return "Obese";
+function asDate(value, fallback = null) {
+  if (!value) return fallback;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? fallback : d;
 }
 
-function safeText(text, fallback = "No data yet") {
-  const value = String(text ?? "").trim();
+function safeText(text, fallback = "") {
+  const value = String(text || "").trim();
   return value || fallback;
 }
 
-function toDateKey(date) {
+function formatDateKey(date) {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
   const d = String(date.getDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
 }
 
-function parseActivityDate(value, fallbackDateKey = "") {
-  if (value) {
-    const d = new Date(value);
-    if (!Number.isNaN(d.getTime())) return d;
-  }
-  if (fallbackDateKey) {
-    const d = new Date(`${fallbackDateKey}T00:00:00`);
-    if (!Number.isNaN(d.getTime())) return d;
-  }
-  return null;
+function formatPercent(value) {
+  return `${asNumber(value).toFixed(1)}%`;
 }
 
-function formatHHmm(value, fallback = "00:00") {
-  if (!value) return fallback;
-  const date = new Date(value);
-  if (!Number.isNaN(date.getTime())) {
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
-  }
-  const plain = String(value);
-  const hit = plain.match(/^\d{2}:\d{2}/);
+function formatBMI(value) {
+  return asNumber(value).toFixed(2);
+}
+
+function formatClock(value, fallback = "--:--") {
+  const d = asDate(value);
+  if (d) return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  const hit = String(value || "").match(/^\d{2}:\d{2}/);
   return hit ? hit[0] : fallback;
 }
 
-function recentDateKeys(days = 7) {
-  const out = [];
-  const now = new Date();
-  for (let i = days - 1; i >= 0; i -= 1) {
-    const d = new Date(now);
-    d.setDate(now.getDate() - i);
-    out.push(toDateKey(d));
-  }
-  return out;
+function parseClockMinutes(value) {
+  const raw = String(value || "").trim();
+  if (!/^\d{2}:\d{2}$/.test(raw)) return 0;
+  const hh = Number(raw.slice(0, 2));
+  const mm = Number(raw.slice(3, 5));
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return 0;
+  return hh * 60 + mm;
 }
 
-const todayKey = computed(() => new Date().toISOString().slice(0, 10));
-const charts = computed(() => dashboardPayload.value?.charts || {});
-const todayWorkoutTasks = computed(() => {
-  const rows = Array.isArray(todayWorkout.value?.workout_tasks) ? todayWorkout.value.workout_tasks : [];
-  return rows;
-});
-const todayCourseTasks = computed(() => {
-  const rows = Array.isArray(todayWorkout.value?.course_tasks) ? todayWorkout.value.course_tasks : [];
-  return rows;
-});
-
-function getMetForExerciseName(name) {
+function getMet(name) {
   const direct = MET_MAP[name];
   if (direct) return direct;
   const lower = String(name || "").toLowerCase();
-  const key = Object.keys(MET_MAP).find((k) => k.toLowerCase() === lower);
+  const key = Object.keys(MET_MAP).find((item) => item.toLowerCase() === lower);
   return key ? MET_MAP[key] : 0;
-}
-
-function getTaskBurn(task) {
-  const weight = asNumber(profile.value?.weight);
-  if (weight <= 0) return 0;
-  const exerciseName = String(task?.exercise_name || task?.exerciseName || task?.type || "").trim();
-  const met = getMetForExerciseName(exerciseName);
-  if (met <= 0) return 0;
-  const duration = asNumber(task?.duration_per_day ?? task?.durationPerDay ?? task?.duration);
-  return met * weight * (duration / 60);
 }
 
 function isCompletedTask(task) {
   return task?.is_completed === true || task?.completed === true || String(task?.status || "").toLowerCase() === "completed";
 }
 
+function isCompletedCourseExercise(exercise) {
+  return String(exercise?.status || "").toLowerCase() === "completed";
+}
+
+function getTaskBurn(task, weight) {
+  const exerciseName = String(task?.exercise_name || task?.exerciseName || task?.type || "").trim();
+  const met = getMet(exerciseName);
+  if (met <= 0 || weight <= 0) return 0;
+  const duration = asNumber(task?.duration_per_day ?? task?.durationPerDay ?? task?.duration);
+  if (duration <= 0) return 0;
+  return met * weight * (duration / 60);
+}
+
+function getCourseCompletedBurn(task) {
+  if (Number.isFinite(Number(task?.burned_so_far))) return asNumber(task.burned_so_far);
+  if (!Array.isArray(task?.exercises)) return 0;
+  return task.exercises.reduce((sum, exercise) => {
+    if (!isCompletedCourseExercise(exercise)) return sum;
+    return sum + asNumber(exercise?.estimated_burn);
+  }, 0);
+}
+
+function getCoursePendingExercises(task) {
+  const total = Math.max(0, Math.round(asNumber(task?.total_exercises || task?.exercises?.length)));
+  const done = Math.max(0, Math.round(asNumber(task?.completed_exercises)));
+  return Math.max(0, total - done);
+}
+
+function cleanPlanTitle(value) {
+  const text = safeText(value);
+  const lower = text.toLowerCase();
+  if (!text) return "";
+  if (["course", "untitled", "untitled plan", "course plan"].includes(lower)) return "";
+  return text;
+}
+
+function bmiStatus(value) {
+  const bmi = asNumber(value);
+  if (bmi <= 0) return "No data";
+  if (bmi < 18.5) return "Underweight";
+  if (bmi <= 24.9) return "Normal";
+  if (bmi <= 29.9) return "Overweight";
+  return "Obese";
+}
+
+function netStatus(value) {
+  const net = asNumber(value);
+  if (net > 30) return "Surplus";
+  if (net < -30) return "Deficit";
+  return "Balanced";
+}
+
+const dashboardSummary = computed(() => dashboardPayload.value?.summary || {});
+const todayKey = computed(() => new Date().toISOString().slice(0, 10));
+const weightForBurn = computed(() => asNumber(profile.value?.weight));
+
+const todayWorkoutTasks = computed(() => (Array.isArray(todayWorkout.value?.workout_tasks) ? todayWorkout.value.workout_tasks : []));
+const todayCourseTasks = computed(() => (Array.isArray(todayWorkout.value?.course_tasks) ? todayWorkout.value.course_tasks : []));
+
 const totalWorkoutTasks = computed(() => todayWorkoutTasks.value.length);
 const completedWorkoutTasks = computed(() => todayWorkoutTasks.value.filter((task) => isCompletedTask(task)).length);
 const totalCourseTasks = computed(() => todayCourseTasks.value.length);
 const completedCourseTasks = computed(() => todayCourseTasks.value.filter((task) => Boolean(task?.is_completed)).length);
+
 const totalTodayTasks = computed(() => totalWorkoutTasks.value + totalCourseTasks.value);
 const completedTodayTasks = computed(() => completedWorkoutTasks.value + completedCourseTasks.value);
-const todayProgressPercent = computed(() => {
-  if (totalTodayTasks.value <= 0) return 0;
-  return (completedTodayTasks.value / totalTodayTasks.value) * 100;
+const remainingTodayTasks = computed(() => Math.max(0, totalTodayTasks.value - completedTodayTasks.value));
+const todayProgressPercent = computed(() => (totalTodayTasks.value > 0 ? (completedTodayTasks.value / totalTodayTasks.value) * 100 : 0));
+
+const todayCaloriesIn = computed(() => asNumber(todayDietOverview.value?.consumed?.calories));
+const todayCaloriesOut = computed(() => {
+  const workoutBurn = todayWorkoutTasks.value.reduce(
+    (sum, task) => (isCompletedTask(task) ? sum + getTaskBurn(task, weightForBurn.value) : sum),
+    0
+  );
+  const courseBurn = todayCourseTasks.value.reduce((sum, task) => sum + getCourseCompletedBurn(task), 0);
+  return workoutBurn + courseBurn;
 });
-const workoutBurnedSoFar = computed(() =>
-  todayWorkoutTasks.value.reduce((sum, task) => (isCompletedTask(task) ? sum + getTaskBurn(task) : sum), 0)
-);
-const workoutProgressText = computed(() => `${formatCount(completedWorkoutTasks.value)} / ${formatCount(totalWorkoutTasks.value)}`);
-const workoutProgressPercent = computed(() => {
-  if (totalWorkoutTasks.value <= 0) return 0;
-  return (completedWorkoutTasks.value / totalWorkoutTasks.value) * 100;
-});
+const todayNetCalories = computed(() => todayCaloriesIn.value - todayCaloriesOut.value);
+const todayNetState = computed(() => netStatus(todayNetCalories.value));
 
 const bmiValue = computed(() => {
-  const height = asNumber(profile.value?.height);
-  const weight = asNumber(profile.value?.weight);
-  if (height <= 0 || weight <= 0) return 0;
-  return asNumber(calculateBmiValue(weight, height));
+  const h = asNumber(profile.value?.height);
+  const w = asNumber(profile.value?.weight);
+  if (h <= 0 || w <= 0) return 0;
+  return asNumber(calculateBmiValue(w, h));
 });
 
-const summaryCards = computed(() => [
+const heroSummary = computed(() => {
+  if (totalTodayTasks.value > 0 && remainingTodayTasks.value === 0) return "Great job, you completed all workout tasks today.";
+  if (todayNetState.value === "Surplus") return "You are in calorie surplus today.";
+  if (todayNetState.value === "Deficit") return "You are in calorie deficit today.";
+  if (remainingTodayTasks.value > 0) return `You still have ${remainingTodayTasks.value} tasks remaining today.`;
+  return "You are balanced today.";
+});
+
+const heroProgressLine = computed(() => `You have ${totalTodayTasks.value} tasks planned today.`);
+
+const workoutProgressText = computed(() => `${completedTodayTasks.value} / ${totalTodayTasks.value}`);
+const workoutProgressPercent = computed(() => (totalTodayTasks.value > 0 ? (completedTodayTasks.value / totalTodayTasks.value) * 100 : 0));
+
+const statCards = computed(() => [
   {
+    id: "total-workouts",
     title: "Total Workouts",
     value: workoutProgressText.value,
     sub: "Completed / total tasks",
     progress: workoutProgressPercent.value,
   },
   {
+    id: "calories-burned",
     title: "Calories Burned",
-    value: formatCalories(workoutBurnedSoFar.value),
+    value: `${Math.round(todayCaloriesOut.value)} kcal`,
     sub: "Burned today",
+    progress: null,
   },
   {
+    id: "calories-consumed",
     title: "Calories Consumed",
-    value: formatCalories(todayCaloriesConsumed.value),
+    value: `${Math.round(todayCaloriesIn.value)} kcal`,
     sub: "Today intake",
+    progress: null,
   },
   {
+    id: "bmi",
     title: "BMI",
     value: formatBMI(bmiValue.value),
     sub: bmiStatus(bmiValue.value),
+    progress: null,
   },
   {
-    title: "Today’s Progress",
+    id: "progress",
+    title: "Today's Progress",
     value: formatPercent(todayProgressPercent.value),
-    sub: `${formatCount(completedTodayTasks.value)} / ${formatCount(totalTodayTasks.value)} tasks completed`,
+    sub: `${completedTodayTasks.value} / ${totalTodayTasks.value} tasks completed`,
+    progress: null,
   },
 ]);
 
-const weeklyWorkoutData = computed(() => {
-  if (weeklyWorkoutStats.value.length) return weeklyWorkoutStats.value;
-  const rows = Array.isArray(charts.value.weeklyWorkout) ? charts.value.weeklyWorkout : [];
-  return rows.map((row) => ({
-    day: safeText(row?.day, "--"),
-    total: asNumber(row?.value),
-    completed: asNumber(row?.value),
-    rate: asNumber(row?.value) > 0 ? 100 : 0,
-  }));
-});
-
-const caloriesInVsOut = computed(() => {
-  const rows = Array.isArray(charts.value.caloriesInVsOut) ? charts.value.caloriesInVsOut : [];
-  return rows.map((row) => ({
-    day: safeText(row?.day, "--"),
-    in: asNumber(row?.in),
-    out: asNumber(row?.out),
-  }));
-});
-const caloriesInVsOutData = computed(() => caloriesInVsOut.value);
-
-const caloriesInVsOutMax = computed(() => Math.max(...caloriesInVsOut.value.flatMap((item) => [item.in, item.out]), 1));
-
-const workoutRemaining = computed(() => totalWorkoutTasks.value - completedWorkoutTasks.value);
-const workoutCompleted = computed(() => completedWorkoutTasks.value);
-
-const todayScheduleItems = computed(() => {
-  if (!Array.isArray(allSchedules.value)) return [];
-  return allSchedules.value.filter((item) => String(item?.date || "") === todayKey.value);
-});
+const todayScheduleItems = computed(() =>
+  Array.isArray(allSchedules.value) ? allSchedules.value.filter((item) => String(item?.date || "") === todayKey.value) : []
+);
 const todayPendingScheduleItems = computed(() => todayScheduleItems.value.filter((item) => !item?.is_completed));
+const pendingCourseExercises = computed(() => todayCourseTasks.value.reduce((sum, task) => sum + getCoursePendingExercises(task), 0));
 
-const schedulePending = computed(() => todayPendingScheduleItems.value.length);
-const dietLoggedToday = computed(() => (Array.isArray(todayDietRecords.value) ? todayDietRecords.value.length : 0) > 0);
-const todayCaloriesConsumed = computed(() => asNumber(todayDietOverview.value?.consumed?.calories));
-const todayCaloriesBurned = computed(() => workoutBurnedSoFar.value);
-const dietFocusText = computed(() =>
-  todayCaloriesConsumed.value > 0 ? `${Math.round(todayCaloriesConsumed.value)} kcal today` : "No meals logged today"
-);
-const activeCourses = computed(() =>
-  (Array.isArray(enrolledCourses.value) ? enrolledCourses.value : [])
-    .filter((row) => row && (row.status === "active" || row.status === "in_progress"))
-    .slice(0, 3)
-);
-const activeCoursesDisplay = computed(() => {
-  const enrolledPlanRows = activeCourses.value.map((row) => {
-    const totalDays = asNumber(row.duration_days || row.durationDays || row.course_id?.duration_days || row.course_id?.durationDays);
-    const startDateRaw = row.start_date || row.startDate || row.enrolled_at || row.createdAt;
-    const explicitCurrent = asNumber(row.current_day || row.currentDay);
-    let currentDay = explicitCurrent;
-    if (!currentDay && startDateRaw) {
-      const startDate = new Date(startDateRaw);
-      if (!Number.isNaN(startDate.getTime())) {
-        const diff = Math.floor((Date.now() - startDate.getTime()) / 86400000) + 1;
-        currentDay = Math.max(1, diff);
-      }
-    }
-    currentDay = Math.max(1, Math.round(currentDay || 1));
-    if (totalDays > 0) {
-      return {
-        id: row._id || row.id || row.course_id?._id || row.course_id,
-        title: row.course_id?.title || row.title || "Course",
-        progress: `Day ${Math.min(currentDay, Math.round(totalDays))} / ${Math.round(totalDays)}`,
-      };
-    }
-    return {
-      id: row._id || row.id || row.course_id?._id || row.course_id,
-      title: row.course_id?.title || row.title || "Course",
-      progress: "In progress",
-    };
-  });
-  const customRows = (Array.isArray(workoutPlans.value) ? workoutPlans.value : [])
-    .map((row) => {
-      const totalDays = asNumber(row.days);
-      const startDateRaw = row.start_date || row.startDate || row.created_at || row.createdAt;
-      const start = new Date(startDateRaw);
-      const day = Number.isNaN(start.getTime()) ? 1 : Math.max(1, Math.floor((Date.now() - start.getTime()) / 86400000) + 1);
-      if (totalDays > 0 && day > totalDays) return null;
-      return {
-        id: `wp-${row._id || row.id}`,
-        title: safeText(row.exercise_name || row.exerciseName, "Custom Plan"),
-        progress: totalDays > 0 ? `Day ${Math.min(day, Math.round(totalDays))} / ${Math.round(totalDays)}` : "In progress",
-      };
-    })
-    .filter(Boolean)
-    .slice(0, 2);
-  return [...enrolledPlanRows, ...customRows].slice(0, 3);
-});
+const todayFocusItems = computed(() => [
+  {
+    key: "workout",
+    title: "Workout",
+    value:
+      totalWorkoutTasks.value <= 0
+        ? "No task today"
+        : `${Math.max(0, totalWorkoutTasks.value - completedWorkoutTasks.value)} tasks remaining`,
+  },
+  {
+    key: "schedule",
+    title: "Schedule",
+    value: `${todayPendingScheduleItems.value.length} items pending`,
+  },
+  {
+    key: "diet",
+    title: "Diet",
+    value: `${Math.round(todayCaloriesIn.value)} kcal today`,
+  },
+]);
 
 const todaySummaryItems = computed(() => [
-  `Tasks: ${formatCount(completedTodayTasks.value)} / ${formatCount(totalTodayTasks.value)} completed`,
-  `Calories: ${Math.round(todayCaloriesConsumed.value)} in / ${Math.round(todayCaloriesBurned.value)} out`,
-  `Schedule: ${formatCount(schedulePending.value)} pending`,
-  `Courses: ${formatCount(activeCoursesDisplay.value.length)} active today`,
+  `Tasks: ${completedTodayTasks.value} / ${totalTodayTasks.value} completed`,
+  `Calories: ${Math.round(todayCaloriesIn.value)} in / ${Math.round(todayCaloriesOut.value)} out`,
+  `Schedule: ${todayPendingScheduleItems.value.length} pending`,
+  `Courses: ${todayCourseTasks.value.length} active today`,
 ]);
+
+const startTodayLink = computed(() => {
+  if (remainingTodayTasks.value > 0) return "/workout";
+  if (todayPendingScheduleItems.value.length > 0) return "/schedule";
+  return "/workout";
+});
 
 const upcomingToday = computed(() => {
   const now = new Date();
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   return todayPendingScheduleItems.value
-    .map((item) => {
-      const hh = Number(String(item?.time || "00:00").slice(0, 2));
-      const mm = Number(String(item?.time || "00:00").slice(3, 5));
-      const minutes = (Number.isFinite(hh) ? hh : 0) * 60 + (Number.isFinite(mm) ? mm : 0);
-      return { ...item, minutes };
-    })
+    .map((item) => ({
+      id: String(item?._id || `${item?.title}-${item?.time}`),
+      title: safeText(item?.title, "Session"),
+      time: safeText(item?.time, "00:00"),
+      minutes: parseClockMinutes(item?.time),
+      type: item?.courseId || String(item?.itemType || "").toLowerCase() === "course" ? "Course" : "Workout",
+    }))
     .filter((item) => item.minutes >= nowMinutes)
     .sort((a, b) => a.minutes - b.minutes)
     .slice(0, 3);
 });
 
-const startTodayLink = computed(() => {
-  if (workoutRemaining.value > 0) return "/workout";
-  if (schedulePending.value > 0) return "/schedule";
-  return "/workout";
-});
+function workoutPlanTodayStatus(plan) {
+  const pid = String(plan?._id || plan?.id || "");
+  const todayTask = todayWorkoutTasks.value.find((task) => String(task?.workout_plan_id || "") === pid);
+  if (!todayTask) return { hasTodayTask: false, status: "Not Started" };
+  return { hasTodayTask: true, status: isCompletedTask(todayTask) ? "Completed Today" : "In Progress" };
+}
 
-const welcomeDynamic = computed(() => {
-  if (schedulePending.value > 0) return `You have ${formatCount(schedulePending.value)} tasks planned today.`;
-  if (bmiValue.value > 0) return `Your BMI is in the ${bmiStatus(bmiValue.value).toLowerCase()} range.`;
-  if (todayCaloriesConsumed.value > 0) return `You consumed ${formatCalories(todayCaloriesConsumed.value)} today.`;
-  return "Start logging your activity to build your real-time health story.";
-});
+function normalizePlanProgress(total, completed) {
+  const totalSafe = Math.max(1, Math.round(asNumber(total)));
+  const completedSafe = Math.max(0, Math.min(totalSafe, Math.round(asNumber(completed))));
+  let statusKey = "not_started";
+  if (completedSafe >= totalSafe) statusKey = "completed";
+  else if (completedSafe > 0) statusKey = "in_progress";
+  const statusLabel =
+    statusKey === "completed" ? "Completed" : statusKey === "in_progress" ? "In Progress" : "Not Started";
+  return {
+    total: totalSafe,
+    completed: completedSafe,
+    statusKey,
+    statusLabel,
+    percent: Math.max(0, Math.min(100, (completedSafe / totalSafe) * 100)),
+  };
+}
 
-const activityList = computed(() => {
-  const workoutRows = todayWorkoutTasks.value
-    .filter((task) => isCompletedTask(task))
-    .map((task, index) => {
-      const fallbackDate = todayKey.value;
-      const fallbackTime = `${fallbackDate}T${String(Math.max(0, 23 - index)).padStart(2, "0")}:00:00`;
-      const dt = parseActivityDate(task?.completedAt || task?.updatedAt || task?.createdAt, fallbackDate) || new Date(fallbackTime);
-      return {
-        type: "workout",
-        title: safeText(task?.exercise_name || task?.exerciseName, "Workout"),
-        value: Math.round(getTaskBurn(task)),
-        time: dt.toISOString(),
-      };
-    });
+function planActionLabel(statusKey) {
+  if (statusKey === "completed") return "View";
+  if (statusKey === "in_progress") return "Continue";
+  return "Start";
+}
 
-  const dietRows = (Array.isArray(todayDietRecords.value) ? todayDietRecords.value : []).map((row, index) => {
-    const dateKey = String(row?.date || todayKey.value).slice(0, 10);
-    const fallbackTime = `${dateKey}T${String(Math.max(0, 14 - index)).padStart(2, "0")}:00:00`;
-    const dt = parseActivityDate(row?.recordedAt || row?.createdAt, dateKey) || new Date(fallbackTime);
-    return {
-      type: "diet",
-      title: safeText(row?.foodName, "Meal"),
-      value: Math.round(asNumber(row?.calories)),
-      time: dt.toISOString(),
-    };
-  });
-
-  const scheduleRows = todayScheduleItems.value
+const activePlansDisplay = computed(() => {
+  const courseRows = (Array.isArray(enrolledCourses.value) ? enrolledCourses.value : [])
+    .filter((row) => row && row.status === "active")
     .map((row) => {
-      const dateKey = String(row?.date || todayKey.value).slice(0, 10);
-      const hhmm = String(row?.time || "00:00").slice(0, 5);
-      const dt = parseActivityDate(`${dateKey}T${hhmm}:00`, dateKey) || new Date(`${dateKey}T00:00:00`);
+      const title = cleanPlanTitle(row?.course_id?.title || row?.title);
+      if (!title) return null;
+      const cid = String(row?.course_id?._id || row?.course_id || "");
+      const todayTask = todayCourseTasks.value.find((task) => String(task?.course_id || "") === cid);
+      const total = Math.max(1, Math.round(asNumber(row?.course_id?.duration_days || row?.duration_days || 7)));
+      const day = Math.max(1, Math.min(total, Math.round(asNumber(row?.current_day || 1))));
+      const progress = normalizePlanProgress(todayTask?.total_exercises, todayTask?.completed_exercises);
       return {
-        type: "schedule",
-        title: safeText(row?.title, "Schedule"),
-        value: null,
-        time: dt.toISOString(),
+        id: `course-${String(row?._id || row?.id || "")}`,
+        title,
+        dayText: `Day ${day} / ${total}`,
+        status: progress.statusLabel,
+        statusKey: progress.statusKey,
+        hasTodayTask: Boolean(todayTask),
+        progressPercent: progress.percent,
+        totalKcal: Math.round(asNumber(todayTask?.estimated_burn)),
+        durationText: `${Math.max(0, Math.round(asNumber(row?.course_id?.duration || todayTask?.duration || 0)))} min/day`,
+        actionLabel: planActionLabel(progress.statusKey),
       };
     })
-    .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
-    .slice(0, 2);
+    .filter(Boolean);
 
-  return [...dietRows.slice(0, 3), ...workoutRows.slice(0, 3), ...scheduleRows]
-    .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
-    .slice(0, 8);
+  const workoutRows = (Array.isArray(workoutPlans.value) ? workoutPlans.value : [])
+    .map((row) => {
+      const title = cleanPlanTitle(row?.exercise_name || row?.exerciseName);
+      if (!title) return null;
+      const total = Math.max(1, Math.round(asNumber(row?.days || 1)));
+      const start = asDate(row?.start_date || row?.startDate || row?.created_at || row?.createdAt, new Date());
+      const day = Math.max(1, Math.min(total, Math.floor((Date.now() - start.getTime()) / 86400000) + 1));
+      const status = workoutPlanTodayStatus(row);
+      const progress = normalizePlanProgress(1, status.status === "Completed Today" ? 1 : 0);
+      return {
+        id: `workout-${String(row?._id || row?.id || "")}`,
+        title,
+        dayText: `Day ${day} / ${total}`,
+        status: progress.statusLabel,
+        statusKey: progress.statusKey,
+        hasTodayTask: status.hasTodayTask,
+        progressPercent: progress.percent,
+        totalKcal: Math.round(getTaskBurn(row, weightForBurn.value)),
+        durationText: `${Math.max(0, Math.round(asNumber(row?.duration_per_day || row?.durationPerDay || 0)))} min/day`,
+        actionLabel: planActionLabel(progress.statusKey),
+      };
+    })
+    .filter(Boolean);
+
+  const order = { in_progress: 0, completed: 1, not_started: 2 };
+  return [...courseRows, ...workoutRows]
+    .sort((a, b) => {
+      if (a.hasTodayTask !== b.hasTodayTask) return a.hasTodayTask ? -1 : 1;
+      return (order[a.statusKey] ?? 9) - (order[b.statusKey] ?? 9);
+    })
+    .slice(0, 3);
 });
 
-const groupedActivity = computed(() => {
-  const today = toDateKey(new Date());
-  const y = new Date();
-  y.setDate(y.getDate() - 1);
-  const yesterday = toDateKey(y);
+const weeklyActivityData = computed(() => weeklyRows.value);
+const weeklyHasData = computed(() =>
+  weeklyActivityData.value.some((row) => asNumber(row?.total) > 0 || asNumber(row?.completed) > 0)
+);
+const weeklyMaxTasks = computed(() => Math.max(1, ...weeklyActivityData.value.map((row) => asNumber(row?.total))));
 
-  const groups = { Today: [], Yesterday: [], Earlier: [] };
-  for (const item of activityList.value) {
-    const d = parseActivityDate(item.time);
-    const key = d ? toDateKey(d) : "";
-    if (key === today) groups.Today.push(item);
-    else if (key === yesterday) groups.Yesterday.push(item);
-    else groups.Earlier.push(item);
-  }
-  return [
-    { label: "Today", items: groups.Today },
-    { label: "Yesterday", items: groups.Yesterday },
-    { label: "Earlier", items: groups.Earlier },
-  ].filter((group) => group.items.length > 0);
+const caloriesInOutData = computed(() => inOutRows.value);
+const inOutHasData = computed(() => caloriesInOutData.value.some((row) => asNumber(row?.in) > 0 || asNumber(row?.out) > 0));
+const inOutMax = computed(() => Math.max(1, ...caloriesInOutData.value.flatMap((row) => [asNumber(row?.in), asNumber(row?.out)])));
+
+const recentActivities = computed(() => {
+  const dietRows = (Array.isArray(todayDietRecords.value) ? todayDietRecords.value : []).map((row) => ({
+    id: `diet-${row?._id || row?.foodName}`,
+    type: "Diet",
+    title: safeText(row?.foodName, "Meal"),
+    detail: `${Math.round(asNumber(row?.calories))} kcal`,
+    time: asDate(row?.recordedAt || row?.createdAt, new Date())?.toISOString(),
+  }));
+
+  const workoutRows = todayWorkoutTasks.value
+    .filter((task) => isCompletedTask(task))
+    .map((task) => ({
+      id: `workout-${task?.schedule_item_id || task?.workout_plan_id || task?._id}`,
+      type: "Workout",
+      title: safeText(task?.exercise_name || task?.exerciseName, "Workout"),
+      detail: `${Math.round(getTaskBurn(task, weightForBurn.value))} kcal burned`,
+      time: asDate(task?.completed_at || task?.completedAt || task?.updatedAt || task?.createdAt, new Date())?.toISOString(),
+    }));
+
+  const courseRows = todayCourseTasks.value
+    .filter((task) => asNumber(task?.completed_exercises) > 0 || task?.is_completed)
+    .map((task) => ({
+      id: `course-${task?.enrolled_course_id || task?.course_id}`,
+      type: "Course",
+      title: safeText(task?.title, "Course Session"),
+      detail: task?.is_completed
+        ? `Day ${Math.round(asNumber(task?.day || 1))} completed`
+        : `${Math.round(asNumber(task?.completed_exercises || 0))} exercise(s) completed`,
+      time: asDate(task?.completed_at || task?.updatedAt || task?.createdAt, new Date())?.toISOString(),
+    }));
+
+  const scheduleRows = todayScheduleItems.value
+    .filter((row) => row?.is_completed)
+    .slice(0, 1)
+    .map((row) => ({
+      id: `schedule-${row?._id || row?.title}`,
+      type: "Schedule",
+      title: safeText(row?.title, "Session"),
+      detail: "Session completed",
+      time: asDate(`${safeText(row?.date, todayKey.value)}T${safeText(row?.time, "00:00")}:00`, new Date())?.toISOString(),
+    }));
+
+  return [...dietRows, ...workoutRows, ...courseRows, ...scheduleRows]
+    .filter((row) => row.time)
+    .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
+    .slice(0, 5);
 });
 
 function activityIcon(type) {
-  if (type === "workout") return "🏃";
-  if (type === "diet") return "🥗";
+  if (type === "Diet") return "🥗";
+  if (type === "Workout") return "🏃";
+  if (type === "Course") return "📘";
   return "📅";
-}
-
-function activityText(item) {
-  if (item.type === "workout") return `Workout: ${item.title} · ${item.value ?? 0} kcal burned`;
-  if (item.type === "diet") return `Diet: ${item.title} · ${item.value ?? 0} kcal`;
-  return `Schedule: ${item.title} · ${formatHHmm(item.time)}`;
-}
-
-function activityTime(item) {
-  return formatHHmm(item.time);
-}
-
-function weeklyWorkoutHint(item) {
-  if (!item.total) return `${item.day}: No workout tasks`;
-  return `${item.day}: ${formatCount(item.completed)} completed out of ${formatCount(item.total)} tasks`;
-}
-
-function inOutLabel(item) {
-  if (asNumber(item.in) === 0 && asNumber(item.out) === 0) return "—";
-  return `${formatCalories(item.in)} / ${formatCalories(item.out)}`;
 }
 
 const smartInsights = computed(() => {
   const hints = [];
-  if (!dietLoggedToday.value) hints.push("You haven’t logged any meals today.");
-  if (workoutCompleted.value === 0) hints.push("You have not started a workout today.");
-  if (todayCaloriesConsumed.value > todayCaloriesBurned.value && todayCaloriesConsumed.value > 0) {
-    hints.push("Your calorie intake is currently higher than your burn.");
-  }
-  if (workoutRemaining.value > 0) hints.push(`You still have ${formatCount(workoutRemaining.value)} workouts remaining.`);
-  if (upcomingToday.value.length > 0) hints.push(`You have ${formatCount(upcomingToday.value.length)} upcoming sessions today.`);
-  if (bmiStatus(bmiValue.value) === "Normal") {
-    hints.push("Your BMI is in the normal range.");
-  }
-  if (todayProgressPercent.value > 0 && todayProgressPercent.value < 50) {
-    hints.push("You are behind today’s plan.");
-  }
-  const uniqueHints = [...new Set(hints)];
-  if (uniqueHints.length >= 2) return uniqueHints.slice(0, 5);
-  return [...uniqueHints, "Start logging your activity to receive insights."].slice(0, 5);
+  if (todayNetState.value === "Surplus") hints.push("You are in calorie surplus.");
+  if (todayNetState.value === "Deficit") hints.push("You are in calorie deficit.");
+  if (remainingTodayTasks.value > 0) hints.push(`${remainingTodayTasks.value} workout task(s) remaining.`);
+  if (pendingCourseExercises.value > 0) hints.push(`${pendingCourseExercises.value} course exercise(s) pending.`);
+  if (bmiStatus(bmiValue.value) === "Normal") hints.push("BMI is in normal range.");
+  return [...new Set(hints)].slice(0, 3);
 });
 
 async function fetchDashboardData() {
   loading.value = true;
   try {
-    const [dashboardRes, profileRes, meRes] = await Promise.all([
-      api.get("/dashboard"),
+    const [dashboardRes, profileRes] = await Promise.all([
+      api.get("/dashboard").catch(() => ({ data: null })),
       api.get("/user/profile"),
-      api.get("/users/me"),
     ]);
-
     dashboardPayload.value = dashboardRes?.data || null;
     profile.value = profileRes?.data || null;
-    me.value = meRes?.data || null;
+    auth.$patch({ user: auth.normalizeUser(profileRes?.data || null) });
 
-    const userId = me.value?.id;
+    const userId = profile.value?.id;
     if (!userId) {
       todayWorkout.value = null;
       todayDietRecords.value = [];
       todayDietOverview.value = null;
       allSchedules.value = [];
+      enrolledCourses.value = [];
+      workoutPlans.value = [];
+      weeklyRows.value = [];
+      inOutRows.value = [];
       return;
     }
 
@@ -493,39 +501,51 @@ async function fetchDashboardData() {
     enrolledCourses.value = Array.isArray(coursesRes?.data) ? coursesRes.data : [];
     workoutPlans.value = Array.isArray(workoutPlansRes?.data) ? workoutPlansRes.data : [];
 
-    const keys = recentDateKeys(7);
-    const dailyRows = await Promise.all(
-      keys.map(async (dateKey) => {
-        const resp = await api.get("/workout/day", { params: { date: dateKey } }).catch(() => ({ data: null }));
-        const tasks = Array.isArray(resp?.data?.workout_tasks)
-          ? resp.data.workout_tasks
-          : Array.isArray(resp?.data?.tasks)
-          ? resp.data.tasks
-          : [];
-        const total = tasks.length;
-        const completed = tasks.filter((task) => isCompletedTask(task)).length;
-        const rate = total > 0 ? Math.round((completed / total) * 100) : 0;
-        const dateObj = new Date(`${dateKey}T00:00:00`);
+    const dateKeys = [];
+    const now = new Date();
+    for (let i = 6; i >= 0; i -= 1) {
+      const d = new Date(now);
+      d.setDate(now.getDate() - i);
+      dateKeys.push(formatDateKey(d));
+    }
+
+    const rows = await Promise.all(
+      dateKeys.map(async (dateKey) => {
+        const [workoutDayRes, dietDayRes] = await Promise.all([
+          api.get("/workout/day", { params: { date: dateKey } }).catch(() => ({ data: null })),
+          api.get(`/diets/${userId}/overview`, { params: { date: dateKey } }).catch(() => ({ data: null })),
+        ]);
+        const workoutTasks = Array.isArray(workoutDayRes?.data?.workout_tasks) ? workoutDayRes.data.workout_tasks : [];
+        const courseTasks = Array.isArray(workoutDayRes?.data?.course_tasks) ? workoutDayRes.data.course_tasks : [];
+        const total = workoutTasks.length + courseTasks.length;
+        const completed =
+          workoutTasks.filter((task) => isCompletedTask(task)).length + courseTasks.filter((task) => Boolean(task?.is_completed)).length;
+        const out =
+          workoutTasks.reduce((sum, task) => (isCompletedTask(task) ? sum + getTaskBurn(task, weightForBurn.value) : sum), 0) +
+          courseTasks.reduce((sum, task) => sum + getCourseCompletedBurn(task), 0);
         return {
-          day: dateObj.toLocaleDateString("en-US", { weekday: "short" }),
+          day: asDate(`${dateKey}T00:00:00`)?.toLocaleDateString("en-US", { weekday: "short" }) || "--",
           total,
           completed,
-          rate,
+          in: asNumber(dietDayRes?.data?.consumed?.calories),
+          out,
         };
       })
     );
-    weeklyWorkoutStats.value = dailyRows;
+
+    weeklyRows.value = rows;
+    inOutRows.value = rows.map((row) => ({ day: row.day, in: row.in, out: row.out }));
   } catch {
     dashboardPayload.value = null;
     profile.value = null;
-    me.value = null;
     todayWorkout.value = null;
     todayDietRecords.value = [];
     todayDietOverview.value = null;
     allSchedules.value = [];
     enrolledCourses.value = [];
     workoutPlans.value = [];
-    weeklyWorkoutStats.value = [];
+    weeklyRows.value = [];
+    inOutRows.value = [];
   } finally {
     loading.value = false;
   }
@@ -546,146 +566,157 @@ watch(
   <AppNavbar />
   <main class="dashboard-wrap">
     <section class="dashboard-shell">
-      <header class="hero">
+      <header class="hero-card">
+        <p class="hero-kicker">Dashboard overview</p>
         <h1>Welcome back</h1>
-        <p>Here is your real-time health progress overview</p>
-        <p class="hero-summary">{{ welcomeDynamic }}</p>
+        <p class="hero-summary">{{ heroSummary }}</p>
+        <p class="hero-progress">{{ heroProgressLine }}</p>
+        <RouterLink :to="startTodayLink" class="hero-action">Start Today</RouterLink>
       </header>
 
-      <div v-if="loading" class="loading">Loading your healthy stats...</div>
+      <div v-if="loading" class="panel loading">Loading your healthy stats...</div>
 
       <template v-else>
-        <section class="summary-grid">
-          <article v-for="card in summaryCards" :key="card.title" class="summary-card">
+        <section class="stats-row">
+          <article v-for="card in statCards" :key="card.id" class="stat-card">
             <h3>{{ card.title }}</h3>
-            <p class="summary-value">{{ card.value }}</p>
-            <p class="summary-sub">{{ card.sub }}</p>
-            <div v-if="card.title === 'Total Workouts'" class="workout-progress-track">
-              <div class="workout-progress-fill" :style="{ width: `${card.progress || 0}%` }"></div>
+            <p class="stat-value">{{ card.value }}</p>
+            <p class="stat-sub">{{ card.sub }}</p>
+            <div v-if="card.progress != null" class="progress-track">
+              <div class="progress-fill" :style="{ width: `${Math.max(0, Math.min(100, card.progress || 0))}%` }"></div>
             </div>
           </article>
         </section>
 
-        <section class="focus-panel panel">
-          <div class="focus-head">
+        <section class="panel focus-panel">
+          <div class="panel-head">
             <div>
-              <h3>Today’s Focus</h3>
+              <h2>Today's Focus</h2>
               <p>Action guide for your day</p>
             </div>
-            <RouterLink :to="startTodayLink" class="focus-btn">Start Today</RouterLink>
+            <RouterLink :to="startTodayLink" class="panel-action">Start Today</RouterLink>
           </div>
           <div class="focus-grid">
-            <article class="focus-item">
-              <strong>Workout</strong>
-              <p>{{ formatCount(workoutRemaining) }} tasks remaining</p>
-            </article>
-            <article class="focus-item">
-              <strong>Schedule</strong>
-              <p>{{ formatCount(schedulePending) }} items pending</p>
-            </article>
-            <article class="focus-item">
-              <strong>Diet</strong>
-              <p>{{ dietFocusText }}</p>
+            <article v-for="item in todayFocusItems" :key="item.key" class="focus-item">
+              <strong>{{ item.title }}</strong>
+              <p>{{ item.value }}</p>
             </article>
           </div>
         </section>
 
         <section class="panel summary-panel">
-          <h3>Today Summary</h3>
-          <ul class="summary-lines">
+          <h2>Today Summary</h2>
+          <ul>
             <li v-for="line in todaySummaryItems" :key="line">{{ line }}</li>
           </ul>
         </section>
 
-        <section class="bottom-grid">
+        <section class="double-col">
           <article class="panel">
-            <h3>Upcoming</h3>
-            <ul v-if="upcomingToday.length" class="upcoming-list">
-              <li v-for="item in upcomingToday" :key="`${item._id || item.title}-${item.time}`">
-                <span class="upcoming-time">{{ String(item.time || "00:00").slice(0, 5) }}</span>
-                <span>{{ item.title }}</span>
+            <h2>Upcoming</h2>
+            <ul v-if="upcomingToday.length" class="simple-list">
+              <li v-for="item in upcomingToday" :key="item.id">
+                <span class="time">{{ item.time }}</span>
+                <span class="title">{{ item.title }}</span>
+                <span class="type">{{ item.type }}</span>
               </li>
             </ul>
-            <p v-else class="empty-state">No upcoming sessions today</p>
+            <p v-else class="empty">No upcoming sessions today</p>
           </article>
 
           <article class="panel">
-            <h3>Active Plans</h3>
-            <ul v-if="activeCoursesDisplay.length" class="upcoming-list">
-              <li v-for="row in activeCoursesDisplay" :key="row.id">
-                <span>{{ row.title }}</span>
-                <span class="upcoming-time">{{ row.progress }}</span>
+            <h2>Active Plans</h2>
+            <ul v-if="activePlansDisplay.length" class="active-plan-list">
+              <li v-for="item in activePlansDisplay" :key="item.id" class="active-plan-card">
+                <div class="active-plan-head">
+                  <div class="active-plan-title-wrap">
+                    <span class="active-plan-title">{{ item.title }}</span>
+                    <span class="active-plan-day">{{ item.dayText }}</span>
+                  </div>
+                  <span class="active-plan-status" :class="`is-${item.statusKey}`">{{ item.status }}</span>
+                </div>
+                <div class="active-plan-track">
+                  <div class="active-plan-fill" :style="{ width: `${item.progressPercent}%` }"></div>
+                </div>
+                <div class="active-plan-foot">
+                  <span>🔥 {{ item.totalKcal }} kcal</span>
+                  <span>⏱ {{ item.durationText }}</span>
+                  <RouterLink to="/workout" class="active-plan-btn">{{ item.actionLabel }}</RouterLink>
+                </div>
               </li>
             </ul>
-            <p v-else class="empty-state">No active plans</p>
+            <p v-else class="empty">No active plans yet</p>
           </article>
         </section>
 
-        <section class="charts-grid">
+        <section class="double-col charts">
           <article class="panel">
-            <h3>Weekly Activity</h3>
-            <div v-if="weeklyWorkoutData.length" class="bar-chart">
-              <div v-for="item in weeklyWorkoutData" :key="item.day" class="bar-item" :title="weeklyWorkoutHint(item)">
-                <div class="bar-track">
-                  <div class="bar-fill" :style="{ height: `${item.rate}%` }"></div>
+            <h2>Weekly Activity</h2>
+            <div v-if="weeklyHasData" class="weekly-chart">
+              <div v-for="item in weeklyActivityData" :key="item.day" class="weekly-item">
+                <div class="weekly-track">
+                  <div class="weekly-fill" :style="{ height: `${Math.min(100, (item.completed / weeklyMaxTasks) * 100)}%` }"></div>
                 </div>
                 <span>{{ item.day }}</span>
-                <small>{{ formatCount(item.completed) }} / {{ formatCount(item.total) }}</small>
+                <small>{{ item.completed }} / {{ item.total }}</small>
               </div>
             </div>
-            <p v-else class="empty-state">No data yet</p>
+            <div v-else class="chart-empty">
+              <p>No activity yet</p>
+              <p>Start tracking to see insights</p>
+            </div>
           </article>
 
           <article class="panel">
-            <h3>Calories In vs Out</h3>
-            <div v-if="caloriesInVsOut.length" class="double-bar-chart">
-              <div v-for="item in caloriesInVsOutData" :key="item.day" class="double-row">
-                <span class="day-label">{{ item.day }}</span>
-                <div class="double-bars">
-                  <div class="in-bar" :style="{ width: `${(item.in / caloriesInVsOutMax) * 100}%` }"></div>
-                  <div class="out-bar" :style="{ width: `${(item.out / caloriesInVsOutMax) * 100}%` }"></div>
+            <h2>Calories In vs Out</h2>
+            <div v-if="inOutHasData" class="inout-chart">
+              <div v-for="item in caloriesInOutData" :key="item.day" class="inout-row">
+                <span class="day">{{ item.day }}</span>
+                <div class="bars">
+                  <div class="bar in" :style="{ width: `${(item.in / inOutMax) * 100}%` }"></div>
+                  <div class="bar out" :style="{ width: `${(item.out / inOutMax) * 100}%` }"></div>
                 </div>
-                <span class="double-values">{{ inOutLabel(item) }}</span>
+                <span class="value">{{ Math.round(item.in) }} / {{ Math.round(item.out) }} kcal</span>
               </div>
             </div>
-            <p v-else class="empty-state">No data yet</p>
-          </article>
-        </section>
-
-        <section class="bottom-grid">
-          <article class="panel">
-            <h3>Recent Activity</h3>
-            <div v-if="groupedActivity.length" class="activity-timeline">
-              <section v-for="group in groupedActivity" :key="group.label" class="activity-group">
-                <h4>{{ group.label }}</h4>
-                <ul>
-                  <li v-for="item in group.items" :key="`${item.type}-${item.title}-${item.time}`" class="activity-row">
-                    <span class="activity-icon">{{ activityIcon(item.type) }}</span>
-                    <span class="activity-text">{{ activityText(item) }}</span>
-                    <span class="activity-time">{{ activityTime(item) }}</span>
-                  </li>
-                </ul>
-              </section>
-            </div>
-            <p v-else class="empty-state">No activity yet. Start your first workout or log a meal!</p>
-          </article>
-
-          <article class="panel">
-            <h3>Quick Actions</h3>
-            <div class="actions actions-two-col">
-              <RouterLink to="/workout" class="action-btn">Start Workout</RouterLink>
-              <RouterLink to="/diet" class="action-btn">Log Meal</RouterLink>
-              <RouterLink to="/schedule" class="action-btn">View Schedule</RouterLink>
-              <RouterLink to="/profile" class="action-btn">Update Profile</RouterLink>
+            <div v-else class="chart-empty">
+              <p>No activity yet</p>
+              <p>Start tracking to see insights</p>
             </div>
           </article>
         </section>
 
-        <section class="panel insight-panel">
-          <h3>Smart Insight</h3>
-          <ul>
-            <li v-for="insight in smartInsights" :key="insight">{{ insight }}</li>
+        <section class="double-col">
+          <article class="panel">
+            <h2>Recent Activity</h2>
+            <ul v-if="recentActivities.length" class="activity-list">
+              <li v-for="item in recentActivities" :key="item.id">
+                <span class="icon">{{ activityIcon(item.type) }}</span>
+                <span class="main">{{ item.type }}: {{ item.title }}</span>
+                <span class="detail">{{ item.detail }}</span>
+                <span class="at">{{ formatClock(item.time) }}</span>
+              </li>
+            </ul>
+            <p v-else class="empty">No recent activity yet</p>
+          </article>
+
+          <article class="panel">
+            <h2>Quick Actions</h2>
+            <div class="quick-grid">
+              <RouterLink to="/workout" class="quick-btn">Start Workout</RouterLink>
+              <RouterLink to="/diet" class="quick-btn">Log Meal</RouterLink>
+              <RouterLink to="/schedule" class="quick-btn">View Schedule</RouterLink>
+              <RouterLink to="/profile" class="quick-btn">Update Profile</RouterLink>
+            </div>
+          </article>
+        </section>
+
+        <section class="insight-card">
+          <h2>Smart Insight</h2>
+          <ul v-if="smartInsights.length">
+            <li v-for="line in smartInsights" :key="line">{{ line }}</li>
           </ul>
+          <p v-else class="empty">No insight yet</p>
         </section>
       </template>
     </section>
@@ -696,121 +727,164 @@ watch(
 .dashboard-wrap {
   min-height: calc(100vh - 72px);
   padding: 24px 16px 40px;
-  background: #f5f7f8;
+  background: #f5fbf8;
   display: flex;
   justify-content: center;
 }
 
 .dashboard-shell {
   width: 100%;
-  max-width: 1120px;
+  max-width: 1240px;
   display: grid;
-  gap: 18px;
+  gap: 20px;
 }
 
-.hero {
+.hero-card {
+  border-radius: 24px;
+  padding: 28px 24px;
   text-align: center;
-  border-radius: 18px;
-  padding: 24px 16px;
-  color: #2f4858;
-  background: linear-gradient(120deg, #a7f2ad 0%, #70d1ac 35%, #48aea4 60%, #348b93 80%, #316879 100%);
-  box-shadow: 0 12px 24px rgba(49, 104, 121, 0.18);
+  background: linear-gradient(135deg, #a7f2ad 0%, #70d1ac 35%, #48aea4 65%, #316879 100%);
+  box-shadow: 0 14px 26px rgba(47, 72, 88, 0.2);
 }
 
-.hero h1 {
+.hero-kicker {
   margin: 0;
-  font-size: clamp(26px, 4vw, 36px);
+  color: #ffffff;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
 }
 
-.hero p {
+.hero-card h1 {
   margin: 8px 0 0;
-  font-size: 15px;
+  color: #ffffff;
+  font-size: clamp(32px, 4vw, 44px);
+  font-weight: 800;
 }
 
 .hero-summary {
-  margin-top: 10px;
+  margin: 10px 0 0;
+  color: #ffffff;
+  font-size: 15px;
   font-weight: 700;
-  color: #2f4858;
 }
 
-.summary-grid {
+.hero-progress {
+  margin: 6px 0 0;
+  color: #f0fbf6;
+  font-size: 14px;
+}
+
+.hero-action {
+  margin-top: 12px;
+  display: inline-block;
+  text-decoration: none;
+  border-radius: 999px;
+  padding: 9px 18px;
+  color: #2f4858;
+  font-weight: 700;
+  background: linear-gradient(120deg, #ffffff 0%, #d6fbec 100%);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.hero-action:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 16px rgba(47, 72, 88, 0.16);
+}
+
+.stats-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 14px;
 }
 
-.summary-card {
-  border-radius: 14px;
+.stat-card {
+  border-radius: 18px;
   padding: 14px;
-  background: linear-gradient(160deg, #ffffff 0%, #a7f2ad 100%);
-  border: 1px solid #70d1ac;
-  box-shadow: 0 8px 18px rgba(47, 72, 88, 0.08);
+  background: linear-gradient(160deg, #f7fffb 0%, #dff6ec 100%);
+  border: 1px solid #cbe7db;
+  box-shadow: 0 7px 16px rgba(47, 72, 88, 0.09);
 }
 
-.summary-card h3 {
+.stat-card h3 {
   margin: 0;
-  color: #316879;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.summary-value {
-  margin: 10px 0 0;
   color: #2f4858;
-  font-size: 28px;
-  font-weight: 800;
+  font-size: 13px;
+}
+
+.stat-value {
+  margin: 9px 0 0;
+  color: #2f4858;
+  font-size: 34px;
   line-height: 1;
+  font-weight: 800;
 }
 
-.summary-sub {
+.stat-sub {
   margin: 8px 0 0;
+  color: #6b7280;
   font-size: 12px;
-  color: #316879;
 }
 
-.workout-progress-track {
+.progress-track {
   margin-top: 8px;
   height: 8px;
   border-radius: 999px;
-  background: #d9eeea;
+  background: #ddefe9;
   overflow: hidden;
 }
 
-.workout-progress-fill {
+.progress-fill {
   height: 100%;
   border-radius: 999px;
-  background: linear-gradient(90deg, #48aea4 0%, #2f4858 100%);
-  transition: width 0.2s ease;
+  background: linear-gradient(90deg, #48aea4 0%, #316879 100%);
 }
 
-.focus-panel {
-  background: linear-gradient(130deg, #ffffff 0%, #f4fffa 100%);
+.panel {
+  border-radius: 18px;
+  padding: 20px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 6px 14px rgba(47, 72, 88, 0.07);
 }
 
-.focus-head {
+.panel h2,
+.insight-card h2 {
+  margin: 0;
+  color: #2f4858;
+  font-size: 31px;
+  font-weight: 700;
+}
+
+.panel-head {
   display: flex;
   justify-content: space-between;
-  align-items: center;
   gap: 12px;
+  align-items: center;
 }
 
-.focus-head h3 {
-  margin: 0;
-}
-
-.focus-head p {
-  margin: 4px 0 0;
-  color: #316879;
+.panel-head p {
+  margin: 6px 0 0;
+  color: #6b7280;
   font-size: 13px;
 }
 
-.focus-btn {
+.panel-action {
   text-decoration: none;
-  padding: 10px 14px;
-  border-radius: 10px;
-  color: #2f4858;
+  border-radius: 14px;
+  padding: 9px 14px;
+  color: #ffffff;
+  font-size: 13px;
   font-weight: 700;
-  background: linear-gradient(120deg, #a7f2ad 0%, #70d1ac 45%, #48aea4 100%);
+  background: linear-gradient(120deg, #48aea4 0%, #316879 100%);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.panel-action:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 14px rgba(47, 72, 88, 0.16);
 }
 
 .focus-grid {
@@ -821,275 +895,426 @@ watch(
 }
 
 .focus-item {
-  border-radius: 10px;
+  border-radius: 12px;
+  border: 1px solid #dde7e4;
+  background: #f9fbfb;
   padding: 10px;
-  border: 1px solid #70d1ac;
-  background: #ffffff;
 }
 
 .focus-item strong {
   color: #2f4858;
+  font-size: 13px;
 }
 
 .focus-item p {
   margin: 6px 0 0;
-  color: #316879;
+  color: #4b5563;
   font-size: 13px;
 }
 
-.summary-panel h3 {
-  margin-bottom: 8px;
-}
-
-.summary-lines {
-  margin: 0;
+.summary-panel ul,
+.insight-card ul {
+  margin: 12px 0 0;
   padding-left: 18px;
-  color: #316879;
+  color: #4b5563;
   font-size: 13px;
   display: grid;
-  gap: 4px;
+  gap: 5px;
 }
 
-.charts-grid {
+.double-col {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
 }
 
-.panel {
-  background: #ffffff;
-  border: 1px solid #70d1ac;
-  border-radius: 14px;
-  padding: 14px;
-  box-shadow: 0 8px 18px rgba(47, 72, 88, 0.07);
+.simple-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
 }
 
-.panel h3 {
-  margin: 0 0 12px;
+.simple-list li {
+  border-radius: 10px;
+  border: 1px solid #e8ebef;
+  background: #f8fbfa;
+  padding: 8px 10px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 9px;
+  align-items: center;
+}
+
+.simple-list .time {
   color: #2f4858;
+  font-size: 12px;
+  font-weight: 700;
 }
 
-.bar-chart {
+.simple-list .title {
+  color: #4b5563;
+  font-size: 13px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.simple-list .type {
+  color: #4b5563;
+  font-size: 11px;
+  border-radius: 999px;
+  background: #eef4f2;
+  border: 1px solid #d9e6e2;
+  padding: 3px 8px;
+}
+
+.active-plan-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 16px;
+}
+
+.active-plan-card {
+  background: #ffffff;
+  border-radius: 12px;
+  border: 1px solid rgba(112, 209, 172, 0.42);
+  box-shadow: 0 6px 14px rgba(47, 72, 88, 0.07);
+  padding: 16px;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.active-plan-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 18px rgba(47, 72, 88, 0.12);
+}
+
+.active-plan-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.active-plan-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.active-plan-title {
+  color: #316879;
+  font-weight: 600;
+  font-size: 15px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.active-plan-day {
+  color: #348b93;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  background: rgba(167, 242, 173, 0.24);
+  border: 1px solid #a7f2ad;
+  padding: 2px 8px;
+}
+
+.active-plan-status {
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+.active-plan-status.is-in_progress {
+  background: #70d1ac;
+  color: #ffffff;
+  border: 1px solid #70d1ac;
+}
+
+.active-plan-status.is-completed {
+  background: #348b93;
+  color: #ffffff;
+  border: 1px solid #348b93;
+}
+
+.active-plan-status.is-not_started {
+  background: transparent;
+  color: #316879;
+  border: 1px solid #316879;
+}
+
+.active-plan-track {
+  margin-top: 10px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(49, 104, 121, 0.14);
+  overflow: hidden;
+}
+
+.active-plan-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #a7f2ad 0%, #48aea4 100%);
+}
+
+.active-plan-foot {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 10px;
+  color: rgba(49, 104, 121, 0.78);
+  font-size: 12px;
+}
+
+.active-plan-btn {
+  justify-self: end;
+  text-decoration: none;
+  border-radius: 8px;
+  padding: 7px 12px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  background: #48aea4;
+  border: 1px solid #48aea4;
+  transition: filter 0.18s ease;
+}
+
+.active-plan-btn:hover {
+  filter: brightness(0.96);
+}
+
+.charts .panel {
+  min-height: 260px;
+}
+
+.weekly-chart {
+  margin-top: 12px;
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
   align-items: end;
   gap: 8px;
-  min-height: 150px;
+  min-height: 160px;
 }
 
-.bar-item {
+.weekly-item {
   text-align: center;
 }
 
-.bar-track {
-  height: 110px;
+.weekly-track {
+  height: 108px;
   border-radius: 10px;
-  background: #e5efed;
+  background: #e8eff0;
+  padding: 3px;
   display: flex;
   align-items: end;
-  padding: 3px;
 }
 
-.bar-fill {
+.weekly-fill {
   width: 100%;
-  border-radius: 8px;
-  background: linear-gradient(180deg, #48aea4 0%, #2f4858 100%);
+  border-radius: 7px;
+  background: linear-gradient(180deg, #48aea4 0%, #316879 100%);
 }
 
-.bar-item span {
-  margin-top: 5px;
+.weekly-item span {
+  margin-top: 6px;
   display: block;
-  color: #316879;
   font-size: 12px;
+  color: #4b5563;
 }
 
-.bar-item small {
+.weekly-item small {
   font-size: 11px;
-  color: #2f4858;
+  color: #6b7280;
 }
 
-.double-bar-chart {
+.chart-empty {
+  margin-top: 16px;
+}
+
+.chart-empty p {
+  margin: 0;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.chart-empty p + p {
+  margin-top: 4px;
+}
+
+.inout-chart {
+  margin-top: 12px;
   display: grid;
   gap: 8px;
 }
 
-.double-row {
+.inout-row {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) 95px;
+  grid-template-columns: 38px minmax(0, 1fr) 112px;
   gap: 8px;
   align-items: center;
 }
 
-.day-label {
-  color: #316879;
+.inout-row .day {
+  color: #4b5563;
   font-size: 12px;
 }
 
-.double-bars {
+.inout-row .bars {
   display: grid;
   gap: 4px;
 }
 
-.double-values {
-  font-size: 11px;
-  color: #2f4858;
-}
-
-.in-bar,
-.out-bar {
+.inout-row .bar {
   height: 10px;
   border-radius: 999px;
 }
 
-.in-bar {
+.inout-row .bar.in {
   background: linear-gradient(90deg, #a7f2ad 0%, #70d1ac 100%);
 }
 
-.out-bar {
-  background: linear-gradient(90deg, #348b93 0%, #2f4858 100%);
+.inout-row .bar.out {
+  background: linear-gradient(90deg, #348b93 0%, #316879 100%);
 }
 
-.bottom-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+.inout-row .value {
+  color: #6b7280;
+  font-size: 11px;
 }
 
-.upcoming-list {
-  margin: 0;
-  padding: 0;
+.activity-list {
   list-style: none;
-  display: grid;
-  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
 }
 
-.upcoming-list li {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+.activity-list li {
+  display: grid;
+  grid-template-columns: 22px 1fr auto auto;
   gap: 10px;
-  color: #316879;
-  font-size: 13px;
-  border-radius: 8px;
-  padding: 6px 8px;
-  background: #f7fbfa;
-}
-
-.upcoming-time {
-  color: #2f4858;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.activity-timeline {
-  display: grid;
-  gap: 12px;
-}
-
-.activity-group h4 {
-  margin: 0 0 6px;
-  color: #2f4858;
-  font-size: 13px;
-}
-
-.activity-group ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 4px;
-}
-
-.activity-row {
-  display: grid;
-  grid-template-columns: 20px 1fr auto;
   align-items: center;
-  gap: 8px;
-  border-radius: 8px;
-  padding: 6px 8px;
-  transition: background-color 0.15s ease;
+  padding: 10px 0;
+  border-bottom: 1px solid #eee;
 }
 
-.activity-row:hover {
-  background: rgba(112, 209, 172, 0.18);
+.activity-list li:last-child {
+  border-bottom: none;
 }
 
-.activity-icon {
-  color: #348b93;
+.activity-list .icon {
+  font-size: 14px;
 }
 
-.activity-text {
-  color: #316879;
+.activity-list .main {
+  color: #4b5563;
   font-size: 13px;
 }
 
-.activity-time {
-  color: #2f4858;
+.activity-list .detail,
+.activity-list .at {
+  color: #6b7280;
   font-size: 12px;
   white-space: nowrap;
 }
 
-.actions {
+.quick-grid {
+  margin-top: 12px;
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
-.actions-two-col {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.action-btn {
+.quick-btn {
   text-decoration: none;
-  color: #2f4858;
-  font-weight: 700;
   text-align: center;
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 10px 12px;
-  background: linear-gradient(120deg, #a7f2ad 0%, #70d1ac 40%, #48aea4 100%);
-  transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+  color: #2f4858;
+  font-size: 13px;
+  font-weight: 700;
+  background: linear-gradient(130deg, #edf9f3 0%, #d4f1e6 100%);
+  border: 1px solid #cde8dd;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
 }
 
-.action-btn:hover {
+.quick-btn:hover {
   transform: translateY(-1px);
-  filter: brightness(1.02);
-  box-shadow: 0 8px 16px rgba(49, 104, 121, 0.15);
+  box-shadow: 0 9px 12px rgba(47, 72, 88, 0.12);
 }
 
-.insight-panel ul {
-  margin: 8px 0 0;
-  padding-left: 18px;
-  color: #316879;
+.insight-card {
+  border-radius: 18px;
+  padding: 20px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 6px 14px rgba(47, 72, 88, 0.07);
 }
 
-.insight-panel li {
-  margin: 6px 0;
-}
-
-.empty-state {
-  margin: 0;
-  color: #316879;
+.empty {
+  margin: 12px 0 0;
+  color: #6b7280;
   font-size: 13px;
 }
 
 .loading {
   text-align: center;
-  color: #2f4858;
-  padding: 20px;
+  color: #4b5563;
 }
 
-@media (max-width: 900px) {
-  .charts-grid,
-  .bottom-grid {
-    grid-template-columns: 1fr;
+@media (max-width: 1100px) {
+  .stats-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+}
 
+@media (max-width: 860px) {
+  .double-col,
   .focus-grid {
     grid-template-columns: 1fr;
   }
 
-  .actions-two-col {
+  .stats-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .dashboard-wrap {
+    padding: 16px 12px 24px;
+  }
+
+  .hero-card {
+    padding: 22px 16px;
+  }
+
+  .stats-row {
     grid-template-columns: 1fr;
   }
 
+  .panel-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .quick-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .activity-list li {
+    grid-template-columns: 20px 1fr;
+  }
+
+  .activity-list .detail,
+  .activity-list .at {
+    grid-column: 2;
+  }
 }
 </style>

@@ -8,11 +8,16 @@ const route = useRoute();
 const router = useRouter();
 
 const planId = ref(String(route.query.planId || ""));
+const scheduleItemId = ref(String(route.query.scheduleItemId || ""));
+const sessionMode = ref(String(route.query.sessionMode || ""));
+const courseEnrolledId = ref(String(route.query.courseEnrolledId || ""));
+const courseExerciseId = ref(String(route.query.courseExerciseId || ""));
 const selectedDate = ref(String(route.query.date || new Date().toISOString().slice(0, 10)));
 const exerciseName = ref(String(route.query.exercise || ""));
 const durationMinutes = ref(Number(route.query.duration || 0));
 const category = ref(String(route.query.category || ""));
 const initialRemainingSeconds = ref(Number(route.query.remaining || 0));
+const estimatedBurn = ref(Number(route.query.estimatedBurn || 0));
 
 const started = ref(false);
 const running = ref(false);
@@ -21,6 +26,9 @@ const error = ref("");
 const doneMessage = ref("");
 
 const totalSeconds = computed(() => Math.max(0, Number(durationMinutes.value) * 60));
+const isCourseExerciseSession = computed(
+  () => sessionMode.value === "course_exercise" && Boolean(courseEnrolledId.value) && Boolean(courseExerciseId.value)
+);
 const remainingSeconds = ref(0);
 let timerId = null;
 
@@ -72,18 +80,38 @@ async function loadTaskFallback() {
 }
 
 async function finishWorkout(autoDone = false) {
-  if (!planId.value || submitting.value) return;
+  if ((!planId.value && !scheduleItemId.value && !isCourseExerciseSession.value) || submitting.value) return;
   submitting.value = true;
   stopInterval();
   running.value = false;
   try {
     const isCompleted = autoDone || remainingSeconds.value <= 0;
-    await api.post("/workout/today/status", {
-      workout_plan_id: planId.value,
+    if (isCourseExerciseSession.value) {
+      await api.post("/courses/progress", {
+        enrolled_course_id: courseEnrolledId.value,
+        date: selectedDate.value,
+        exercise_id: courseExerciseId.value,
+        exercise_status: isCompleted ? "completed" : "in_progress",
+      });
+      doneMessage.value = isCompleted
+        ? "Course exercise completed!"
+        : "Progress saved. Continue this course exercise later.";
+      setTimeout(() => {
+        router.push({ path: "/workout", query: { date: selectedDate.value } });
+      }, 900);
+      return;
+    }
+    const payload = {
       date: selectedDate.value,
       is_completed: isCompleted,
       remaining_seconds: isCompleted ? 0 : remainingSeconds.value,
-    });
+    };
+    if (scheduleItemId.value) {
+      payload.schedule_item_id = scheduleItemId.value;
+    } else {
+      payload.workout_plan_id = planId.value;
+    }
+    await api.post("/workout/today/status", payload);
     doneMessage.value = isCompleted
       ? "Workout completed!"
       : "Progress saved. You can continue this workout later.";
@@ -127,6 +155,7 @@ onBeforeUnmount(() => {
       <div class="meta">
         <p><strong>Exercise:</strong> {{ exerciseName || "-" }}</p>
         <p><strong>Duration:</strong> {{ durationMinutes || 0 }} min</p>
+        <p><strong>Estimated Burn:</strong> {{ Math.max(0, Math.round(estimatedBurn || 0)) }} kcal</p>
         <p><strong>Date:</strong> {{ selectedDate }}</p>
         <p v-if="category"><strong>Category:</strong> {{ category }}</p>
       </div>
@@ -137,7 +166,7 @@ onBeforeUnmount(() => {
         <button v-if="!started" type="button" class="btn-primary" @click="startTimer">Start</button>
         <button v-else-if="running" type="button" class="btn-muted" @click="pauseTimer">Pause</button>
         <button v-else type="button" class="btn-primary" @click="startTimer">Resume</button>
-        <button type="button" class="btn-finish" :disabled="submitting" @click="finishWorkout(false)">Finish</button>
+        <button type="button" class="btn-finish" :disabled="submitting" @click="finishWorkout(true)">Complete Early</button>
         <button type="button" class="btn-muted" @click="goBack">Cancel</button>
       </div>
 

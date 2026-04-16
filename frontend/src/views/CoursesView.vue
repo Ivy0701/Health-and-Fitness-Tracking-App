@@ -1,39 +1,24 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
-import { useRouter } from "vue-router";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
-import { useFavorites } from "../services/favorites";
 import { useAuthStore } from "../stores/auth";
-import {
-  dropCourseEnrollment as dropCourseEnrollmentApi,
-  enrollCourse as enrollCourseApi,
-  fetchCourses,
-  fetchEnrolledCourses,
-} from "../services/courses";
+import { useFavorites } from "../services/favorites";
+import { dropCourseEnrollment as dropCourseEnrollmentApi, enrollCourse as enrollCourseApi, fetchCourses, fetchEnrolledCourses } from "../services/courses";
 import { expandCourseToPlannedItemsInRange } from "../utils/weekSchedule";
 
 const router = useRouter();
+const route = useRoute();
 const auth = useAuthStore();
-const { isFavorited, toggleFavorite, ensureFavoritesLoaded } = useFavorites();
+const { ensureFavoritesLoaded, isFavorited, toggleFavorite } = useFavorites();
 
 const courses = ref([]);
 const enrolledCourseRows = ref([]);
-const workoutPlans = ref([]);
 const state = ref({ error: "" });
 const removingPlanIds = ref(new Set());
 const planActionNotice = ref("");
-const customPlanSaving = ref(false);
-
-const customPlanForm = reactive({
-  title: "",
-  category: "Cardio",
-  durationPerDay: 30,
-  days: 7,
-  startDate: "",
-  fixedTime: "",
-  note: "",
-});
+const activeModalCourseId = ref("");
 
 function dateKey(date = new Date()) {
   const y = date.getFullYear();
@@ -49,17 +34,11 @@ function daysSince(startDateRaw) {
   return Math.max(1, diff);
 }
 
-function difficultyLabel(value) {
-  const key = String(value || "beginner");
-  return key.charAt(0).toUpperCase() + key.slice(1);
-}
-
 function displayPlanName(input) {
-  const invalidNames = new Set(["untitled plan", "course plan", "workout plan"]);
-  const candidates = [input?.title, input?.name, input?.planName, input?.courseName, input?.exerciseName, input?.exercise_name];
-  for (const v of candidates) {
-    const t = String(v || "").trim();
-    if (t && !invalidNames.has(t.toLowerCase())) return t;
+  const candidates = [input?.title, input?.name, input?.planName, input?.courseName];
+  for (const value of candidates) {
+    const text = String(value || "").trim();
+    if (text) return text;
   }
   return "";
 }
@@ -81,22 +60,45 @@ async function refreshEnrolled() {
   enrolledCourseRows.value = Array.isArray(rows) ? rows : [];
 }
 
-async function loadWorkoutPlans() {
-  const rows = await api.get("/workout/plan").then((r) => r.data).catch(() => []);
-  workoutPlans.value = Array.isArray(rows) ? rows : [];
+function courseFavoriteId(course) {
+  return String(course?.id || course?._id || "");
 }
 
-const recommendedPlans = computed(() =>
-  [...courses.value]
-    .sort((a, b) => Number(Boolean(b.isFeatured)) - Number(Boolean(a.isFeatured)))
-    .slice(0, 6)
+function isCourseFavorited(course) {
+  return Boolean(courseFavoriteId(course) && isFavorited("course", courseFavoriteId(course)));
+}
+
+async function toggleCourseFavorite(course) {
+  if (!course) return;
+  await toggleFavorite({
+    itemType: "course",
+    itemId: courseFavoriteId(course),
+    title: course.title,
+    description: course.description,
+    metadata: {
+      durationDays: Number(course.durationDays || 0),
+      difficulty: difficultyStars(course.difficulty),
+      category: course.category || "",
+    },
+    sourceType: "course_center",
+  });
+}
+
+const difficultyColumns = [1, 2, 3, 4, 5];
+const visibleCourses = computed(() =>
+  (courses.value || []).filter((course) => {
+    const title = String(course?.title || course?.name || "").trim().toLowerCase();
+    const minutesPerDay = Number(course?.minutesPerDay || course?.duration || 0);
+    if (title === "run" && minutesPerDay <= 1) return false;
+    return true;
+  })
 );
 
 const activePlans = computed(() => {
-  const coursePlans = (enrolledCourseRows.value || [])
+  return (enrolledCourseRows.value || [])
     .filter((row) => row && row.status === "active")
     .map((row) => {
-      const totalDays = Number(row?.course_id?.duration_days || row?.duration_days || 7);
+      const totalDays = Number(row?.course_id?.duration_days || row?.course_id?.durationDays || row?.duration_days || 7);
       const current = Math.max(1, Number(row.current_day || 1));
       const title = displayPlanName({
         title: row?.course_id?.title || row?.title,
@@ -109,43 +111,37 @@ const activePlans = computed(() => {
         id: `course-${row._id || row.id}`,
         type: "course",
         title,
+        course: courses.value.find((course) => String(course.id) === String(row?.course_id?._id || row?.course_id || "")) || null,
         progress: `Day ${Math.min(current, totalDays)} / ${totalDays}`,
         status: "In Progress",
         startDate,
         endDate: endDateByDuration(startDate, totalDays),
-        fixedTime: "",
         courseId: String(row?.course_id?._id || row?.course_id || ""),
         focusDate: row?.start_date || dateKey(new Date()),
         enrolledRow: row,
       };
     })
     .filter(Boolean);
-
-  const customPlans = (workoutPlans.value || [])
-    .map((plan) => {
-      const totalDays = Number(plan.days || 0);
-      const elapsed = daysSince(plan.start_date || plan.created_at);
-      if (totalDays > 0 && elapsed > totalDays) return null;
-      const title = displayPlanName({ title: plan.title, exerciseName: plan.exercise_name });
-      if (!title) return null;
-      const startDate = dateKey(new Date(plan.start_date || plan.created_at || new Date()));
-      return {
-        id: `custom-${plan._id || plan.id}`,
-        type: "custom",
-        title,
-        progress: totalDays > 0 ? `Day ${Math.min(elapsed, totalDays)} / ${totalDays}` : "In Progress",
-        status: "In Progress",
-        startDate,
-        endDate: endDateByDuration(startDate, totalDays || 1),
-        fixedTime: String(plan.fixed_time || "").slice(0, 5),
-        focusDate: startDate,
-        planRow: plan,
-      };
-    })
-    .filter(Boolean);
-
-  return [...coursePlans, ...customPlans].slice(0, 6);
 });
+
+const activeCourseIds = computed(() => new Set(activePlans.value.map((row) => String(row.courseId || ""))));
+const activeModalCourse = computed(() => visibleCourses.value.find((course) => String(course.id) === String(activeModalCourseId.value)) || null);
+
+function difficultyStars(value) {
+  const n = Math.max(1, Math.min(5, Number(value || 1)));
+  return "★".repeat(n);
+}
+
+function coursesByTier(list) {
+  return difficultyColumns.map((difficulty) => ({
+    difficulty,
+    title: `${difficulty}★`,
+    items: list.filter((course) => Number(course.difficulty || 1) === difficulty),
+  }));
+}
+
+const vipColumns = computed(() => coursesByTier(visibleCourses.value.filter((course) => course.isVipOnly)));
+const standardColumns = computed(() => coursesByTier(visibleCourses.value.filter((course) => !course.isVipOnly)));
 
 function pushScheduleFocusQuery({ title = "", date = "", courseId = "" } = {}) {
   router.push({
@@ -159,16 +155,18 @@ function pushScheduleFocusQuery({ title = "", date = "", courseId = "" } = {}) {
 }
 
 async function ensureCourseScheduled(row) {
-  const course = courses.value.find((c) => String(c._id) === String(row.courseId));
-  if (!course) return;
+  const course = visibleCourses.value.find((c) => String(c._id) === String(row.courseId));
+  const resolvedCourse = course || visibleCourses.value.find((c) => String(c.id) === String(row.courseId));
+  const pickedCourse = resolvedCourse || row.course || null;
+  if (!pickedCourse) return;
   const me = await api.get("/users/me").then((r) => r.data);
   const schedules = await api.get(`/schedules/${me.id}`).then((r) => r.data || []);
   const today = dateKey(new Date());
   const exists = schedules.some((it) => String(it.courseId || "") === String(row.courseId) && String(it.date || "") >= today);
   if (exists) return;
   const end = new Date(`${today}T00:00:00`);
-  end.setDate(end.getDate() + Math.max(1, Number(course.duration_days || 7)) - 1);
-  const sessions = expandCourseToPlannedItemsInRange(course, today, dateKey(end));
+  end.setDate(end.getDate() + Math.max(1, Number(pickedCourse.durationDays || pickedCourse.duration_days || 7)) - 1);
+  const sessions = expandCourseToPlannedItemsInRange(pickedCourse, today, dateKey(end));
   const items = sessions.map((s, idx) => ({
     title: s.title,
     itemType: "course",
@@ -176,63 +174,26 @@ async function ensureCourseScheduled(row) {
     date: s.date,
     time: s.time,
     note: s.note,
-    category: course.category || "Course",
-    courseId: course._id,
+    category: pickedCourse.category || "Course",
+    courseId: pickedCourse.id || pickedCourse._id,
     durationMinutes: s.durationMinutes,
     overlapAccepted: true,
   }));
   if (items.length) await api.post("/schedules/batch", { userId: me.id, items });
 }
 
-async function ensureCustomScheduled(row) {
-  const plan = row.planRow;
-  if (!plan) return;
-  const me = await api.get("/users/me").then((r) => r.data);
-  const schedules = await api.get(`/schedules/${me.id}`).then((r) => r.data || []);
-  const planId = String(plan?._id || plan?.id || "");
-  const title = displayPlanName({ title: plan.title, exerciseName: plan.exercise_name });
-  if (!title) return;
-  const exists = schedules.some(
-    (it) =>
-      String(it.itemType || "") === "workout" &&
-      (String(it?.planId || "") === planId || String(it.title || "").trim() === title)
-  );
-  if (exists) return;
-  const start = dateKey(new Date(plan.start_date || new Date()));
-  const days = Math.max(1, Number(plan.days || 1));
-  const time = String(plan.fixed_time || "07:00").slice(0, 5);
-  const items = [];
-  for (let i = 0; i < days; i += 1) {
-    const d = new Date(`${start}T00:00:00`);
-    d.setDate(d.getDate() + i);
-    items.push({
-      title,
-      itemType: "workout",
-      planId: planId || null,
-      subtitle: `Plan Day ${i + 1}`,
-      date: dateKey(d),
-      time,
-      note: plan.note || "",
-      category: plan.category || "Custom",
-      durationMinutes: Number(plan.duration_per_day || 30),
-      overlapAccepted: true,
-    });
-  }
-  await api.post("/schedules/batch", { userId: me.id, items });
-}
-
 async function enrollPlan(course) {
   state.value.error = "";
   planActionNotice.value = "";
   try {
-    if (course?.isPremium && !auth.vipStatus) {
-      state.value.error = "This is a VIP plan. Upgrade to start it.";
+    if (course?.isVipOnly && !auth.vipStatus) {
+      state.value.error = "This is a VIP course. Upgrade to add it to your plans.";
       return;
     }
-    await enrollCourseApi(course._id);
+    await enrollCourseApi(course.id || course._id);
     const today = dateKey(new Date());
     const end = new Date(`${today}T00:00:00`);
-    end.setDate(end.getDate() + Math.max(1, Number(course.duration_days || 7)) - 1);
+    end.setDate(end.getDate() + Math.max(1, Number(course.durationDays || course.duration_days || 7)) - 1);
     const sessions = expandCourseToPlannedItemsInRange(course, today, dateKey(end));
     const me = await api.get("/users/me").then((r) => r.data);
     const items = sessions.map((s, idx) => ({
@@ -243,78 +204,22 @@ async function enrollPlan(course) {
       time: s.time,
       note: s.note,
       category: course.category || "Course",
-      courseId: course._id,
+      courseId: course.id || course._id,
       durationMinutes: s.durationMinutes,
       overlapAccepted: true,
     }));
     if (items.length) await api.post("/schedules/batch", { userId: me.id, items });
     await refreshEnrolled();
-    planActionNotice.value = "Plan started.";
+    planActionNotice.value = `"${course.title}" added to My Plans.`;
+    activeModalCourseId.value = String(course.id || course._id || "");
   } catch (e) {
-    state.value.error = e?.response?.data?.message || "Failed to start plan.";
-  }
-}
-
-async function createCustomPlan() {
-  state.value.error = "";
-  planActionNotice.value = "";
-  customPlanSaving.value = true;
-  try {
-    const title = String(customPlanForm.title || "").trim();
-    if (!title) throw new Error("Plan title is required.");
-    const startDate = customPlanForm.startDate || dateKey(new Date());
-    const fixedTime = customPlanForm.fixedTime || "07:00";
-    const plan = await api.post("/workout/plan", {
-      exerciseName: title,
-      category: customPlanForm.category || "Custom",
-      durationPerDay: Number(customPlanForm.durationPerDay || 30),
-      days: Number(customPlanForm.days || 7),
-      isCustom: true,
-      startDate,
-      fixedTime,
-      note: customPlanForm.note || "",
-    });
-    const createdPlanId = String(plan?.data?._id || plan?.data?.id || "");
-    const me = await api.get("/users/me").then((r) => r.data);
-    const days = Math.max(1, Number(customPlanForm.days || 1));
-    const items = [];
-    for (let i = 0; i < days; i += 1) {
-      const d = new Date(`${startDate}T00:00:00`);
-      d.setDate(d.getDate() + i);
-      items.push({
-        title,
-        itemType: "workout",
-        planId: createdPlanId || null,
-        subtitle: `Plan Day ${i + 1}`,
-        category: customPlanForm.category || "Custom",
-        date: dateKey(d),
-        time: fixedTime,
-        note: customPlanForm.note || "",
-        durationMinutes: Number(customPlanForm.durationPerDay || 30),
-        overlapAccepted: true,
-      });
-    }
-    await api.post("/schedules/batch", { userId: me.id, items });
-    await Promise.all([loadWorkoutPlans(), refreshEnrolled()]);
-    customPlanForm.title = "";
-    customPlanForm.category = "Cardio";
-    customPlanForm.durationPerDay = 30;
-    customPlanForm.days = 7;
-    customPlanForm.startDate = "";
-    customPlanForm.fixedTime = "";
-    customPlanForm.note = "";
-    if (plan?.data?._id) planActionNotice.value = "Plan created.";
-  } catch (e) {
-    state.value.error = e?.response?.data?.message || e?.message || "Failed to create custom plan.";
-  } finally {
-    customPlanSaving.value = false;
+    state.value.error = e?.response?.data?.message || "Failed to add course to My Plans.";
   }
 }
 
 async function viewPlanInSchedule(row) {
   try {
-    if (row.type === "course") await ensureCourseScheduled(row);
-    if (row.type === "custom") await ensureCustomScheduled(row);
+    await ensureCourseScheduled(row);
     pushScheduleFocusQuery({ title: row.title, date: row.focusDate, courseId: row.courseId });
   } catch (e) {
     state.value.error = e?.response?.data?.message || "Failed to open schedule.";
@@ -329,29 +234,12 @@ async function removeActivePlan(row) {
   planActionNotice.value = "";
   state.value.error = "";
   try {
-    if (row.type === "course") {
-      enrolledCourseRows.value = (enrolledCourseRows.value || []).filter(
-        (it) => String(it?._id || it?.id || "") !== String(row?.enrolledRow?._id || row?.enrolledRow?.id || "")
-      );
-      await dropCourseEnrollmentApi(row.courseId);
-      const me = await api.get("/users/me").then((r) => r.data);
-      const schedules = await api.get(`/schedules/${me.id}`).then((r) => r.data || []);
-      const today = dateKey(new Date());
-      const targets = schedules.filter(
-        (it) =>
-          String(it.date || "") >= today &&
-          !Boolean(it.is_completed) &&
-          String(it.courseId || "") === String(row.courseId)
-      );
-      await Promise.allSettled(targets.map((it) => api.delete(`/schedules/${it._id}`)));
-    } else {
-      const planId = String(row?.planRow?._id || row?.planRow?.id || "");
-      if (!planId) throw new Error("Invalid plan id.");
-      workoutPlans.value = (workoutPlans.value || []).filter((it) => String(it?._id || it?.id || "") !== planId);
-      await api.delete(`/workout/plan/${planId}`);
-    }
-    await Promise.allSettled([loadWorkoutPlans(), refreshEnrolled()]);
-    planActionNotice.value = "Plan removed.";
+    enrolledCourseRows.value = (enrolledCourseRows.value || []).filter(
+      (it) => String(it?._id || it?.id || "") !== String(row?.enrolledRow?._id || row?.enrolledRow?.id || "")
+    );
+    await dropCourseEnrollmentApi(row.courseId);
+    await refreshEnrolled();
+    planActionNotice.value = `"${row.title}" removed from My Plans.`;
   } catch (e) {
     state.value.error = e?.response?.data?.message || e?.message || "Failed to remove plan.";
   } finally {
@@ -361,153 +249,69 @@ async function removeActivePlan(row) {
   }
 }
 
-async function cleanupInvalidUntitledPlans() {
-  const invalidCourseRows = (enrolledCourseRows.value || []).filter((row) => {
-    if (String(row?.status || "") !== "active") return false;
-    const title = displayPlanName({
-      title: row?.course_id?.title || row?.title,
-      name: row?.name,
-      courseName: row?.courseName,
-    });
-    return !title;
-  });
-  const invalidCustomRows = (workoutPlans.value || []).filter((plan) => {
-    const title = displayPlanName({ title: plan?.title, exerciseName: plan?.exercise_name });
-    return !title;
-  });
-  if (!invalidCourseRows.length && !invalidCustomRows.length) return;
-  const me = await api.get("/users/me").then((r) => r.data).catch(() => null);
-  const today = dateKey(new Date());
-
-  for (const row of invalidCourseRows) {
-    const courseId = String(row?.course_id?._id || row?.course_id || "");
-    if (courseId) {
-      await dropCourseEnrollmentApi(courseId).catch(() => null);
-      if (me?.id) {
-        const schedules = await api.get(`/schedules/${me.id}`).then((r) => r.data || []).catch(() => []);
-        const futurePending = schedules.filter(
-          (it) => String(it?.courseId || "") === courseId && String(it?.date || "") >= today && !Boolean(it?.is_completed)
-        );
-        await Promise.allSettled(futurePending.map((it) => api.delete(`/schedules/${it._id}`)));
-      }
-    }
-  }
-  for (const plan of invalidCustomRows) {
-    const planId = String(plan?._id || plan?.id || "");
-    if (planId) await api.delete(`/workout/plan/${planId}`).catch(() => null);
-  }
-  await Promise.allSettled([loadWorkoutPlans(), refreshEnrolled()]);
+function isCourseActive(course) {
+  return activeCourseIds.value.has(String(course?.id || course?._id || ""));
 }
 
-function courseFavoriteState(courseId) {
-  return isFavorited("course", String(courseId || ""));
+function openCourseModal(course) {
+  activeModalCourseId.value = String(course?.id || course?._id || "");
+  state.value.error = "";
 }
 
-async function toggleCourseFavorite(course) {
-  await toggleFavorite({
-    itemType: "course",
-    itemId: String(course._id),
-    title: course.title,
-    description: course.description,
-    metadata: {
-      difficulty: course.difficulty,
-      durationDays: Number(course.duration_days || 7),
-      duration: Number(course.duration || 30),
-      category: course.category || "General",
-      isPremium: Boolean(course.isPremium),
-    },
-    sourceType: "course_catalog",
-  });
+function closeCourseModal() {
+  activeModalCourseId.value = "";
+}
+
+async function handleModalPrimaryAction(course) {
+  if (!course) return;
+  if (course.isVipOnly && !auth.vipStatus) {
+    router.push("/vip");
+    return;
+  }
+  if (isCourseActive(course)) {
+    const row = activePlans.value.find((plan) => String(plan.courseId) === String(course.id));
+    if (row) await removeActivePlan(row);
+    return;
+  }
+  await enrollPlan(course);
+}
+
+async function focusCourseFromQuery() {
+  const focusId = String(route.query.focusItem || "").trim();
+  if (!focusId) return;
+  const target = visibleCourses.value.find((course) => String(course.id || course._id || "") === focusId);
+  if (!target) return;
+  activeModalCourseId.value = String(target.id || target._id || "");
+  await nextTick();
+  const el = document.querySelector(`[data-course-id="${String(target.id || target._id || "")}"]`);
+  if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 onMounted(async () => {
-  await Promise.all([loadCourses(), loadWorkoutPlans(), refreshEnrolled(), ensureFavoritesLoaded()]);
-  await cleanupInvalidUntitledPlans();
+  await Promise.all([loadCourses(), refreshEnrolled(), ensureFavoritesLoaded()]);
+  await focusCourseFromQuery();
 });
+
+watch(
+  () => route.query.focusItem,
+  async () => {
+    await focusCourseFromQuery();
+  }
+);
 </script>
 
 <template>
   <AppNavbar />
   <main class="page courses-page">
     <h2 class="title">Courses</h2>
-
-    <section class="panel section-block">
-      <h3 class="section-title">Recommended Plans</h3>
-      <p class="section-subtitle">Choose a long-term plan to start today.</p>
-      <div class="recommended-grid">
-        <article v-for="plan in recommendedPlans" :key="plan._id" class="recommended-card">
-          <h4>{{ plan.title }}</h4>
-          <p class="meta-line">Category: {{ plan.category || "General" }}</p>
-          <p class="meta-line">Duration: {{ plan.duration_days || 7 }} days</p>
-          <p class="meta-line">Minutes/day: {{ plan.duration || 30 }}</p>
-          <p class="meta-line">Difficulty: {{ difficultyLabel(plan.difficulty) }}</p>
-          <div class="row-actions">
-            <button type="button" class="btn-primary" @click="enrollPlan(plan)">Start Plan</button>
-            <button type="button" class="btn-muted" @click="toggleCourseFavorite(plan)">
-              {{ courseFavoriteState(plan._id) ? "Saved" : "Add to Favorites" }}
-            </button>
-          </div>
-        </article>
-      </div>
-    </section>
-
-    <section class="panel section-block">
-      <h3 class="section-title">Create Your Own Plan</h3>
-      <p class="section-subtitle">Create a custom long-term plan that starts from today.</p>
-      <form class="create-plan-form" novalidate @submit.prevent="createCustomPlan">
-        <div class="form-row two-col">
-          <label class="field-group">
-            <span class="lbl">Plan name</span>
-            <input v-model.trim="customPlanForm.title" placeholder="e.g. My Running Plan" />
-          </label>
-          <label class="field-group">
-            <span class="lbl">Category</span>
-            <select v-model="customPlanForm.category">
-              <option>Cardio</option>
-              <option>Strength</option>
-              <option>Flexibility</option>
-              <option>Recovery</option>
-              <option>HIIT</option>
-              <option>Custom</option>
-            </select>
-          </label>
-        </div>
-        <div class="form-row two-col">
-          <label class="field-group">
-            <span class="lbl">Minutes/day</span>
-            <input v-model.number="customPlanForm.durationPerDay" type="number" min="1" />
-          </label>
-          <label class="field-group">
-            <span class="lbl">Duration days</span>
-            <input v-model.number="customPlanForm.days" type="number" min="1" max="30" />
-          </label>
-        </div>
-        <div class="form-row two-col">
-          <label class="field-group">
-            <span class="lbl">Start date</span>
-            <input v-model="customPlanForm.startDate" type="date" />
-          </label>
-          <label class="field-group">
-            <span class="lbl">Fixed time (optional)</span>
-            <input v-model="customPlanForm.fixedTime" type="time" />
-          </label>
-        </div>
-        <label class="field-group">
-          <span class="lbl">Note</span>
-          <input v-model="customPlanForm.note" placeholder="Optional note" />
-        </label>
-        <button type="submit" class="btn-primary create-submit-btn" :disabled="customPlanSaving">
-          {{ customPlanSaving ? "Creating..." : "Create Plan" }}
-        </button>
-      </form>
-    </section>
+    <p class="page-subtitle">Browse all available training programs and choose a plan that suits your goal.</p>
 
     <section class="panel section-block">
       <h3 class="section-title">My Active Plans</h3>
       <p class="section-subtitle">Your ongoing long-term plans.</p>
       <p v-if="planActionNotice" class="ok-msg">{{ planActionNotice }}</p>
       <p v-if="state.error" class="error">{{ state.error }}</p>
-      <div v-if="activePlans.length" class="active-plans-grid">
+      <div v-if="activePlans.length" class="active-plans-grid compact-active-grid">
         <article v-for="row in activePlans" :key="row.id" class="active-plan-card">
           <div class="active-card-content">
             <h4>{{ row.title }}</h4>
@@ -515,7 +319,6 @@ onMounted(async () => {
             <span class="badge status-badge">{{ row.status }}</span>
             <p class="meta-line">Start: {{ row.startDate }}</p>
             <p class="meta-line">End: {{ row.endDate }}</p>
-            <p v-if="row.fixedTime" class="meta-line">Time: {{ row.fixedTime }} daily</p>
           </div>
           <div class="row-actions">
             <button type="button" class="btn-primary" @click="router.push('/workout')">Go to Workout</button>
@@ -533,6 +336,119 @@ onMounted(async () => {
       </div>
       <p v-else class="hint">No active plans yet.</p>
     </section>
+
+    <section class="panel section-block">
+      <h3 class="section-title">Standard Courses</h3>
+      <p class="section-subtitle">Open to all users, grouped by difficulty.</p>
+      <div class="difficulty-board">
+        <section v-for="col in standardColumns" :key="`std-${col.difficulty}`" class="difficulty-column">
+          <div class="difficulty-head">
+            <strong>{{ col.title }}</strong>
+            <span>{{ col.items.length }} courses</span>
+          </div>
+          <div class="difficulty-list">
+            <button
+              v-for="course in col.items"
+              :key="course.id"
+              type="button"
+              class="course-card"
+              :data-course-id="course.id"
+              @click="openCourseModal(course)"
+            >
+              <div class="course-card-top">
+                <h4>{{ course.title }}</h4>
+                <span class="pill">{{ course.category }}</span>
+              </div>
+              <p class="course-card-meta">{{ difficultyStars(course.difficulty) }} · {{ course.minutesPerDay }} min/day</p>
+              <p class="course-card-desc">{{ course.description }}</p>
+            </button>
+            <p v-if="!col.items.length" class="hint">No courses in this level.</p>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="panel section-block">
+      <h3 class="section-title">VIP Courses</h3>
+      <p class="section-subtitle">Columns by difficulty: 1★ easiest through 5★ hardest. Click a course to open details.</p>
+      <div class="difficulty-board vip-board">
+        <section v-for="col in vipColumns" :key="`vip-${col.difficulty}`" class="difficulty-column vip-column">
+          <div class="difficulty-head">
+            <strong>{{ col.title }}</strong>
+            <span>{{ col.items.length }} courses</span>
+          </div>
+          <div class="difficulty-list">
+            <button
+              v-for="course in col.items"
+              :key="course.id"
+              type="button"
+              class="course-card vip-course-card"
+              :data-course-id="course.id"
+              @click="openCourseModal(course)"
+            >
+              <div class="course-card-top">
+                <h4>{{ course.title }}</h4>
+                <span class="pill vip-pill">VIP</span>
+              </div>
+              <p class="course-card-meta">{{ course.category }} · {{ difficultyStars(course.difficulty) }}</p>
+              <p class="course-card-desc">{{ course.description }}</p>
+            </button>
+            <p v-if="!col.items.length" class="hint">No courses in this level.</p>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <div v-if="activeModalCourse" class="modal-overlay" @click.self="closeCourseModal">
+      <article class="course-modal">
+        <div class="modal-head">
+          <div class="modal-main">
+            <div class="modal-title-row">
+              <h3>{{ activeModalCourse.title }}</h3>
+              <span v-if="activeModalCourse.isVipOnly" class="pill vip-pill">VIP Course</span>
+            </div>
+            <p class="section-subtitle modal-subtitle">{{ activeModalCourse.description }}</p>
+          </div>
+          <button type="button" class="modal-close" aria-label="Close" @click="closeCourseModal">×</button>
+        </div>
+        <div class="modal-stats">
+          <p class="meta-line">Category: {{ activeModalCourse.category }}</p>
+          <p class="meta-line">Difficulty: {{ difficultyStars(activeModalCourse.difficulty) }}</p>
+          <p class="meta-line">Duration: {{ activeModalCourse.durationDays }} days</p>
+          <p class="meta-line">Minutes/day: {{ activeModalCourse.minutesPerDay }} min</p>
+          <p class="meta-line">Target: {{ activeModalCourse.targetUsers }}</p>
+        </div>
+        <section class="modal-preview">
+          <h4>Exercises Preview</h4>
+          <ul class="preview-list">
+            <li v-for="item in activeModalCourse.exercisesPreview" :key="item">{{ item }}</li>
+          </ul>
+        </section>
+        <div class="modal-actions">
+          <button type="button" class="btn-muted" @click="toggleCourseFavorite(activeModalCourse)">
+            {{ isCourseFavorited(activeModalCourse) ? "Remove Favorite" : "Add to Favorites" }}
+          </button>
+          <button
+            v-if="activeModalCourse.isVipOnly && !auth.vipStatus"
+            type="button"
+            class="btn-primary"
+            @click="router.push('/vip')"
+          >
+            Upgrade to VIP
+          </button>
+          <button
+            v-else
+            type="button"
+            class="btn-primary"
+            :disabled="removingPlanIds.has(`course-${activeModalCourse.id}`)"
+            @click="handleModalPrimaryAction(activeModalCourse)"
+          >
+            {{ isCourseActive(activeModalCourse) ? "Remove from My Plans" : "Add to My Plans" }}
+          </button>
+          <p v-if="activeModalCourse.isVipOnly && !auth.vipStatus" class="hint">VIP Only. You can preview details, but only VIP users can add this course.</p>
+        </div>
+      </article>
+    </div>
   </main>
 </template>
 
@@ -542,6 +458,11 @@ onMounted(async () => {
   margin: 0 auto;
   display: grid;
   gap: 18px;
+}
+.page-subtitle {
+  margin: -8px 0 0;
+  color: #4f6a76;
+  font-size: 14px;
 }
 .section-block {
   margin: 0;
@@ -557,13 +478,17 @@ onMounted(async () => {
   font-size: 13px;
   color: #4f6a76;
 }
-.recommended-grid,
+.difficulty-board,
 .active-plans-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 16px;
+  align-items: start;
 }
-.recommended-card,
+.compact-active-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.difficulty-column,
 .active-plan-card {
   border: 1px solid #d9e8e5;
   border-radius: 14px;
@@ -572,18 +497,95 @@ onMounted(async () => {
   padding: 14px;
   display: flex;
   flex-direction: column;
-  min-height: 196px;
+  box-sizing: border-box;
+  min-width: 0;
 }
-.recommended-card h4,
+.difficulty-column {
+  min-height: 120px;
+  gap: 12px;
+  align-self: start;
+  overflow: visible;
+}
+.vip-column {
+  border-color: #e7d7f7;
+  background: linear-gradient(180deg, #fffdfd, #faf5ff);
+}
+.difficulty-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  color: var(--c6);
+  font-size: 12px;
+}
+.difficulty-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.course-card,
+.active-plan-card {
+  border: 1px solid #d9e8e5;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 8px 18px rgba(47, 72, 88, 0.08);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  position: static;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: visible;
+}
+.course-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 24px rgba(47, 72, 88, 0.12);
+}
+.vip-course-card {
+  border-color: #dbc2f2;
+  background: linear-gradient(180deg, #fff, #fcf7ff);
+}
+.course-card-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: flex-start;
+  min-width: 0;
+}
+.course-card h4,
 .active-card-content h4 {
   margin: 0;
   color: var(--c6);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.course-card-meta,
+.course-card-desc {
+  margin: 0;
+  font-size: 13px;
+  color: #486170;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.course-card-desc {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .meta-line {
   margin: 0;
   font-size: 13px;
   color: #486170;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
+.pill,
 .badge {
   display: inline-flex;
   width: fit-content;
@@ -594,6 +596,13 @@ onMounted(async () => {
   color: #316879;
   background: #e6f3ef;
   border: 1px solid #c8e0da;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.vip-pill {
+  color: #7b2cbf;
+  background: #f3e8ff;
+  border-color: #d6bcfa;
 }
 .row-actions {
   display: flex;
@@ -601,34 +610,6 @@ onMounted(async () => {
   gap: 8px;
   margin-top: auto;
   padding-top: 14px;
-}
-.create-plan-form {
-  display: grid;
-  gap: 12px;
-}
-.form-row {
-  display: grid;
-  gap: 12px;
-}
-.form-row.two-col {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-.field-group {
-  display: grid;
-  gap: 4px;
-}
-.lbl {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--c5);
-}
-.create-plan-form input,
-.create-plan-form select {
-  min-height: 42px;
-}
-.create-submit-btn {
-  min-width: 190px;
-  width: fit-content;
 }
 .btn-primary {
   background: linear-gradient(90deg, var(--c4), var(--c5));
@@ -671,20 +652,101 @@ onMounted(async () => {
   font-size: 13px;
   color: #486170;
 }
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(21, 28, 31, 0.48);
+  display: grid;
+  place-items: center;
+  z-index: 1200;
+  padding: 20px;
+}
+.course-modal {
+  position: relative;
+  width: min(820px, 100%);
+  border-radius: 18px;
+  background: #fff;
+  padding: 22px;
+  box-shadow: 0 22px 54px rgba(22, 34, 41, 0.22);
+  display: grid;
+  gap: 16px;
+}
+.modal-close {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 999px;
+  background: #eef3f2;
+  color: #2f4858;
+  cursor: pointer;
+  font-size: 18px;
+}
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+.modal-main {
+  min-width: 0;
+}
+.modal-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.modal-head h3 {
+  margin: 0;
+  color: var(--c6);
+}
+.modal-subtitle {
+  margin-bottom: 0;
+}
+.modal-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+}
+.modal-preview {
+  border-top: 1px solid #e3ece8;
+  padding-top: 14px;
+}
+.modal-preview h4 {
+  margin: 0 0 10px;
+}
+.preview-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  color: #486170;
+}
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
 @media (max-width: 960px) {
-  .recommended-grid,
+  .difficulty-board,
   .active-plans-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .create-submit-btn {
-    width: 100%;
+  .compact-active-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .modal-stats {
+    grid-template-columns: 1fr;
   }
 }
 @media (max-width: 760px) {
-  .recommended-grid,
-  .active-plans-grid,
-  .form-row.two-col {
+  .difficulty-board,
+  .active-plans-grid {
     grid-template-columns: 1fr;
+  }
+  .modal-head {
+    flex-direction: column;
   }
 }
 </style>

@@ -28,6 +28,8 @@ const todayInfo = ref({
 const selectedDate = ref(new Date().toISOString().slice(0, 10));
 const todayDateKey = new Date().toISOString().slice(0, 10);
 const focusedPlanId = ref("");
+const expandedCourseIds = ref(new Set());
+const courseExerciseLoadingKeys = ref(new Set());
 let focusTimer = null;
 
 const EXERCISE_GROUPS = [
@@ -287,13 +289,198 @@ function isCompletedTask(task) {
   return task?.is_completed === true || task?.completed === true || String(task?.status || "").toLowerCase() === "completed";
 }
 
-const plannedBurn = computed(() =>
-  workoutTasks.value.reduce((sum, task) => sum + estimateBurnKcal(task), 0)
-);
+function isCourseExerciseCompleted(exercise) {
+  return String(exercise?.status || "") === "completed";
+}
 
-const burnedSoFar = computed(() =>
-  workoutTasks.value.reduce((sum, task) => (isCompletedTask(task) ? sum + estimateBurnKcal(task) : sum), 0)
-);
+function isCourseExerciseInProgress(exercise) {
+  return String(exercise?.status || "") === "in_progress";
+}
+
+function courseTaskKey(task) {
+  return String(task?.enrolled_course_id || task?.course_id || task?._id || "");
+}
+
+function toggleCourseTaskExpanded(task) {
+  const key = courseTaskKey(task);
+  if (!key) return;
+  const next = new Set(expandedCourseIds.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  expandedCourseIds.value = next;
+}
+
+function isCourseTaskExpanded(task) {
+  return expandedCourseIds.value.has(courseTaskKey(task));
+}
+
+function courseProgressText(task) {
+  const done = Number(courseTaskCompletedCount(task));
+  const total = Number(courseTaskTotalCount(task));
+  return `Progress: ${done} / ${total} exercises completed`;
+}
+
+function courseTaskTotalCount(task) {
+  return Math.max(0, Number(task?.total_exercises || (Array.isArray(task?.exercises) ? task.exercises.length : 0)));
+}
+
+function courseTaskCompletedCount(task) {
+  if (Array.isArray(task?.exercises)) {
+    return task.exercises.filter((exercise) => isCourseExerciseCompleted(exercise)).length;
+  }
+  return Math.max(0, Number(task?.completed_exercises || 0));
+}
+
+function hasCourseTaskStarted(task) {
+  if (Array.isArray(task?.exercises)) {
+    return task.exercises.some((exercise) => {
+      const status = String(exercise?.status || "");
+      return status === "in_progress" || status === "completed";
+    });
+  }
+  const status = String(task?.status || "");
+  return status === "in_progress" || status === "completed" || Number(task?.completed_exercises || 0) > 0;
+}
+
+function isCourseTaskFullyCompleted(task) {
+  const total = courseTaskTotalCount(task);
+  return total > 0 && courseTaskCompletedCount(task) >= total;
+}
+
+function courseMainActionLabel(task) {
+  if (isCourseTaskFullyCompleted(task)) return "Completed";
+  if (!hasCourseTaskStarted(task)) return "Start Course";
+  return "Continue";
+}
+
+function handleCourseMainAction(task) {
+  if (isCourseTaskFullyCompleted(task)) return;
+  const key = courseTaskKey(task);
+  if (!key) return;
+  const next = new Set(expandedCourseIds.value);
+  next.add(key);
+  expandedCourseIds.value = next;
+}
+
+function courseExerciseMeta(exercise) {
+  if (exercise?.type === "hold" && Number(exercise?.hold_seconds || 0) > 0) return `${exercise.hold_seconds} sec`;
+  if (exercise?.type === "reps" && Number(exercise?.reps || 0) > 0) return `${exercise.reps} reps`;
+  if (Number(exercise?.duration_minutes || 0) > 0) return `${exercise.duration_minutes} min`;
+  return "";
+}
+
+function courseExerciseLoadingKey(task, exercise) {
+  return `${courseTaskKey(task)}:${String(exercise?.exercise_id || "")}`;
+}
+
+function isRepsCourseExercise(exercise) {
+  return String(exercise?.type || "").toLowerCase() === "reps";
+}
+
+function isTimerCourseExercise(exercise) {
+  return !isRepsCourseExercise(exercise);
+}
+
+function getCourseExerciseDurationMinutes(exercise) {
+  const minutes = Number(exercise?.duration_minutes || 0);
+  if (minutes > 0) return Math.max(1, Math.round(minutes));
+  const holdSeconds = Number(exercise?.hold_seconds || 0);
+  if (holdSeconds > 0) return Math.max(1, Math.ceil(holdSeconds / 60));
+  return 1;
+}
+
+function courseExerciseStatusLabel(exercise) {
+  if (isCourseExerciseCompleted(exercise)) return "Completed";
+  if (isCourseExerciseInProgress(exercise)) return "In Progress";
+  return "Not Started";
+}
+
+function courseExerciseActionLabel(exercise) {
+  if (isCourseExerciseCompleted(exercise)) return "Completed";
+  if (isCourseExerciseInProgress(exercise)) {
+    return isRepsCourseExercise(exercise) ? "Complete" : "Continue Timer";
+  }
+  return "Start";
+}
+
+function getCourseTaskPlannedBurn(task) {
+  if (Number.isFinite(Number(task?.estimated_burn))) return asNumber(task.estimated_burn);
+  if (!Array.isArray(task?.exercises)) return 0;
+  return task.exercises.reduce((sum, exercise) => sum + asNumber(exercise?.estimated_burn), 0);
+}
+
+function getCourseTaskCompletedBurn(task) {
+  if (Number.isFinite(Number(task?.burned_so_far))) return asNumber(task.burned_so_far);
+  if (!Array.isArray(task?.exercises)) return 0;
+  return task.exercises.reduce((sum, exercise) => (isCourseExerciseCompleted(exercise) ? sum + asNumber(exercise?.estimated_burn) : sum), 0);
+}
+
+async function updateCourseExercise(task, exercise, nextStatus) {
+  if (!canToggleTasks.value) {
+    window.alert("You can only check plans for today!");
+    return;
+  }
+  const enrolledId = task?.enrolled_course_id;
+  const exerciseId = String(exercise?.exercise_id || "");
+  if (!enrolledId || !exerciseId) return;
+  const loadingKey = courseExerciseLoadingKey(task, exercise);
+  courseExerciseLoadingKeys.value = new Set([...courseExerciseLoadingKeys.value, loadingKey]);
+  try {
+    await api.post("/courses/progress", {
+      enrolled_course_id: enrolledId,
+      date: todayInfo.value.date || selectedDate.value,
+      exercise_id: exerciseId,
+      exercise_status: nextStatus,
+    });
+    await loadTodayInfo();
+  } catch (err) {
+    error.value = err?.response?.data?.message || "Failed to update course exercise.";
+  } finally {
+    const next = new Set(courseExerciseLoadingKeys.value);
+    next.delete(loadingKey);
+    courseExerciseLoadingKeys.value = next;
+  }
+}
+
+async function handleCourseExerciseAction(task, exercise) {
+  if (isCourseExerciseCompleted(exercise)) return;
+  if (isTimerCourseExercise(exercise)) {
+    if (!isCourseExerciseInProgress(exercise)) {
+      await updateCourseExercise(task, exercise, "in_progress");
+    }
+    router.push({
+      path: "/workout/session",
+      query: {
+        sessionMode: "course_exercise",
+        courseEnrolledId: String(task?.enrolled_course_id || ""),
+        courseExerciseId: String(exercise?.exercise_id || ""),
+        date: selectedDate.value,
+        exercise: String(exercise?.title || "Course Exercise"),
+        duration: String(getCourseExerciseDurationMinutes(exercise)),
+        category: "Course",
+        estimatedBurn: String(Math.round(asNumber(exercise?.estimated_burn))),
+      },
+    });
+    return;
+  }
+
+  const nextStatus = isCourseExerciseInProgress(exercise) ? "completed" : "in_progress";
+  await updateCourseExercise(task, exercise, nextStatus);
+}
+
+const plannedBurn = computed(() => {
+  const workoutBurn = workoutTasks.value.reduce((sum, task) => sum + estimateBurnKcal(task), 0);
+  const courseBurn = courseTasks.value.reduce((sum, task) => sum + getCourseTaskPlannedBurn(task), 0);
+  return workoutBurn + courseBurn;
+});
+
+const burnedSoFar = computed(() => {
+  const workoutBurn = workoutTasks.value.reduce((sum, task) => (isCompletedTask(task) ? sum + estimateBurnKcal(task) : sum), 0);
+  const courseBurn = courseTasks.value.reduce((sum, task) => sum + getCourseTaskCompletedBurn(task), 0);
+  return workoutBurn + courseBurn;
+});
+
+const showWeightUnavailableHint = computed(() => typeof userWeight.value !== "number" && workoutTasks.value.length > 0);
 
 const hasCustomOrUnknownTask = computed(() =>
   workoutTasks.value.some((task) => getMetForExerciseName(getExerciseName(task)) <= 0)
@@ -301,16 +488,19 @@ const hasCustomOrUnknownTask = computed(() =>
 
 function startWorkoutTask(task) {
   const planId = task.workout_plan_id || task.id || task._id;
-  if (!planId) return;
+  const scheduleItemId = task.schedule_item_id || "";
+  if (!planId && !scheduleItemId) return;
   router.push({
     path: "/workout/session",
     query: {
-      planId: String(planId),
+      planId: planId ? String(planId) : "",
+      scheduleItemId: scheduleItemId ? String(scheduleItemId) : "",
       date: selectedDate.value,
       exercise: task.exercise_name,
       duration: String(task.duration_per_day),
       category: task.category || "",
       remaining: task.remaining_seconds != null ? String(task.remaining_seconds) : "",
+      estimatedBurn: String(Math.round(estimateBurnKcal(task))),
     },
   });
 }
@@ -321,50 +511,8 @@ function taskSourceLabel(task) {
   return "Plan";
 }
 
-function canDirectComplete(task) {
-  return Boolean(task?.schedule_item_id);
-}
-
-async function completeManualTask(task) {
-  if (!task?.schedule_item_id || isCompletedTask(task)) return;
-  if (!canToggleTasks.value) {
-    window.alert("You can only check plans for today!");
-    return;
-  }
-  try {
-    await api.post("/workout/today/status", {
-      schedule_item_id: task.schedule_item_id,
-      date: selectedDate.value,
-      is_completed: true,
-    });
-    await loadTodayInfo();
-  } catch (err) {
-    error.value = err?.response?.data?.message || "Failed to complete workout task.";
-  }
-}
-
 function workoutActionLabel(task) {
   return "Start";
-}
-
-async function completeCourseTask(task) {
-  if (!canToggleTasks.value) {
-    window.alert("You can only check plans for today!");
-    return;
-  }
-  if (task?.is_completed) return;
-  const enrolledId = task.enrolled_course_id;
-  if (!enrolledId) return;
-  try {
-    await api.post("/courses/progress", {
-      enrolled_course_id: enrolledId,
-      date: todayInfo.value.date,
-      is_completed: true,
-    });
-    await loadTodayInfo();
-  } catch (err) {
-    error.value = err?.response?.data?.message || "Failed to update course status.";
-  }
 }
 
 async function savePlan() {
@@ -532,11 +680,8 @@ async function handleDateChange(dateKey) {
                 <span class="task-kcal">Estimated burn: {{ formatKcal(estimateBurnKcal(task)) }}</span>
               </div>
               <div class="task-action">
-                <button v-if="!isCompletedTask(task) && !canDirectComplete(task)" class="start-btn" type="button" @click="startWorkoutTask(task)">
+                <button v-if="!isCompletedTask(task)" class="start-btn" type="button" @click="startWorkoutTask(task)">
                   {{ workoutActionLabel(task) }}
-                </button>
-                <button v-else-if="!isCompletedTask(task) && canDirectComplete(task)" class="start-btn" type="button" @click="completeManualTask(task)">
-                  Start
                 </button>
                 <span v-else class="done-badge">Completed</span>
               </div>
@@ -548,26 +693,65 @@ async function handleDateChange(dateKey) {
           <h4>Course Tasks</h4>
           <div v-if="!courseTasks.length" class="estimate-unavailable">No course task for this day</div>
           <ul v-else class="today-list">
-            <li v-for="task in courseTasks" :key="task.enrolled_course_id" class="today-item">
+            <li v-for="task in courseTasks" :key="task.enrolled_course_id" class="today-item course-task-item">
               <div class="today-text">
                 <strong>{{ task.title }}</strong>
                 <span>- Day {{ task.day }}/{{ task.duration_days }}</span>
                 <span class="task-source">Course</span>
               </div>
               <div class="task-action">
-                <button v-if="!task.is_completed" class="start-btn" type="button" @click="completeCourseTask(task)">Start</button>
+                <button
+                  v-if="!isCourseTaskFullyCompleted(task)"
+                  class="start-btn"
+                  type="button"
+                  @click="handleCourseMainAction(task)"
+                >
+                  {{ courseMainActionLabel(task) }}
+                </button>
                 <span v-else class="done-badge">Completed</span>
+              </div>
+              <div v-if="Array.isArray(task.exercises) && task.exercises.length" class="course-task-detail">
+                <div class="course-task-summary">
+                  <span>{{ courseProgressText(task) }}</span>
+                  <span>Burned: {{ formatKcal(task.burned_so_far || 0) }} / {{ formatKcal(task.estimated_burn || 0) }}</span>
+                </div>
+                <ul v-if="isCourseTaskExpanded(task)" class="course-exercise-list">
+                  <li
+                    v-for="exercise in task.exercises"
+                    :key="exercise.exercise_id"
+                    class="course-exercise-item"
+                  >
+                    <div class="course-exercise-text">
+                      <strong>{{ exercise.title }}</strong>
+                      <span v-if="courseExerciseMeta(exercise)">- {{ courseExerciseMeta(exercise) }}</span>
+                      <span class="task-kcal">Estimated burn: {{ formatKcal(exercise.estimated_burn || 0) }}</span>
+                      <span class="task-source">{{ courseExerciseStatusLabel(exercise) }}</span>
+                    </div>
+                    <div class="task-action">
+                      <button
+                        v-if="!isCourseExerciseCompleted(exercise)"
+                        class="start-btn"
+                        type="button"
+                        :disabled="courseExerciseLoadingKeys.has(courseExerciseLoadingKey(task, exercise))"
+                        @click="handleCourseExerciseAction(task, exercise)"
+                      >
+                        {{ courseExerciseActionLabel(exercise) }}
+                      </button>
+                      <span v-else class="done-badge">Completed</span>
+                    </div>
+                  </li>
+                </ul>
               </div>
             </li>
           </ul>
         </div>
-        <div v-if="workoutTasks.length" class="calories-block">
+        <div class="calories-block">
           <h4>Workout Tracking</h4>
           <p class="muted">Based on your saved body weight and workout duration.</p>
-          <div v-if="typeof userWeight !== 'number'" class="estimate-unavailable">
+          <div v-if="showWeightUnavailableHint" class="estimate-unavailable">
             Weight not available. Please complete your profile first.
           </div>
-          <div v-else class="estimation-grid">
+          <div class="estimation-grid">
             <div class="estimate-wrap">
               <div class="estimate-label">Planned Burn</div>
               <div class="estimate-value">{{ formatKcal(plannedBurn) }}</div>
@@ -749,6 +933,54 @@ async function handleDateChange(dateKey) {
   padding: 10px 12px;
   border-radius: 10px;
   background: #f2f7f7;
+}
+
+.course-task-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.course-task-detail {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  border-top: 1px solid #d7e7e6;
+  padding-top: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.course-task-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: #486170;
+  font-size: 12px;
+}
+
+.course-exercise-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.course-exercise-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #ffffff;
+  border: 1px solid #dbe7e6;
+}
+
+.course-exercise-text {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .today-text {

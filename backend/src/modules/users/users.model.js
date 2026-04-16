@@ -61,6 +61,17 @@ async function updateMe(userId, payload) {
     update.preferredWorkoutTypes = [...new Set(update.preferredWorkoutTypes.map(String).filter(Boolean))].slice(0, 12);
   }
 
+  const nextHeight = payload.height !== undefined ? Number(payload.height) : null;
+  const nextWeight = payload.weight !== undefined ? Number(payload.weight) : null;
+  if (payload.height !== undefined || payload.weight !== undefined) {
+    const current = await User.findById(userId).select("height weight").lean();
+    const height = payload.height !== undefined ? nextHeight : Number(current?.height);
+    const weight = payload.weight !== undefined ? nextWeight : Number(current?.weight);
+    if (Number.isFinite(height) && height > 0 && Number.isFinite(weight) && weight > 0) {
+      update.bmi = Number(calculateBmi(weight, height).toFixed(2));
+    }
+  }
+
   const user = await User.findByIdAndUpdate(userId, { $set: update }, { new: true, runValidators: true });
   return toProfile(user);
 }

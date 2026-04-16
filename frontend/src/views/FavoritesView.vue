@@ -43,22 +43,10 @@ const TYPE_ICON = {
 };
 
 const DEFAULT_RECOMMENDATIONS = {
-  workout: [
-    { id: "w1", title: "Quick HIIT Session", subtitle: "20 min, high intensity cardio", route: "/workout" },
-    { id: "w2", title: "Core Strength Builder", subtitle: "Build daily stability routine", route: "/workout" },
-  ],
-  course: [
-    { id: "c1", title: "Beginner Mobility Course", subtitle: "Low impact and flexible pace", route: "/courses" },
-    { id: "c2", title: "Cardio Foundations", subtitle: "Progressive schedule for 14 days", route: "/courses" },
-  ],
-  diet: [
-    { id: "d1", title: "Balanced High-Protein Day", subtitle: "Lean proteins and whole grains", route: "/diet" },
-    { id: "d2", title: "Smart Fat-Loss Meals", subtitle: "Lower calorie with high satiety", route: "/diet" },
-  ],
-  forum: [
-    { id: "f1", title: "Weekly Workout Wins", subtitle: "See what others are achieving", route: "/forum" },
-    { id: "f2", title: "Meal Prep Thread", subtitle: "Community recipe tips and ideas", route: "/forum" },
-  ],
+  workout: [],
+  course: [],
+  diet: [],
+  forum: [],
 };
 
 function showToast(message) {
@@ -165,11 +153,11 @@ function openItem(row) {
 }
 
 function startWorkout(row) {
-  router.push({ path: "/workout", query: { focusItem: String(row.itemId || ""), intent: "start" } });
+  router.push({ path: "/workout", query: { focusItem: String(row.itemId || "") } });
 }
 
 function addWorkoutToPlan(row) {
-  router.push({ path: "/workout", query: { focusItem: String(row.itemId || ""), intent: "plan" } });
+  router.push({ path: "/workout", query: { focusItem: String(row.itemId || "") } });
 }
 
 function detailBadges(row) {
@@ -183,7 +171,7 @@ function detailBadges(row) {
     ].filter(Boolean);
   }
   if (row.type === "diet") {
-    return [meta.mealType || meta.planType || "Meal plan", row.targetCalories ? `${Math.round(row.targetCalories)} kcal` : ""].filter(Boolean);
+    return [meta.mealType || meta.planType || row.planType || "Meal plan", row.targetCalories ? `${Math.round(row.targetCalories)} kcal` : ""].filter(Boolean);
   }
   if (row.type === "course") {
     return [meta.durationDays ? `${meta.durationDays} days` : "", meta.difficulty || "", meta.category || ""].filter(Boolean);

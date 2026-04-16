@@ -1,12 +1,30 @@
 import api from "./api";
 
+function shouldHideInvalidCourse(course) {
+  const title = String(course?.title || course?.name || "").trim().toLowerCase();
+  const minutesPerDay = Number(course?.duration || course?.minutesPerDay || 0);
+  return title === "run" && minutesPerDay <= 1;
+}
+
 export async function fetchCourses() {
   const { data } = await api.get("/courses");
-  return data.map((course) => ({
-    ...course,
-    isPremium: Boolean(course.isPremium),
-    duration_days: Number(course.duration_days || 7),
-  }));
+  return data
+    .filter((course) => !shouldHideInvalidCourse(course))
+    .map((course) => ({
+      ...course,
+      id: String(course._id || course.id || ""),
+      title: String(course.title || "").trim(),
+      category: String(course.category || "General").trim() || "General",
+      difficulty: Number(course.difficulty_value || 1),
+      durationDays: Number(course.duration_days || 7),
+      minutesPerDay: Number(course.duration || 30),
+      description: String(course.description || "").trim(),
+      targetUsers: String(course.target_users || course.difficulty || "beginner").trim(),
+      isVipOnly: Boolean(course.isPremium),
+      exercisesPreview: Array.isArray(course.exercises_preview) ? course.exercises_preview.filter(Boolean) : [],
+      isFeatured: Boolean(course.isFeatured),
+      rawDifficulty: course.difficulty,
+    }));
 }
 
 export async function createCourse(payload) {

@@ -3,6 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useRoute, useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
+import { useAuthStore } from "../stores/auth";
+import { useFavorites } from "../services/favorites";
 
 const MEAL_TYPES = [
   { value: "breakfast", label: "Breakfast" },
@@ -162,8 +164,6 @@ const isSearchDropdownOpen = ref(false);
 const showFoodOverview = ref(false);
 const foodResults = ref([]);
 const foodLibraryRows = ref([]);
-const dietFavoriteIds = ref(new Set());
-const dietFavoriteRowIdByItemId = ref(new Map());
 const overviewFoodRows = ref([]);
 const overviewFoodQuery = ref("");
 const overviewLoading = ref(false);
@@ -180,16 +180,15 @@ const appliedPlanId = ref("");
 const recordMode = ref("recommended");
 const route = useRoute();
 const router = useRouter();
+const auth = useAuthStore();
+const { ensureFavoritesLoaded, addFavorite, removeFavoriteByItem, byKey, refreshFavorites } = useFavorites();
 const focusedPlanCardId = ref("");
-const vipUnlocked = ref(false);
 const showVipUpgradeModal = ref(false);
-const showVipUnlockLoadingModal = ref(false);
 let searchTimer = null;
 let focusSyncHandler = null;
 let suppressFoodSearchOnce = false;
 let loadRequestSeq = 0;
 let focusPlanTimer = null;
-let vipUnlockTimer = null;
 
 const overview = ref({
   target: { calories: 2000, suggestedWorkoutBurn: 160, protein: 120, carbs: 220, fat: 65 },
@@ -285,9 +284,9 @@ const defaultDynamicPlan = computed(() => ({
   type: defaultDynamicPlanType.value,
   description: "Auto-generated from your current weight, target weight, and target days.",
 }));
-const isVipUser = computed(() => Boolean(me.value?.isVip || me.value?.vip_status));
+const isVipUser = computed(() => auth.vipStatus);
 const selectedPlanFavoriteId = computed(() => (selectedPlan.value ? `diet-plan-${selectedPlan.value.id}` : ""));
-const isSelectedPlanFavorited = computed(() => Boolean(selectedPlanFavoriteId.value && dietFavoriteIds.value.has(selectedPlanFavoriteId.value)));
+const isSelectedPlanFavorited = computed(() => Boolean(selectedPlanFavoriteId.value && byKey.value.get(`diet::${selectedPlanFavoriteId.value}`)?._id));
 const displayedOverviewFoods = computed(() => overviewFoodRows.value.slice(0, 10));
 const dateSliderMonthLabel = computed(() =>
   new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(parseDateKey(selectedDate.value))
@@ -451,25 +450,6 @@ async function loadRecords(dateKey = selectedDate.value) {
     },
   });
   records.value = Array.isArray(data) ? data : [];
-}
-
-async function loadDietFavorites() {
-  if (!me.value?.id) return;
-  const rows = await api.get(`/favorites/${me.value.id}`).then((r) => r.data);
-  const map = new Map();
-  const ids = new Set(
-    (Array.isArray(rows) ? rows : [])
-      .filter((row) => String(row?.itemType || "").toLowerCase() === "diet")
-      .map((row) => {
-        const itemId = String(row.itemId || "");
-        const rowId = String(row._id || "");
-        if (itemId && rowId) map.set(itemId, rowId);
-        return itemId;
-      })
-      .filter(Boolean)
-  );
-  dietFavoriteIds.value = ids;
-  dietFavoriteRowIdByItemId.value = map;
 }
 
 async function loadOverview(dateKey = selectedDate.value) {
@@ -687,7 +667,7 @@ const planCards = computed(() =>
     if (plan.type === "high_protein") suggestion += 40;
     return {
       ...plan,
-      isLocked: !vipUnlocked.value && idx >= LOCK_FREE_PLAN_COUNT,
+      isLocked: !isVipUser.value && idx >= LOCK_FREE_PLAN_COUNT,
       suggestedCalories: clamp(roundToInt(suggestion), 1200, 4000),
       goalTag:
         plan.type === "muscle_gain"
@@ -823,17 +803,6 @@ function togglePlanCard(planId) {
 
 function handlePlanCardClick(plan) {
   if (plan?.isLocked) {
-    if (showVipUnlockLoadingModal.value) return;
-    if (isVipUser.value) {
-      showVipUpgradeModal.value = false;
-      showVipUnlockLoadingModal.value = true;
-      if (vipUnlockTimer) window.clearTimeout(vipUnlockTimer);
-      vipUnlockTimer = window.setTimeout(() => {
-        showVipUnlockLoadingModal.value = false;
-        vipUnlocked.value = true;
-      }, 1500);
-      return;
-    }
     showVipUpgradeModal.value = true;
     return;
   }
@@ -890,41 +859,21 @@ async function toggleSelectedPlanFavorite() {
   pageError.value = "";
   try {
     if (isSelectedPlanFavorited.value) {
-      const rowId = dietFavoriteRowIdByItemId.value.get(selectedPlanFavoriteId.value);
-      if (rowId) {
-        await api.delete(`/favorites/${rowId}`);
-      } else {
-        await loadDietFavorites();
-        const refreshedRowId = dietFavoriteRowIdByItemId.value.get(selectedPlanFavoriteId.value);
-        if (refreshedRowId) await api.delete(`/favorites/${refreshedRowId}`);
-      }
-      const nextIds = new Set(dietFavoriteIds.value);
-      nextIds.delete(selectedPlanFavoriteId.value);
-      dietFavoriteIds.value = nextIds;
-      const nextMap = new Map(dietFavoriteRowIdByItemId.value);
-      nextMap.delete(selectedPlanFavoriteId.value);
-      dietFavoriteRowIdByItemId.value = nextMap;
+      await removeFavoriteByItem("diet", selectedPlanFavoriteId.value);
       pageSuccess.value = `${selectedPlan.value.name} removed from favorites.`;
       return;
     }
 
-    const row = await api.post("/favorites", {
-      userId: me.value.id,
+    await addFavorite({
       itemType: "diet",
       itemId: selectedPlanFavoriteId.value,
       title: selectedPlan.value.name,
       planType: selectedPlan.value.type,
       targetCalories: adjustedPlanCalories.value,
       description: selectedPlan.value.description,
+      metadata: { planType: selectedPlan.value.type },
       sourceType: "diet_plan",
-    }).then((r) => r.data);
-
-    const next = new Set(dietFavoriteIds.value);
-    next.add(selectedPlanFavoriteId.value);
-    dietFavoriteIds.value = next;
-    const nextMap = new Map(dietFavoriteRowIdByItemId.value);
-    if (row?._id) nextMap.set(selectedPlanFavoriteId.value, String(row._id));
-    dietFavoriteRowIdByItemId.value = nextMap;
+    });
     pageSuccess.value = `${selectedPlan.value.name} added to favorites.`;
   } catch (error) {
     pageError.value = error?.response?.data?.message || "Failed to update favorite status.";
@@ -1098,19 +1047,25 @@ onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
   if (focusSyncHandler) window.removeEventListener("focus", focusSyncHandler);
   if (focusPlanTimer) clearTimeout(focusPlanTimer);
-  if (vipUnlockTimer) clearTimeout(vipUnlockTimer);
 });
 
 onMounted(async () => {
   try {
     me.value = await api.get("/users/me").then((r) => r.data);
+    auth.$patch({ user: auth.normalizeUser(me.value) });
     restoreAppliedPlanFromStorage();
     form.date = selectedDate.value;
     dateWindowStart.value = shiftDateKey(selectedDate.value, -Math.floor(DATE_WINDOW_DAYS / 2));
-    await Promise.all([loadForDate(), loadDietFavorites()]);
+    await Promise.all([loadForDate(), ensureFavoritesLoaded()]);
     await focusPlanFromQuery();
-    focusSyncHandler = () => {
-      loadDietFavorites();
+    focusSyncHandler = async () => {
+      await Promise.allSettled([
+        refreshFavorites(),
+        api.get("/users/me").then((r) => {
+          me.value = r.data;
+          auth.$patch({ user: auth.normalizeUser(r.data) });
+        }),
+      ]);
     };
     window.addEventListener("focus", focusSyncHandler);
   } catch (err) {
@@ -1466,13 +1421,6 @@ watch(
       <div class="modal-content">
         <p class="vip-modal-title">🔒 VIP only</p>
         <p class="upgrade-link" @click="goToVipPage">Upgrade to unlock premium recipes</p>
-      </div>
-    </div>
-
-    <div v-if="showVipUnlockLoadingModal" class="modal-overlay">
-      <div class="modal-content vip-loading-modal">
-        <div class="spinner" />
-        <p class="vip-modal-title">✨ Unlocking premium recipes...</p>
       </div>
     </div>
   </main>
@@ -2372,12 +2320,6 @@ watch(
   text-align: center;
 }
 
-.vip-loading-modal {
-  display: grid;
-  gap: 10px;
-  justify-items: center;
-}
-
 .vip-modal-title {
   margin: 0;
   font-size: 16px;
@@ -2390,21 +2332,6 @@ watch(
   text-decoration: underline;
   cursor: pointer;
   color: #3b82f6;
-}
-
-.spinner {
-  width: 24px;
-  height: 24px;
-  border: 3px solid #ccc;
-  border-top: 3px solid #10b981;
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  100% {
-    transform: rotate(360deg);
-  }
 }
 
 @media (max-width: 1100px) {

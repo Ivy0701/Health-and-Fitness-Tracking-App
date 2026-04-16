@@ -20,6 +20,8 @@ const courseSchema = new mongoose.Schema(
     duration: { type: Number, min: 1, default: 30 },
     duration_days: { type: Number, min: 1, default: 7 },
     category: { type: String, trim: true, default: "fitness" },
+    target_users: { type: String, trim: true, default: "beginner" },
+    exercises_preview: { type: [String], default: [] },
     isFeatured: { type: Boolean, default: false },
     isPremium: { type: Boolean, default: false },
     weeklySlots: { type: [weeklySlotSchema], default: [] },
