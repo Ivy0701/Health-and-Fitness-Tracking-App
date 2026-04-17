@@ -4,6 +4,12 @@ function asList(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function normalizeLikeCount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 0;
+  return parsed;
+}
+
 export const useForumCenterStore = defineStore("forumCenter", {
   state: () => ({
     currentUser: null,
@@ -44,6 +50,38 @@ export const useForumCenterStore = defineStore("forumCenter", {
       if (!updatedPost?._id) return;
       const next = this.posts.map((item) => (String(item?._id || "") === String(updatedPost._id) ? updatedPost : item));
       this.syncPosts(next);
+    },
+    togglePostLike(postId) {
+      const targetId = String(postId || "").trim();
+      if (!targetId) return;
+      this.posts = this.posts.map((post) => {
+        if (String(post?._id || "") !== targetId) return post;
+        const currentlyLiked = Boolean(post?.isLiked);
+        const currentLikeCount = normalizeLikeCount(post?.likeCount);
+        const nextLiked = !currentlyLiked;
+        const nextLikeCount = nextLiked
+          ? currentLikeCount + 1
+          : Math.max(0, currentLikeCount - 1);
+        return {
+          ...post,
+          isLiked: nextLiked,
+          likedByMe: nextLiked,
+          likeCount: nextLikeCount,
+        };
+      });
+    },
+    appendPostComment(postId, comment) {
+      const targetId = String(postId || "").trim();
+      if (!targetId || !comment) return;
+      this.posts = this.posts.map((post) => {
+        if (String(post?._id || "") !== targetId) return post;
+        const nextComments = Array.isArray(post?.comments) ? [...post.comments] : [];
+        nextComments.push(comment);
+        return {
+          ...post,
+          comments: nextComments,
+        };
+      });
     },
   },
 });

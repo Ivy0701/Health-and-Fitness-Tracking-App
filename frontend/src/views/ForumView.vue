@@ -17,14 +17,7 @@ const searchQuery = ref("");
 const activeFilter = ref("all");
 const expandedComments = ref({});
 const commentDrafts = ref({});
-const likeLoading = ref({});
-const commentLoading = ref({});
-const replyLoading = ref({});
-const activeReplyTarget = ref({ postId: "", commentId: "" });
-const replyDraft = ref("");
-const replyError = ref("");
-const commentEditDrafts = ref({});
-const commentEditLoading = ref({});
+const commentInputRefs = ref({});
 const { favorites, isFavorited, toggleFavorite, ensureFavoritesLoaded } = useFavorites();
 const focusedPostId = ref("");
 const notificationsOpen = ref(false);
@@ -200,6 +193,35 @@ function validatePublishForm() {
   return valid;
 }
 
+function normalizeComments(comments, postId) {
+  const rows = Array.isArray(comments) ? comments : [];
+  return rows
+    .map((comment, index) => ({
+      id: String(comment?.id || comment?._id || `${postId}-comment-${index + 1}`),
+      authorName: String(comment?.authorName || comment?.author?.name || "Community friend"),
+      text: String(comment?.text || comment?.content || "").trim(),
+      createdAt: comment?.createdAt || new Date().toISOString(),
+    }))
+    .filter((comment) => comment.text);
+}
+
+function initializePostState(postRows) {
+  return (Array.isArray(postRows) ? postRows : []).map((post) => {
+    const baseLikeCount = Number(post?.likeCount);
+    const nextLikeCount = Number.isFinite(baseLikeCount)
+      ? Math.max(0, baseLikeCount)
+      : Math.max(0, Number(post?.likes) || 0);
+    const postId = String(post?._id || post?.id || "");
+    return {
+      ...post,
+      _id: postId,
+      likeCount: nextLikeCount,
+      isLiked: Boolean(post?.isLiked ?? post?.likedByMe ?? false),
+      comments: normalizeComments(post?.comments, postId),
+    };
+  });
+}
+
 async function load() {
   const [user, forumPosts] = await Promise.all([
     api.get("/users/me").then((r) => r.data),
@@ -210,7 +232,7 @@ async function load() {
   const minDisplayCount = 20;
   const mockPosts = buildForumMockPosts();
   const remaining = Math.max(0, minDisplayCount - realPosts.length);
-  const mergedPosts = [...realPosts, ...mockPosts.slice(0, remaining)];
+  const mergedPosts = initializePostState([...realPosts, ...mockPosts.slice(0, remaining)]);
   forumCenter.syncPosts(mergedPosts);
   syncSavedPostIdsFromFavorites();
 }
@@ -245,7 +267,7 @@ async function focusPostFromQuery() {
   await focusPostById(focusId);
 }
 
-function isCommentsExpanded(postId) {
+function isCommentSectionOpen(postId) {
   return Boolean(expandedComments.value[postId]);
 }
 
@@ -267,90 +289,16 @@ function setCommentDraft(postId, value) {
   };
 }
 
-function commentIdValue(comment) {
-  return String(comment?._id || comment?.id || "");
-}
-
-function commentParentIdValue(comment) {
-  return String(comment?.parentCommentId || "");
-}
-
-function isReplyComment(comment) {
-  return Boolean(commentParentIdValue(comment));
-}
-
-function rootComments(post) {
-  const rows = getPostComments(post);
-  return rows
-    .filter((item) => !isReplyComment(item))
-    .sort((a, b) => new Date(a?.createdAt || 0) - new Date(b?.createdAt || 0));
-}
-
-function repliesForComment(post, rootCommentId) {
-  const target = String(rootCommentId || "");
-  const rows = getPostComments(post);
-  return rows
-    .filter((item) => commentParentIdValue(item) === target)
-    .sort((a, b) => new Date(a?.createdAt || 0) - new Date(b?.createdAt || 0));
-}
-
-function hasAnyComments(post) {
-  return getCommentCount(post) > 0;
-}
-
-function isReplyTarget(postId, commentId) {
-  return String(activeReplyTarget.value.postId || "") === String(postId || "") &&
-    String(activeReplyTarget.value.commentId || "") === String(commentId || "");
-}
-
-function openReplyEditor(postId, commentId) {
-  activeReplyTarget.value = { postId: String(postId || ""), commentId: String(commentId || "") };
-  replyDraft.value = "";
-  replyError.value = "";
-}
-
-function cancelReplyEditor() {
-  activeReplyTarget.value = { postId: "", commentId: "" };
-  replyDraft.value = "";
-  replyError.value = "";
-}
-
-function commentKey(postId, commentId) {
-  return `${postId}:${commentId}`;
-}
-
-function isCommentOwner(comment) {
-  return String(comment?.userId) === String(me.value?.id);
-}
-
-function getEditDraft(postId, commentId) {
-  return commentEditDrafts.value[commentKey(postId, commentId)] ?? null;
-}
-
-function startEditComment(postId, comment) {
-  if (!comment?._id) return;
-  commentEditDrafts.value = {
-    ...commentEditDrafts.value,
-    [commentKey(postId, comment._id)]: String(comment.content || ""),
-  };
-}
-
-function cancelEditComment(postId, commentId) {
-  const key = commentKey(postId, commentId);
-  const next = { ...commentEditDrafts.value };
+function setCommentInputRef(postId, element) {
+  const key = String(postId || "").trim();
+  if (!key) return;
+  if (element) {
+    commentInputRefs.value = { ...commentInputRefs.value, [key]: element };
+    return;
+  }
+  const next = { ...commentInputRefs.value };
   delete next[key];
-  commentEditDrafts.value = next;
-}
-
-function setEditDraft(postId, commentId, value) {
-  commentEditDrafts.value = {
-    ...commentEditDrafts.value,
-    [commentKey(postId, commentId)]: value,
-  };
-}
-
-function replacePost(updatedPost) {
-  forumCenter.replacePost(updatedPost);
+  commentInputRefs.value = next;
 }
 
 function postIdOf(post) {
@@ -370,76 +318,77 @@ function validatePostForFavorite(post) {
   return { postId, title, content };
 }
 
-async function toggleLike(postId) {
-  if (likeLoading.value[postId]) return;
-  likeLoading.value = { ...likeLoading.value, [postId]: true };
-  try {
-    const updated = await api.patch(`/forum/posts/${postId}/like`).then((r) => r.data);
-    replacePost(updated);
-  } finally {
-    likeLoading.value = { ...likeLoading.value, [postId]: false };
+function handleToggleLike(postId, event) {
+  event?.stopPropagation();
+  forumCenter.togglePostLike(postId);
+}
+
+function handleSubmitComment(postId, text) {
+  const cleanText = String(text || "").trim();
+  if (!cleanText) return;
+  const targetId = String(postId || "").trim();
+  if (!targetId) return;
+  const newComment = {
+    id: Date.now().toString(),
+    authorName: "Me",
+    text: cleanText,
+    createdAt: new Date().toISOString(),
+  };
+  const nextPosts = posts.value.map((post) => {
+    if (String(post?._id || "") !== targetId) return post;
+    const existingComments = Array.isArray(post?.comments) ? post.comments : [];
+    return {
+      ...post,
+      comments: [...existingComments, newComment],
+    };
+  });
+  forumCenter.syncPosts(nextPosts);
+  setCommentDraft(postId, "");
+}
+
+function handleDeleteComment(postId, commentId) {
+  const targetPostId = String(postId || "").trim();
+  const targetCommentId = String(commentId || "").trim();
+  if (!targetPostId || !targetCommentId) return;
+  const nextPosts = posts.value.map((post) => {
+    if (String(post?._id || "") !== targetPostId) return post;
+    const existingComments = Array.isArray(post?.comments) ? post.comments : [];
+    return {
+      ...post,
+      comments: existingComments.filter((comment) => String(comment?.id || "") !== targetCommentId),
+    };
+  });
+  forumCenter.syncPosts(nextPosts);
+}
+
+async function handleReplyComment(postId, comment) {
+  const targetPostId = String(postId || "").trim();
+  if (!targetPostId) return;
+  const mentionName = String(comment?.authorName || "").trim();
+  if (!mentionName) return;
+  setCommentDraft(targetPostId, `@${mentionName} `);
+  await nextTick();
+  const input = commentInputRefs.value[targetPostId];
+  if (!input) return;
+  input.focus();
+  if (typeof input.setSelectionRange === "function") {
+    const end = input.value.length;
+    input.setSelectionRange(end, end);
   }
 }
 
-async function submitComment(postId) {
-  const content = getCommentDraft(postId).trim();
-  if (!content || commentLoading.value[postId]) return;
-  commentLoading.value = { ...commentLoading.value, [postId]: true };
+async function handleShareComment(postId, commentId) {
+  const targetPostId = String(postId || "").trim();
+  const targetCommentId = String(commentId || "").trim();
+  if (!targetPostId || !targetCommentId) return;
+  const url = `${window.location.origin}${window.location.pathname}?post=${encodeURIComponent(targetPostId)}&comment=${encodeURIComponent(targetCommentId)}`;
   try {
-    const updated = await api.post(`/forum/posts/${postId}/comments`, { content }).then((r) => r.data);
-    replacePost(updated);
-    setCommentDraft(postId, "");
-    expandedComments.value = { ...expandedComments.value, [postId]: true };
-  } finally {
-    commentLoading.value = { ...commentLoading.value, [postId]: false };
-  }
-}
-
-async function submitReply(postId, parentCommentId) {
-  const content = String(replyDraft.value || "").trim();
-  const key = commentKey(postId, parentCommentId);
-  if (!content) {
-    replyError.value = "Reply cannot be empty";
-    return;
-  }
-  if (replyLoading.value[key]) return;
-  replyLoading.value = { ...replyLoading.value, [key]: true };
-  try {
-    const updated = await api.post(`/forum/posts/${postId}/comments`, {
-      content,
-      parentCommentId,
-    }).then((r) => r.data);
-    replacePost(updated);
-    cancelReplyEditor();
-    expandedComments.value = { ...expandedComments.value, [postId]: true };
-  } finally {
-    replyLoading.value = { ...replyLoading.value, [key]: false };
-  }
-}
-
-async function saveCommentEdit(postId, commentId) {
-  const key = commentKey(postId, commentId);
-  const content = String(commentEditDrafts.value[key] || "").trim();
-  if (!content || commentEditLoading.value[key]) return;
-  commentEditLoading.value = { ...commentEditLoading.value, [key]: true };
-  try {
-    const updated = await api
-      .put(`/forum/posts/${postId}/comments/${commentId}`, { content })
-      .then((r) => r.data);
-    replacePost(updated);
-    cancelEditComment(postId, commentId);
-  } finally {
-    commentEditLoading.value = { ...commentEditLoading.value, [key]: false };
-  }
-}
-
-async function deleteComment(postId, commentId) {
-  if (!window.confirm("Delete this comment?")) return;
-  const updated = await api.delete(`/forum/posts/${postId}/comments/${commentId}`).then((r) => r.data);
-  replacePost(updated);
-  cancelEditComment(postId, commentId);
-  if (isReplyTarget(postId, commentId)) {
-    cancelReplyEditor();
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+    }
+    console.log("Comment link copied to clipboard!", url);
+  } catch {
+    console.log("Comment link copied to clipboard!", url);
   }
 }
 
@@ -683,140 +632,64 @@ watch(
             <button
               type="button"
               class="stat stat-btn like-btn"
-              :class="{ liked: p.likedByMe }"
-              :disabled="likeLoading[p._id]"
-              @click="toggleLike(p._id)"
+              :class="{ liked: p.isLiked }"
+              @click="handleToggleLike(p._id, $event)"
             >
-              <span class="stat-icon" aria-hidden="true">{{ p.likedByMe ? "♥" : "♡" }}</span>
+              <span class="stat-icon" aria-hidden="true">{{ p.isLiked ? "♥" : "♡" }}</span>
               <span class="stat-num">{{ p.likeCount ?? 0 }}</span>
             </button>
             <button type="button" class="stat stat-btn comment-btn" @click="toggleComments(p._id)">
               <span class="stat-icon" aria-hidden="true">💬</span>
               <span class="stat-num">{{ getCommentCount(p) }}</span>
-              <span class="comment-expand" aria-hidden="true">{{ isCommentsExpanded(p._id) ? "▴" : "▾" }}</span>
+              <span class="comment-expand" aria-hidden="true">{{ isCommentSectionOpen(p._id) ? "▴" : "▾" }}</span>
             </button>
           </div>
           <div v-if="activeFilter === 'favorites'" class="favorites-locate-row">
             <button type="button" class="favorite-locate-btn" @click="openSavedPost(p._id)">Open in feed</button>
           </div>
 
-          <section v-if="isCommentsExpanded(p._id)" class="comments-panel">
-            <form class="comment-form" @submit.prevent="submitComment(p._id)">
+          <section v-if="isCommentSectionOpen(p._id)" class="comments-panel">
+            <ul v-if="getCommentCount(p)" class="mock-comment-list">
+              <li v-for="comment in getPostComments(p)" :key="comment.id" class="mock-comment-item">
+                <div class="mock-comment-avatar" :style="{ background: avatarColor(comment.authorName) }">
+                  <span class="avatar-letter mock-comment-avatar-letter">{{ avatarInitial(comment.authorName) }}</span>
+                </div>
+                <div class="mock-comment-body">
+                  <div class="mock-comment-head">
+                    <span class="mock-comment-name">{{ displayNickname(comment.authorName) }}</span>
+                    <time class="mock-comment-time" :datetime="comment.createdAt">
+                      {{ formatRelativeTime(comment.createdAt) }}
+                    </time>
+                  </div>
+                  <p class="mock-comment-text">{{ comment.text }}</p>
+                  <div class="mock-comment-actions">
+                    <button type="button" class="mock-comment-action" @click="handleReplyComment(p._id, comment)">Reply</button>
+                    <button type="button" class="mock-comment-action" @click="handleShareComment(p._id, comment.id)">Share</button>
+                    <button
+                      v-if="comment.authorName === 'Me'"
+                      type="button"
+                      class="mock-comment-action"
+                      @click="handleDeleteComment(p._id, comment.id)"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              </li>
+            </ul>
+            <p v-else class="comments-empty">No comments yet. Be the first one.</p>
+            <form class="comment-form" @submit.prevent="handleSubmitComment(p._id, getCommentDraft(p._id))">
               <input
                 :value="getCommentDraft(p._id)"
                 type="text"
                 class="comment-input"
-                placeholder="Write a comment..."
+                placeholder="Add a comment..."
+                :ref="(el) => setCommentInputRef(p._id, el)"
                 @input="setCommentDraft(p._id, $event.target.value)"
+                @keydown.enter.prevent="handleSubmitComment(p._id, getCommentDraft(p._id))"
               />
-              <button type="submit" class="comment-submit" :disabled="commentLoading[p._id]">Post</button>
+              <button type="submit" class="comment-submit">Send</button>
             </form>
-            <div class="comments-divider" aria-hidden="true"></div>
-            <div class="comments-scroll">
-            <p v-if="!hasAnyComments(p)" class="comments-empty">No comments yet. Be the first one.</p>
-            <ul v-else class="comment-list">
-              <li v-for="c in rootComments(p)" :key="commentIdValue(c) || `${c.userId}-${c.createdAt}`" class="comment-item">
-                <div class="comment-avatar" :style="{ background: avatarColor(c.userId || c.authorName) }">
-                  <span class="avatar-letter comment-avatar-letter">{{ avatarInitial(c.authorName) }}</span>
-                </div>
-                <div class="comment-main">
-                  <div class="comment-head">
-                    <span class="comment-author">{{ displayNickname(c.authorName) }}</span>
-                    <time class="comment-time" :datetime="c.createdAt">{{ formatRelativeTime(c.createdAt) }}</time>
-                  </div>
-                  <p v-if="getEditDraft(p._id, c._id) === null" class="comment-content">{{ c.content }}</p>
-                  <div v-else class="comment-edit-row">
-                    <input
-                      :value="getEditDraft(p._id, c._id)"
-                      type="text"
-                      class="comment-edit-input"
-                      @input="setEditDraft(p._id, c._id, $event.target.value)"
-                    />
-                    <button
-                      type="button"
-                      class="comment-action primary"
-                      :disabled="commentEditLoading[`${p._id}:${c._id}`]"
-                      @click="saveCommentEdit(p._id, c._id)"
-                    >
-                      Save
-                    </button>
-                    <button type="button" class="comment-action" @click="cancelEditComment(p._id, c._id)">Cancel</button>
-                  </div>
-                  <div v-if="isCommentOwner(c) && getEditDraft(p._id, c._id) === null" class="comment-actions">
-                    <button type="button" class="comment-link" @click="startEditComment(p._id, c)">Edit</button>
-                    <button type="button" class="comment-link danger" @click="deleteComment(p._id, c._id)">Delete</button>
-                  </div>
-                  <div class="comment-actions">
-                    <button type="button" class="comment-link" @click="openReplyEditor(p._id, c._id)">Reply</button>
-                  </div>
-                  <form
-                    v-if="isReplyTarget(p._id, c._id)"
-                    class="reply-form"
-                    @submit.prevent="submitReply(p._id, c._id)"
-                  >
-                    <input
-                      :value="replyDraft"
-                      type="text"
-                      class="comment-input reply-input"
-                      placeholder="Write a reply..."
-                      @input="
-                        replyDraft = $event.target.value;
-                        if (replyError) replyError = '';
-                      "
-                    />
-                    <button
-                      type="submit"
-                      class="comment-submit"
-                      :disabled="replyLoading[`${p._id}:${c._id}`]"
-                    >
-                      Reply
-                    </button>
-                    <button type="button" class="comment-action" @click="cancelReplyEditor">Cancel</button>
-                  </form>
-                  <p v-if="isReplyTarget(p._id, c._id) && replyError" class="reply-error">{{ replyError }}</p>
-                  <ul v-if="repliesForComment(p, c._id).length" class="reply-list">
-                    <li
-                      v-for="reply in repliesForComment(p, c._id)"
-                      :key="commentIdValue(reply) || `${reply.userId}-${reply.createdAt}`"
-                      class="comment-item reply-item"
-                    >
-                      <div class="comment-avatar reply-avatar" :style="{ background: avatarColor(reply.userId || reply.authorName) }">
-                        <span class="avatar-letter comment-avatar-letter">{{ avatarInitial(reply.authorName) }}</span>
-                      </div>
-                      <div class="comment-main">
-                        <div class="comment-head">
-                          <span class="comment-author">{{ displayNickname(reply.authorName) }}</span>
-                          <time class="comment-time" :datetime="reply.createdAt">{{ formatRelativeTime(reply.createdAt) }}</time>
-                        </div>
-                        <p v-if="getEditDraft(p._id, reply._id) === null" class="comment-content">{{ reply.content }}</p>
-                        <div v-else class="comment-edit-row">
-                          <input
-                            :value="getEditDraft(p._id, reply._id)"
-                            type="text"
-                            class="comment-edit-input"
-                            @input="setEditDraft(p._id, reply._id, $event.target.value)"
-                          />
-                          <button
-                            type="button"
-                            class="comment-action primary"
-                            :disabled="commentEditLoading[`${p._id}:${reply._id}`]"
-                            @click="saveCommentEdit(p._id, reply._id)"
-                          >
-                            Save
-                          </button>
-                          <button type="button" class="comment-action" @click="cancelEditComment(p._id, reply._id)">Cancel</button>
-                        </div>
-                        <div v-if="isCommentOwner(reply) && getEditDraft(p._id, reply._id) === null" class="comment-actions">
-                          <button type="button" class="comment-link" @click="startEditComment(p._id, reply)">Edit</button>
-                          <button type="button" class="comment-link danger" @click="deleteComment(p._id, reply._id)">Delete</button>
-                        </div>
-                      </div>
-                    </li>
-                  </ul>
-                </div>
-              </li>
-            </ul>
-            </div>
           </section>
         </article>
       </template>
@@ -1589,10 +1462,93 @@ watch(
 }
 
 .comments-empty {
-  margin: 0;
+  margin: 0 0 8px;
   color: #6e8791;
   font-size: 0.86rem;
   padding: 4px 2px;
+}
+
+.mock-comment-list {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.mock-comment-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border-radius: 10px;
+  background: #f8fafb;
+  padding: 8px;
+}
+
+.mock-comment-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.mock-comment-avatar-letter {
+  font-size: 0.7rem;
+}
+
+.mock-comment-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.mock-comment-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.mock-comment-name {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #46606a;
+}
+
+.mock-comment-time {
+  font-size: 0.7rem;
+  color: #8da0a8;
+}
+
+.mock-comment-text {
+  margin: 0;
+  font-size: 0.82rem;
+  color: #314651;
+  line-height: 1.4;
+}
+
+.mock-comment-actions {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mock-comment-action {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: 0.72rem;
+  color: #9aa7ad;
+  line-height: 1;
+}
+
+.mock-comment-action:hover {
+  color: #627883;
+  text-decoration: underline;
 }
 
 .comment-list {

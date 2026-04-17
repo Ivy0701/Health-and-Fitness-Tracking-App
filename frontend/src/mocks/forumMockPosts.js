@@ -6,6 +6,32 @@ const TAG_MAP = {
   "#Notes": "notes",
 };
 
+const COMMENT_AUTHORS = ["FitNova", "GymPanda", "LeanAlex", "CoreMia", "RunJay", "MacroLily"];
+const COMMENT_TEXTS = [
+  "Great point. This helped me too.",
+  "I had a similar issue last week.",
+  "Keep going, your progress is solid.",
+  "Try a smaller change and track for 7 days.",
+  "This routine looks very practical.",
+  "Thanks for sharing this update.",
+];
+
+function buildInitialComments(index, createdAtIso) {
+  const baseTime = new Date(createdAtIso).getTime();
+  const count = (index % 2) + 1; // 1-2 comments
+  return Array.from({ length: count }).map((_, commentIndex) => {
+    const authorName = COMMENT_AUTHORS[(index + commentIndex) % COMMENT_AUTHORS.length];
+    const text = COMMENT_TEXTS[(index * 2 + commentIndex) % COMMENT_TEXTS.length];
+    const offsetMinutes = (commentIndex + 1) * 12;
+    return {
+      id: `mock-${index + 1}-comment-${commentIndex + 1}`,
+      authorName,
+      text,
+      createdAt: new Date(baseTime + offsetMinutes * 60 * 1000).toISOString(),
+    };
+  });
+}
+
 const RAW_MOCK_POSTS = [
   {
     id: "post-1",
@@ -193,6 +219,7 @@ export function buildForumMockPosts() {
   const now = Date.now();
   return RAW_MOCK_POSTS.map((item, index) => {
     const offsetMs = ((index * 7 + 3) % (7 * 24)) * 60 * 60 * 1000;
+    const createdAt = new Date(now - offsetMs).toISOString();
     return {
       _id: `mock-${item.id}`,
       userId: `mock-user-${index + 1}`,
@@ -201,10 +228,10 @@ export function buildForumMockPosts() {
       content: item.content,
       tags: item.tags.map((tag) => TAG_MAP[tag]).filter(Boolean),
       likeCount: item.likes,
-      commentCount: item.comments,
+      comments: buildInitialComments(index, createdAt),
+      isLiked: false,
       likedByMe: false,
-      comments: [],
-      createdAt: new Date(now - offsetMs).toISOString(),
+      createdAt,
     };
   });
 }
