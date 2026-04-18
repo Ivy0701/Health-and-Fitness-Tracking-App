@@ -790,14 +790,34 @@ watch(
   gap: 16px;
 }
 .modal-close {
-  width: 32px;
-  height: 32px;
+  box-sizing: border-box;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  margin: 0;
   border: none;
   border-radius: 999px;
   background: #eef3f2;
   color: #2f4858;
   cursor: pointer;
-  font-size: 18px;
+  font-size: 22px;
+  line-height: 1;
+  font-family: inherit;
+  flex-shrink: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.modal-close:hover {
+  background: #e2eae8;
+}
+
+.modal-close:active {
+  transform: scale(0.96);
 }
 .modal-head {
   display: flex;

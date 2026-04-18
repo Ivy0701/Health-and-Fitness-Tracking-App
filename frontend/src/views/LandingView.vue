@@ -1,5 +1,9 @@
 <script setup>
-/** Public landing: module cards link to login (same routes as post-auth navbar). */
+import { useAuthStore } from "../stores/auth";
+
+const auth = useAuthStore();
+
+/** Feature cards: whole card is a link — logged-in users go to the module; guests go to login. */
 const landingModules = [
   {
     key: "dashboard",
@@ -7,6 +11,7 @@ const landingModules = [
     icon: "📊",
     title: "Dashboard",
     desc: "Track your daily progress and key stats.",
+    path: "/dashboard",
   },
   {
     key: "courses",
@@ -14,6 +19,7 @@ const landingModules = [
     icon: "📚",
     title: "Courses",
     desc: "Browse and join structured training programs.",
+    path: "/courses",
   },
   {
     key: "workout",
@@ -21,6 +27,7 @@ const landingModules = [
     icon: "💪",
     title: "Workout",
     desc: "Log workouts and monitor performance.",
+    path: "/workout",
   },
   {
     key: "diet",
@@ -28,6 +35,7 @@ const landingModules = [
     icon: "🥗",
     title: "Diet",
     desc: "Manage calorie intake and nutrition.",
+    path: "/diet",
   },
   {
     key: "schedule",
@@ -35,6 +43,7 @@ const landingModules = [
     icon: "📅",
     title: "Schedule",
     desc: "Plan and organize your fitness routine.",
+    path: "/schedule",
   },
   {
     key: "profile",
@@ -42,6 +51,7 @@ const landingModules = [
     icon: "👤",
     title: "Profile",
     desc: "Manage your personal data and fitness goals.",
+    path: "/profile",
   },
   {
     key: "favorites",
@@ -49,6 +59,7 @@ const landingModules = [
     icon: "⭐",
     title: "Favorites",
     desc: "Save and quickly access your preferred content.",
+    path: "/favorites",
   },
   {
     key: "forum",
@@ -56,6 +67,7 @@ const landingModules = [
     icon: "💬",
     title: "Forum",
     desc: "Share experiences and interact with the community.",
+    path: "/forum",
   },
 ];
 </script>
@@ -90,7 +102,7 @@ const landingModules = [
           <router-link
             v-for="mod in landingModules"
             :key="mod.key"
-            to="/login"
+            :to="auth.isLoggedIn ? mod.path : '/login'"
             class="feature-card"
             :class="`feature-card--${mod.theme}`"
           >
@@ -342,9 +354,9 @@ const landingModules = [
   color: inherit;
   cursor: pointer;
   transition:
-    transform 0.22s ease,
-    box-shadow 0.22s ease,
-    border-color 0.22s ease;
+    transform 0.2s ease,
+    box-shadow 0.2s ease,
+    border-color 0.2s ease;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -361,10 +373,16 @@ const landingModules = [
 }
 
 .feature-card:hover {
-  transform: translateY(-3px);
+  transform: translateY(-4px);
   box-shadow:
-    0 8px 22px rgba(47, 72, 88, 0.1),
-    0 16px 36px rgba(52, 139, 147, 0.08);
+    0 8px 20px rgba(0, 0, 0, 0.1),
+    0 12px 28px rgba(47, 72, 88, 0.08),
+    0 16px 36px rgba(52, 139, 147, 0.07);
+}
+
+.feature-card:active {
+  transform: scale(0.97);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
 }
 
 .feature-card:focus-visible {

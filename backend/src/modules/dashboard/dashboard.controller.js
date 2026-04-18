@@ -323,11 +323,16 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     vipPlan: { $in: ACTIVE_VIP_PLANS },
   };
 
+  /**
+   * One-off cleanup for inconsistent rows (VIP flags true but plan "none").
+   * Must NOT run while a refund is pending, and must NOT run after a refund was **rejected**
+   * — rejected users must remain VIP until subscription actually ends or admin approves refund.
+   */
   const vipDirtyFixResult = await User.updateMany(
     {
       ...vipFlagMatch,
       vipPlan: "none",
-      refundStatus: { $ne: "pending" },
+      refundStatus: { $nin: ["pending", "rejected"] },
     },
     {
       $set: {

@@ -2,7 +2,6 @@
 import { useRouter } from "vue-router";
 import { useAuthStore } from "../../stores/auth";
 import { useBmiStore } from "../../stores/bmi";
-import NotificationBell from "./NotificationBell.vue";
 
 const router = useRouter();
 const auth = useAuthStore();
@@ -26,7 +25,6 @@ function logout() {
     <router-link to="/favorites">⭐ Favorites</router-link>
     <router-link to="/forum">💬 Forum</router-link>
     <router-link to="/vip">👑 VIP</router-link>
-    <NotificationBell class="nav-bell" />
     <button class="logout" @click="logout">🚪 Logout</button>
   </nav>
 </template>
@@ -52,12 +50,8 @@ a.router-link-active {
   background: #2f4858;
   color: #fff;
 }
-.nav-bell {
-  margin-left: auto;
-}
-
 .logout {
-  margin-left: 0;
+  margin-left: auto;
   border: none;
   border-radius: 999px;
   background: #2f4858;

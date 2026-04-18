@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { storeToRefs } from "pinia";
 import { useRoute } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
+import NotificationBell from "../components/common/NotificationBell.vue";
 import api from "../services/api";
 import { useFavorites } from "../services/favorites";
 import { formatRelativeTime } from "../utils/formatRelativeTime";
@@ -656,16 +657,19 @@ watch(me, (u) => {
           <p class="forum-sub">Share meals, workouts, and habits—stay motivated together.</p>
         </div>
         <div class="forum-head-actions">
-          <button
-            v-if="me"
-            type="button"
-            class="forum-my-posts-btn"
-            :class="{ active: activeFilter === 'mine' }"
-            :aria-pressed="activeFilter === 'mine' ? 'true' : 'false'"
-            @click="toggleMinePostsView"
-          >
-            My Posts
-          </button>
+          <div class="forum-head-actions-inner">
+            <NotificationBell class="forum-notify-bell" />
+            <button
+              v-if="me"
+              type="button"
+              class="forum-my-posts-btn"
+              :class="{ active: activeFilter === 'mine' }"
+              :aria-pressed="activeFilter === 'mine' ? 'true' : 'false'"
+              @click="toggleMinePostsView"
+            >
+              My Posts
+            </button>
+          </div>
         </div>
       </div>
     </header>
@@ -922,6 +926,26 @@ watch(me, (u) => {
 .forum-head-actions {
   position: relative;
   flex-shrink: 0;
+}
+
+.forum-head-actions-inner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.forum-notify-bell :deep(.notify-btn) {
+  border: 1px solid #c8dbd7;
+  background: #f7fcfa;
+  color: var(--c6);
+}
+
+.forum-notify-bell :deep(.notify-btn:hover) {
+  border-color: var(--c3);
+  background: #eef8f4;
+  color: #2f4858;
 }
 
 .forum-my-posts-btn {

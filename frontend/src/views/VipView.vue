@@ -71,7 +71,8 @@ function formatDate(value) {
   return value ? new Date(value).toLocaleDateString() : "-";
 }
 
-const isVipActive = computed(() => Boolean(status.value?.vip_status));
+/** VIP membership follows `vip_status` / `isVip` from the server — never infer from `refundStatus` alone. */
+const isVipActive = computed(() => Boolean(status.value?.vip_status ?? status.value?.isVip));
 const vipPlanLabel = computed(() => status.value?.vipPlan || "none");
 const vipSinceLabel = computed(() => formatDate(status.value?.vipSince));
 const vipEndLabel = computed(() => formatDate(status.value?.vipEndDate));
