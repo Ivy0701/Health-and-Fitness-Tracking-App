@@ -948,7 +948,14 @@ async function savePlan() {
   }
 }
 
+function onFitnessInvalidateData(ev) {
+  const d = ev?.detail || {};
+  if (!d.workoutDay) return;
+  Promise.all([loadTodayInfo(), loadPlans()]).catch(() => {});
+}
+
 onMounted(async () => {
+  window.addEventListener("fitness:invalidate-data", onFitnessInvalidateData);
   const routeDate = typeof route.query.date === "string" ? normalizeDateKey(route.query.date) : "";
   if ((route.query.fromSession === "1" || route.query.fromSchedule === "1") && routeDate) {
     selectedDate.value = routeDate;
@@ -1014,6 +1021,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  window.removeEventListener("fitness:invalidate-data", onFitnessInvalidateData);
   if (focusTimer) window.clearTimeout(focusTimer);
   if (courseCardFlashTimer) window.clearTimeout(courseCardFlashTimer);
   if (scheduleCourseFocusTimer) window.clearTimeout(scheduleCourseFocusTimer);

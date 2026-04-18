@@ -1,8 +1,9 @@
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
+import { fetchEnrolledCourses } from "../services/courses";
 import { getTodayLocalDate } from "../utils/dateLocal";
 import { isDietFoodLogScheduleRow, isDietMealPlanApplyRow } from "../utils/dietPlanSchedulePayload";
 import {
@@ -33,6 +34,8 @@ import { calculateWorkoutCaloriesBurned, resolveWeightKg } from "../utils/workou
 
 const me = ref(null);
 const items = ref([]);
+/** When set, course/course_session rows whose courseId is not in this set are hidden (orphans after drop). */
+const enrolledCourseIdSet = ref(null);
 const router = useRouter();
 const route = useRoute();
 const focusedScheduleId = ref("");
@@ -97,6 +100,10 @@ const visibleItems = computed(() =>
     const allowed = ["course", "course_session", "workout", "exercise", "reminder", "manual", "personal", "diet"];
     if (!allowed.includes(type) || !String(item?.title || "").trim() || !item?.date || !item?.time) return false;
     if (isDietMealPlanApplyRow(item)) return false;
+    const cid = String(item?.courseId || "").trim();
+    if (enrolledCourseIdSet.value && cid && (type === "course" || type === "course_session")) {
+      if (!enrolledCourseIdSet.value.has(cid)) return false;
+    }
     return true;
   })
 );
@@ -532,13 +539,44 @@ function selectDay(iso) {
   selectedDate.value = d;
 }
 
+async function refreshEnrolledCourseIdSet() {
+  try {
+    const rows = await fetchEnrolledCourses();
+    const ids = new Set();
+    for (const r of Array.isArray(rows) ? rows : []) {
+      const id = String(r?.course_id?._id || r?.course_id || "").trim();
+      if (id) ids.add(id);
+    }
+    enrolledCourseIdSet.value = ids;
+  } catch {
+    enrolledCourseIdSet.value = null;
+  }
+}
+
 async function load() {
   me.value = await api.get("/users/me").then((r) => r.data);
-  items.value = await api.get(`/schedules/${me.value.id}`).then((r) => r.data);
+  const [scheduleData] = await Promise.all([
+    api.get(`/schedules/${me.value.id}`).then((r) => r.data),
+    refreshEnrolledCourseIdSet(),
+  ]);
+  items.value = scheduleData;
   if (!form.date) form.date = getTodayLocalDate();
   const focused = await applyFocusFromQuery();
   await nextTick();
   if (!focused) scrollTimelineToDefault();
+}
+
+function onFitnessInvalidateData(ev) {
+  const d = ev?.detail || {};
+  if (!d.schedules || !me.value?.id) return;
+  Promise.all([
+    api.get(`/schedules/${me.value.id}`).then((r) => r.data),
+    refreshEnrolledCourseIdSet(),
+  ])
+    .then(([data]) => {
+      items.value = data;
+    })
+    .catch(() => {});
 }
 
 async function addItem() {
@@ -685,7 +723,25 @@ async function removeItem(item) {
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  window.addEventListener("fitness:invalidate-data", onFitnessInvalidateData);
+  load();
+});
+onActivated(() => {
+  if (me.value?.id) {
+    Promise.all([
+      api.get(`/schedules/${me.value.id}`).then((r) => r.data),
+      refreshEnrolledCourseIdSet(),
+    ])
+      .then(([data]) => {
+        items.value = data;
+      })
+      .catch(() => {});
+  }
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("fitness:invalidate-data", onFitnessInvalidateData);
+});
 
 watch(
   () => route.fullPath,

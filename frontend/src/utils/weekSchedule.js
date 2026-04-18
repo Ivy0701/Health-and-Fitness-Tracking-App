@@ -1,3 +1,5 @@
+import { pickSuggestedDailyTimeHHmm } from "./courseSuggestedTime";
+
 /** Weekday 0 = Monday … 6 = Sunday (timetable convention) */
 export const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -94,46 +96,47 @@ export function itemEndMinutes(item) {
   return s + effectiveDurationMinutes(item);
 }
 
-/** Expand a single week (debug / special cases) */
+/** Expand a single week: one session per day at the course daily template time (parity with backend). */
 export function expandCourseToPlannedItems(course, weekMonday) {
-  const slots = course.weeklySlots || [];
+  const timeStr = pickSuggestedDailyTimeHHmm(course);
+  if (!timeStr) return [];
   const dur = Number(course.duration) > 0 ? Number(course.duration) : 30;
-  return slots.map((slot) => ({
-    title: course.title,
-    date: dateForWeekday(weekMonday, slot.weekday),
-    time: String(slot.startTime).slice(0, 5),
-    note: `${course.category || "course"} · ${dur} min`,
-    durationMinutes: dur,
-    courseId: course._id,
-  }));
+  const out = [];
+  for (let w = 0; w < 7; w += 1) {
+    out.push({
+      title: course.title,
+      date: dateForWeekday(weekMonday, w),
+      time: timeStr,
+      note: `${course.category || "course"} · ${dur} min`,
+      durationMinutes: dur,
+      courseId: course._id,
+    });
+  }
+  return out;
 }
 
-/** For each day from startISO through endISO (inclusive), generate sessions from weeklySlots */
+/** For each day from startISO through endISO (inclusive), one session per day at daily template time. */
 export function expandCourseToPlannedItemsInRange(course, startISO, endISO) {
   const start = parseLocalDateISO(startISO);
   const end = parseLocalDateISO(endISO);
   if (!start || !end || end < start) return [];
 
-  const slots = course.weeklySlots || [];
+  const timeStr = pickSuggestedDailyTimeHHmm(course);
+  if (!timeStr) return [];
   const dur = Number(course.duration) > 0 ? Number(course.duration) : 30;
   const out = [];
   const endT = end.getTime();
 
   for (let d = new Date(start); d.getTime() <= endT; d = addDays(d, 1)) {
-    const w = weekdayMon0(d);
     const iso = formatISODateLocal(d);
-    for (const slot of slots) {
-      if (Number(slot.weekday) === w) {
-        out.push({
-          title: course.title,
-          date: iso,
-          time: String(slot.startTime).slice(0, 5),
-          note: `${course.category || "course"} · ${dur} min`,
-          durationMinutes: dur,
-          courseId: course._id,
-        });
-      }
-    }
+    out.push({
+      title: course.title,
+      date: iso,
+      time: timeStr,
+      note: `${course.category || "course"} · ${dur} min`,
+      durationMinutes: dur,
+      courseId: course._id,
+    });
   }
   return out;
 }

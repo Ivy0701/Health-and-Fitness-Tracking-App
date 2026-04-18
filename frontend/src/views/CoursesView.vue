@@ -12,6 +12,7 @@ import {
   fetchCourses,
   fetchEnrolledCourses,
 } from "../services/courses";
+import { buildDailyScheduleRangeFromCourse, formatCourseSuggestedDailyTime } from "../utils/courseSuggestedTime";
 
 const router = useRouter();
 const route = useRoute();
@@ -136,10 +137,10 @@ const activePlans = computed(() => {
       const startDate = String(row?.start_date || dateKey(new Date())).slice(0, 10);
       const currentDay = computeCourseDay(startDate, totalDays);
       const ns = row?.next_schedule;
-      const nextSessionLine =
-        ns?.date && ns?.startTime
-          ? `Next session: ${ns.date} ${ns.startTime}${ns.endTime ? ` - ${ns.endTime}` : ""}`
-          : "";
+      const courseLean = row?.course_id && typeof row.course_id === "object" ? row.course_id : null;
+      const ds = row?.daily_schedule || buildDailyScheduleRangeFromCourse(courseLean || {});
+      const dailyTimeLine =
+        ds?.startTime && ds?.endTime ? `Daily time: ${ds.startTime} - ${ds.endTime}` : "";
       return {
         id: `course-${row._id || row.id}`,
         type: "course",
@@ -151,7 +152,7 @@ const activePlans = computed(() => {
         endDate: endDateByDuration(startDate, totalDays),
         courseId: String(row?.course_id?._id || row?.course_id || ""),
         focusDate: ns?.date || String(row?.start_date || dateKey(new Date())).slice(0, 10),
-        nextSessionLine,
+        dailyTimeLine,
         enrolledRow: row,
       };
     })
@@ -169,19 +170,12 @@ const activeModalEnrollment = computed(() => {
   );
 });
 
-const WEEKDAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-
-function formatWeeklySuggested(course) {
-  const slots = course?.weeklySlots || [];
-  if (!Array.isArray(slots) || !slots.length) return "";
-  return slots
-    .map((s) => {
-      const d = WEEKDAY_SHORT[Number(s.weekday)] || "?";
-      const t = String(s.startTime || "").slice(0, 5);
-      return `${d} ${t}`;
-    })
-    .join(", ");
-}
+const dailyScheduleForModal = computed(() => {
+  const e = activeModalEnrollment.value;
+  if (e?.daily_schedule?.startTime) return e.daily_schedule;
+  const c = activeModalCourse.value;
+  return c ? buildDailyScheduleRangeFromCourse(c) : null;
+});
 
 function closeScheduleOutcomeModal() {
   scheduleOutcomeModal.value = null;
@@ -294,17 +288,22 @@ async function viewPlanInSchedule(row) {
 }
 
 async function removeActivePlan(row) {
-  const ok = window.confirm(`Stop "${row.title}" and remove its future pending tasks?`);
+  const ok = window.confirm(
+    `Remove "${row.title}" from My Plans? This clears all schedule blocks, daily progress, and course-linked workout logs for this plan.`
+  );
   if (!ok) return;
   const rowId = String(row.id || "");
   removingPlanIds.value = new Set([...removingPlanIds.value, rowId]);
   planActionNotice.value = "";
   state.value.error = "";
   try {
+    await dropCourseEnrollmentApi(row.courseId);
+    window.dispatchEvent(
+      new CustomEvent("fitness:invalidate-data", { detail: { schedules: true, workoutDay: true } })
+    );
     enrolledCourseRows.value = (enrolledCourseRows.value || []).filter(
       (it) => String(it?._id || it?.id || "") !== String(row?.enrolledRow?._id || row?.enrolledRow?.id || "")
     );
-    await dropCourseEnrollmentApi(row.courseId);
     await refreshEnrolled();
     planActionNotice.value = `"${row.title}" removed from My Plans.`;
   } catch (e) {
@@ -399,7 +398,7 @@ watch(
             <span class="badge status-badge">{{ row.status }}</span>
             <p class="meta-line">Start: {{ row.startDate }}</p>
             <p class="meta-line">End: {{ row.endDate }}</p>
-            <p v-if="row.nextSessionLine" class="meta-line next-session-line">{{ row.nextSessionLine }}</p>
+            <p v-if="row.dailyTimeLine" class="meta-line next-session-line">{{ row.dailyTimeLine }}</p>
           </div>
           <div class="row-actions">
             <button type="button" class="btn-primary" @click="router.push('/workout')">Go to Workout</button>
@@ -499,12 +498,11 @@ watch(
           <p class="meta-line">Difficulty: {{ difficultyStars(activeModalCourse.difficulty) }}</p>
           <p class="meta-line">Plan length: {{ activeModalCourse.durationDays }} days</p>
           <p class="meta-line">Default session duration: {{ activeModalCourse.minutesPerDay }} min</p>
-          <p v-if="formatWeeklySuggested(activeModalCourse)" class="meta-line">
-            Suggested time (from course): {{ formatWeeklySuggested(activeModalCourse) }}
+          <p v-if="formatCourseSuggestedDailyTime(activeModalCourse)" class="meta-line">
+            Suggested time: {{ formatCourseSuggestedDailyTime(activeModalCourse) }}
           </p>
-          <p v-if="isCourseActive(activeModalCourse) && activeModalEnrollment?.next_schedule" class="meta-line">
-            Your scheduled time: {{ activeModalEnrollment.next_schedule.date }} {{ activeModalEnrollment.next_schedule.startTime }} -
-            {{ activeModalEnrollment.next_schedule.endTime }}
+          <p v-if="isCourseActive(activeModalCourse) && dailyScheduleForModal?.startTime" class="meta-line">
+            Scheduled daily: {{ dailyScheduleForModal.startTime }} - {{ dailyScheduleForModal.endTime }}
           </p>
           <p class="meta-line">Target: {{ activeModalCourse.targetUsers }}</p>
         </div>

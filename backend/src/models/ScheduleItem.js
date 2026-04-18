@@ -15,6 +15,8 @@ const scheduleItemSchema = new mongoose.Schema(
     time: { type: String, required: true, trim: true },
     note: { type: String, trim: true, default: "" },
     courseId: { type: mongoose.Schema.Types.ObjectId, ref: "Course", default: null },
+    /** Enrollment that generated this row (course blocks from enroll-and-schedule / workout day sync). */
+    enrolledCourseId: { type: mongoose.Schema.Types.ObjectId, ref: "EnrolledCourse", default: null, index: true },
     linkedDietId: { type: mongoose.Schema.Types.ObjectId, ref: "Diet", default: null, index: true },
     durationMinutes: { type: Number, min: 1, default: 60 },
     overlapAccepted: { type: Boolean, default: false },

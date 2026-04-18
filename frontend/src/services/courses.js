@@ -1,4 +1,5 @@
 import api from "./api";
+import { pickSuggestedDailyTimeHHmm } from "../utils/courseSuggestedTime";
 
 function shouldHideInvalidCourse(course) {
   const title = String(course?.title || course?.name || "").trim().toLowerCase();
@@ -12,6 +13,7 @@ export async function fetchCourses() {
     .filter((course) => !shouldHideInvalidCourse(course))
     .map((course) => ({
       ...course,
+      suggestedDailyTime: pickSuggestedDailyTimeHHmm(course),
       id: String(course._id || course.id || ""),
       title: String(course.title || "").trim(),
       category: String(course.category || "General").trim() || "General",

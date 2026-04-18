@@ -8,6 +8,8 @@ const workoutSchema = new mongoose.Schema(
     caloriesBurned: { type: Number, min: 0, default: 0 },
     date: { type: Date, default: Date.now, index: true },
     note: { type: String, trim: true, default: "" },
+    /** When logged from a course day, links the course for cascade delete on drop. */
+    courseId: { type: mongoose.Schema.Types.ObjectId, ref: "Course", default: null, index: true },
   },
   { timestamps: true, versionKey: false }
 );

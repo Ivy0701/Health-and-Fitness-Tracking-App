@@ -10,6 +10,7 @@ const User = require("../../models/User");
 const { buildCourseExercises, summarizeCourseExercises } = require("../../utils/courseSession");
 const { applyMetBurnsToExercises } = require("../../utils/workoutCaloriesBurn");
 const courseSchedulePlacement = require("../../utils/courseSchedulePlacement");
+const { cascadeDeleteCoursePlanData } = require("../../services/coursePlanCascade");
 
 function defaultExercisesPreview({ title, category }) {
   const text = String(title || "").toLowerCase();
@@ -66,14 +67,18 @@ function normalizeWeeklySlots(raw) {
 const list = asyncHandler(async (req, res) => {
   const rows = await Course.find().sort({ createdAt: -1 });
   res.json(
-    rows.map((row) => ({
-      ...row.toObject(),
-      difficulty_value: normalizeDifficultyValue(row.difficulty),
-      target_users: row.target_users || row.difficulty || "beginner",
-      exercises_preview: Array.isArray(row.exercises_preview) && row.exercises_preview.length
-        ? row.exercises_preview
-        : defaultExercisesPreview(row),
-    }))
+    rows.map((row) => {
+      const o = row.toObject();
+      return {
+        ...o,
+        difficulty_value: normalizeDifficultyValue(row.difficulty),
+        target_users: row.target_users || row.difficulty || "beginner",
+        exercises_preview: Array.isArray(row.exercises_preview) && row.exercises_preview.length
+          ? row.exercises_preview
+          : defaultExercisesPreview(row),
+        daily_schedule: courseSchedulePlacement.buildDailySchedulePayload(o),
+      };
+    })
   );
 });
 
@@ -109,22 +114,26 @@ const create = asyncHandler(async (req, res) => {
     isPremium,
     weeklySlots: slots,
   });
+  const created = row.toObject();
   res.status(201).json({
-    ...row.toObject(),
+    ...created,
     difficulty_value: normalizeDifficultyValue(row.difficulty),
     target_users: row.target_users || row.difficulty || "beginner",
     exercises_preview: row.exercises_preview?.length ? row.exercises_preview : defaultExercisesPreview(row),
+    daily_schedule: courseSchedulePlacement.buildDailySchedulePayload(created),
   });
 });
 
 const detail = asyncHandler(async (req, res) => {
   const row = await Course.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Course not found" });
+  const o = row.toObject();
   res.json({
-    ...row.toObject(),
+    ...o,
     difficulty_value: normalizeDifficultyValue(row.difficulty),
     target_users: row.target_users || row.difficulty || "beginner",
     exercises_preview: row.exercises_preview?.length ? row.exercises_preview : defaultExercisesPreview(row),
+    daily_schedule: courseSchedulePlacement.buildDailySchedulePayload(o),
   });
 });
 
@@ -171,7 +180,9 @@ const listEnrolled = asyncHandler(async (req, res) => {
         scheduleItemId: String(next._id || ""),
       };
     }
-    return { ...row, next_schedule };
+    const courseLean = row?.course_id && typeof row.course_id === "object" ? row.course_id : null;
+    const daily_schedule = courseLean ? courseSchedulePlacement.buildDailySchedulePayload(courseLean) : null;
+    return { ...row, next_schedule, daily_schedule };
   });
 
   res.json(out);
@@ -250,38 +261,155 @@ const enrollAndSchedule = asyncHandler(async (req, res) => {
   const existing = await EnrolledCourse.findOne({ user_id: req.user.id, course_id }).exec();
 
   if (existing && existing.status === "active" && (await hasFutureIncomplete(course._id))) {
-    const sessions = await ScheduleItem.find({
+    const sessionsTplResync = courseSchedulePlacement.expandCourseSessionsInRange(course, today, endDateKey);
+    if (!sessionsTplResync.length) {
+      const sessions = await ScheduleItem.find({
+        userId: req.user.id,
+        courseId: course._id,
+        date: { $gte: today },
+        is_completed: { $ne: true },
+      })
+        .sort({ date: 1, time: 1 })
+        .lean();
+      const next = sessions[0];
+      let nextSession = null;
+      if (next?.date && next?.time) {
+        const dur = Math.max(1, Number(next.durationMinutes) || 30);
+        nextSession = {
+          date: String(next.date).slice(0, 10),
+          startTime: String(next.time).slice(0, 5),
+          endTime: courseSchedulePlacement.endTimeHHmm(next.time, dur),
+        };
+      }
+      return res.status(200).json({
+        success: true,
+        scheduled: true,
+        rescheduled: false,
+        alreadyScheduled: true,
+        resynced: false,
+        message: "This course is already on your schedule.",
+        enrollment: existing.toObject ? existing.toObject() : existing,
+        sessions: sessions.map((s) => ({
+          date: String(s.date).slice(0, 10),
+          startTime: String(s.time).slice(0, 5),
+          endTime: courseSchedulePlacement.endTimeHHmm(s.time, Math.max(1, Number(s.durationMinutes) || 30)),
+          scheduleItemId: String(s._id),
+        })),
+        nextSession,
+      });
+    }
+
+    const lastTplDateR = sessionsTplResync[sessionsTplResync.length - 1]?.date || today;
+    const rangeEndR = courseSchedulePlacement.addDaysToDateKey(lastTplDateR, maxDayShift);
+    const existingAllR = await ScheduleItem.find({
+      userId: req.user.id,
+      date: { $gte: today, $lte: rangeEndR },
+    }).lean();
+    const resolvedR = courseSchedulePlacement.resolveAllCourseSessions(sessionsTplResync, existingAllR, { maxDayShift });
+    if (!resolvedR.ok) {
+      const sessions = await ScheduleItem.find({
+        userId: req.user.id,
+        courseId: course._id,
+        date: { $gte: today },
+        is_completed: { $ne: true },
+      })
+        .sort({ date: 1, time: 1 })
+        .lean();
+      const next = sessions[0];
+      let nextSession = null;
+      if (next?.date && next?.time) {
+        const dur = Math.max(1, Number(next.durationMinutes) || 30);
+        nextSession = {
+          date: String(next.date).slice(0, 10),
+          startTime: String(next.time).slice(0, 5),
+          endTime: courseSchedulePlacement.endTimeHHmm(next.time, dur),
+        };
+      }
+      return res.status(200).json({
+        success: true,
+        scheduled: true,
+        rescheduled: false,
+        alreadyScheduled: true,
+        resynced: false,
+        message:
+          "This course is already on your schedule. Could not resync to daily sessions (calendar too full on some days).",
+        enrollment: existing.toObject ? existing.toObject() : existing,
+        sessions: sessions.map((s) => ({
+          date: String(s.date).slice(0, 10),
+          startTime: String(s.time).slice(0, 5),
+          endTime: courseSchedulePlacement.endTimeHHmm(s.time, Math.max(1, Number(s.durationMinutes) || 30)),
+          scheduleItemId: String(s._id),
+        })),
+        nextSession,
+      });
+    }
+
+    await ScheduleItem.deleteMany({
       userId: req.user.id,
       courseId: course._id,
       date: { $gte: today },
       is_completed: { $ne: true },
-    })
-      .sort({ date: 1, time: 1 })
-      .lean();
-    const next = sessions[0];
-    let nextSession = null;
-    if (next?.date && next?.time) {
-      const dur = Math.max(1, Number(next.durationMinutes) || 30);
-      nextSession = {
-        date: String(next.date).slice(0, 10),
-        startTime: String(next.time).slice(0, 5),
-        endTime: courseSchedulePlacement.endTimeHHmm(next.time, dur),
-      };
-    }
+    });
+    const docsR = resolvedR.placements.map((p) => ({
+      userId: req.user.id,
+      itemType: "course",
+      category: String(course.category || "Course").trim() || "Course",
+      title: p.title,
+      subtitle: p.subtitle,
+      planId: null,
+      date: p.date,
+      time: p.time,
+      note: p.note != null ? String(p.note) : "",
+      courseId: course._id,
+      enrolledCourseId: existing._id,
+      durationMinutes: Math.max(1, Number(p.durationMinutes) || 30),
+      overlapAccepted: false,
+      planName: "",
+      dietPlanId: "",
+      scheduleSource: "",
+      is_completed: false,
+      completed_at: null,
+    }));
+    await ScheduleItem.insertMany(docsR);
+    await Promise.all(
+      docsR.map((row) =>
+        ScheduleSkip.deleteMany({
+          userId: req.user.id,
+          date: row.date,
+          courseId: course._id,
+        })
+      )
+    );
+    const sortedR = [...resolvedR.placements].sort(
+      (a, b) => String(a.date).localeCompare(String(b.date)) || String(a.time).localeCompare(String(b.time))
+    );
+    const firstR = sortedR[0];
+    const durR = Math.max(1, Number(firstR?.durationMinutes) || Number(course.duration) || 30);
+    const scheduledSessionR = firstR
+      ? {
+          date: firstR.date,
+          startTime: firstR.time,
+          endTime: courseSchedulePlacement.endTimeHHmm(firstR.time, durR),
+        }
+      : null;
     return res.status(200).json({
       success: true,
       scheduled: true,
-      rescheduled: false,
+      rescheduled: Boolean(resolvedR.anyRescheduled),
       alreadyScheduled: true,
-      message: "This course is already on your schedule.",
+      resynced: true,
+      message: resolvedR.anyRescheduled
+        ? "Your course was updated to daily sessions; some times were adjusted to avoid conflicts."
+        : "Your course was updated to daily sessions at your template time.",
       enrollment: existing.toObject ? existing.toObject() : existing,
-      sessions: sessions.map((s) => ({
-        date: String(s.date).slice(0, 10),
-        startTime: String(s.time).slice(0, 5),
-        endTime: courseSchedulePlacement.endTimeHHmm(s.time, Math.max(1, Number(s.durationMinutes) || 30)),
-        scheduleItemId: String(s._id),
+      moves: resolvedR.moves,
+      scheduledSession: scheduledSessionR,
+      sessions: sortedR.map((p) => ({
+        date: p.date,
+        startTime: p.time,
+        endTime: courseSchedulePlacement.endTimeHHmm(p.time, Math.max(1, Number(p.durationMinutes) || 30)),
       })),
-      nextSession,
+      nextSession: scheduledSessionR,
     });
   }
 
@@ -362,6 +490,7 @@ const enrollAndSchedule = asyncHandler(async (req, res) => {
       time: p.time,
       note: p.note != null ? String(p.note) : "",
       courseId: course._id,
+      enrolledCourseId: enrollment?._id || null,
       durationMinutes: Math.max(1, Number(p.durationMinutes) || 30),
       overlapAccepted: false,
       planName: "",
@@ -428,29 +557,17 @@ const enrollAndSchedule = asyncHandler(async (req, res) => {
 const drop = asyncHandler(async (req, res) => {
   const { course_id } = req.body;
   if (!course_id) return res.status(400).json({ message: "course_id is required" });
+  if (!mongoose.isValidObjectId(String(course_id))) {
+    return res.status(400).json({ message: "Invalid course_id" });
+  }
   const row = await EnrolledCourse.findOne({ user_id: req.user.id, course_id });
   if (!row) return res.json({ ok: true, changed: false });
-  const today = toDateKey(new Date());
 
-  await Promise.all([
-    ScheduleItem.deleteMany({
-      userId: req.user.id,
-      courseId: course_id,
-      date: { $gte: today },
-      is_completed: { $ne: true },
-    }),
-    CourseDailyProgress.deleteMany({
-      user_id: req.user.id,
-      enrolled_course_id: row._id,
-      date: { $gte: today },
-      is_completed: { $ne: true },
-    }),
-    ScheduleSkip.deleteMany({
-      userId: req.user.id,
-      courseId: course_id,
-      date: { $gte: today },
-    }),
-  ]);
+  const cascade = await cascadeDeleteCoursePlanData({
+    userId: req.user.id,
+    courseId: course_id,
+    enrolledCourseId: row._id,
+  });
 
   if (row.status !== "cancelled") {
     row.status = "cancelled";
@@ -458,7 +575,12 @@ const drop = asyncHandler(async (req, res) => {
     row.current_day = 1;
     await row.save();
   }
-  res.json({ ok: true, changed: true, cleanedFuture: true });
+  res.json({
+    ok: true,
+    changed: true,
+    cleanedFuture: true,
+    cascade,
+  });
 });
 
 const updateProgress = asyncHandler(async (req, res) => {
@@ -568,6 +690,7 @@ const updateProgress = asyncHandler(async (req, res) => {
       caloriesBurned: summarizeCourseExercises(row.exercises).burned_so_far || 0,
       date: new Date(`${targetDate}T00:00:00`),
       note: "Completed from course task",
+      courseId: enrolled.course_id,
     });
   }
 

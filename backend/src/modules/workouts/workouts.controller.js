@@ -241,8 +241,6 @@ const getTodayPlan = asyncHandler(async (req, res) => {
     completed_at: item.completed_at || null,
   }));
 
-  const targetWeekdayMon0 = (targetDate.getDay() + 6) % 7;
-
   const rawCourseTasks = enrolledCourses
     .map((enrolled) => {
       const durationDays = Number(enrolled?.course_id?.duration_days) || 0;
@@ -250,6 +248,8 @@ const getTodayPlan = asyncHandler(async (req, res) => {
       const day = diffInDaysInclusive(enrolled.start_date, targetDate);
       if (day > durationDays) return { markCompleted: true, enrolled };
       if (day < 1) return null;
+      const dailyStart =
+        courseSchedulePlacement.pickDailyStartTimeHHmmFromCourse(enrolled.course_id) || "08:00";
       return {
         markCompleted: false,
         enrolled_course_id: enrolled._id,
@@ -257,9 +257,7 @@ const getTodayPlan = asyncHandler(async (req, res) => {
         title: enrolled.course_id?.title || "Course",
         duration_days: durationDays,
         duration_minutes: Number(enrolled.course_id?.duration || 30),
-        time:
-          enrolled.course_id?.weeklySlots?.find((slot) => Number(slot?.weekday) === targetWeekdayMon0)?.startTime ||
-          "08:00",
+        time: dailyStart,
         day,
       };
     })
@@ -349,6 +347,7 @@ const getTodayPlan = asyncHandler(async (req, res) => {
       time: String(item.time || "08:00").slice(0, 5),
       note: "",
       courseId: item.course_id || null,
+      enrolledCourseId: item.enrolled_course_id || null,
       durationMinutes: Number(item.duration_minutes || 30),
       overlapAccepted: false,
       is_completed: false,

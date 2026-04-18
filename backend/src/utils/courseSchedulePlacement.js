@@ -31,36 +31,55 @@ function addDaysToDateKey(dateKey, n) {
   return toDateKeyFromDate(d);
 }
 
+/** First valid HH:mm from weeklySlots (ignores weekday); used for daily scheduling + UI. */
+function pickDailyStartTimeHHmmFromCourse(course) {
+  const slots = Array.isArray(course?.weeklySlots) ? course.weeklySlots : [];
+  for (const s of slots) {
+    const raw = String(s?.startTime ?? "").trim();
+    const t = raw.slice(0, 5);
+    const m = t.match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) continue;
+    const hh = Math.min(23, Math.max(0, Number(m[1])));
+    const mm = Math.min(59, Math.max(0, Number(m[2])));
+    return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+  }
+  return "";
+}
+
+function buildDailySchedulePayload(course) {
+  const startTime = pickDailyStartTimeHHmmFromCourse(course);
+  if (!startTime) return null;
+  const durationMinutes = Math.max(1, Number(course?.duration) > 0 ? Number(course.duration) : 30);
+  return {
+    startTime,
+    endTime: endTimeHHmm(startTime, durationMinutes),
+    durationMinutes,
+  };
+}
+
+/** One session per calendar day in [startDateKey, endDateKey] at the course's daily start time. */
 function expandCourseSessionsInRange(course, startDateKey, endDateKey) {
   const start = parseDateKeyAtNoon(startDateKey);
   const end = parseDateKeyAtNoon(endDateKey);
   if (!start || !end || end < start) return [];
-  const slots = Array.isArray(course?.weeklySlots) ? course.weeklySlots : [];
+  const timeStr = pickDailyStartTimeHHmmFromCourse(course);
+  if (!timeStr) return [];
   const dur = Number(course?.duration) > 0 ? Number(course.duration) : 30;
   const out = [];
   const endT = end.getTime();
+  let sessionIdx = 0;
   for (let d = new Date(start); d.getTime() <= endT; d.setDate(d.getDate() + 1)) {
-    const w = (d.getDay() + 6) % 7;
+    sessionIdx += 1;
     const iso = toDateKeyFromDate(d);
-    for (const slot of slots) {
-      if (Number(slot.weekday) !== w) continue;
-      const t = String(slot.startTime || "").trim().slice(0, 5);
-      const m = t.match(/^(\d{1,2}):(\d{2})$/);
-      let timeStr = "09:00";
-      if (m) {
-        const hh = Math.min(23, Math.max(0, Number(m[1])));
-        const mm = Math.min(59, Math.max(0, Number(m[2])));
-        timeStr = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
-      }
-      out.push({
-        title: String(course.title || "").trim() || "Course",
-        date: iso,
-        time: timeStr,
-        note: `${String(course.category || "course").trim()} · ${dur} min`,
-        durationMinutes: dur,
-        courseId: course._id,
-      });
-    }
+    out.push({
+      title: String(course.title || "").trim() || "Course",
+      date: iso,
+      time: timeStr,
+      note: `${String(course.category || "course").trim()} · ${dur} min`,
+      durationMinutes: dur,
+      courseId: course._id,
+      subtitle: `Plan Day ${sessionIdx}`,
+    });
   }
   return out;
 }
@@ -218,4 +237,6 @@ module.exports = {
   weekdayMon0FromDateKey,
   addDaysToDateKey,
   parseDateKeyAtNoon,
+  pickDailyStartTimeHHmmFromCourse,
+  buildDailySchedulePayload,
 };
