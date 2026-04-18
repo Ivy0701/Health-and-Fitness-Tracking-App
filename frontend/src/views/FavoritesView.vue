@@ -3,6 +3,8 @@ import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
+import { getTodayLocalDate } from "../utils/dateLocal";
+import { buildDietPlanMealsPayload, isDietPlanFullyOnSchedule } from "../utils/dietPlanSchedulePayload";
 import { useFavorites } from "../services/favorites";
 
 const router = useRouter();
@@ -13,7 +15,10 @@ const toast = ref("");
 let toastTimer = null;
 
 const { favorites, loading, ensureFavoritesLoaded, normalizeType, removeFavoriteByRowId, addFavorite, isFavorited } = useFavorites();
+const me = ref(null);
 const recommendationPool = ref([]);
+/** Cached schedule rows for whole-plan diet apply/remove on today. */
+const scheduleRows = ref([]);
 
 const TAB_ITEMS = [
   { id: "all", label: "All" },
@@ -125,6 +130,7 @@ function normalizeRow(row) {
     title: row.title || "Untitled item",
     description: row.description || metadata.preview || "",
     image: row.image || metadata.image || "",
+    targetCalories: row.targetCalories ?? metadata.targetCalories,
   };
 }
 
@@ -387,6 +393,76 @@ function addWorkoutToPlan(row) {
   router.push({ path: "/workout", query: { focusItem: String(row.itemId || "") } });
 }
 
+function extractDietPlanIdFromFavorite(row) {
+  const id = String(row?.itemId || "").trim();
+  if (!id.startsWith("diet-plan-")) return "";
+  return id.slice("diet-plan-".length);
+}
+
+async function loadScheduleRowsForFavorites() {
+  if (!me.value?.id) {
+    scheduleRows.value = [];
+    return;
+  }
+  try {
+    scheduleRows.value = await api.get(`/schedules/${me.value.id}`).then((r) => r.data);
+  } catch {
+    scheduleRows.value = [];
+  }
+}
+
+function isFavoriteDietPlanOnScheduleToday(row) {
+  const dietPlanId = extractDietPlanIdFromFavorite(row);
+  if (!dietPlanId) return false;
+  return isDietPlanFullyOnSchedule(scheduleRows.value, getTodayLocalDate(), dietPlanId);
+}
+
+async function toggleDietFavoriteSchedule(row) {
+  if (row.type !== "diet") return;
+  const dietPlanId = extractDietPlanIdFromFavorite(row);
+  if (!dietPlanId || !me.value?.id) {
+    showToast("Unable to schedule this favorite.");
+    return;
+  }
+  const date = getTodayLocalDate();
+  if (isFavoriteDietPlanOnScheduleToday(row)) {
+    try {
+      await api.delete("/schedules/diet-plan", { params: { date, dietPlanId } });
+      showToast(`${String(row.title || "").trim() || "Meal plan"} removed from today's schedule.`);
+    } catch (error) {
+      showToast(error?.response?.data?.message || "Failed to remove plan from schedule.");
+    }
+    await loadScheduleRowsForFavorites();
+    return;
+  }
+
+  const planName = String(row.title || "").trim() || "Meal plan";
+  const planType = String(row.metadata?.planType || row.category || "balanced").trim();
+  const target = Number(row.targetCalories) > 0 ? Number(row.targetCalories) : 2000;
+  const meals = buildDietPlanMealsPayload(target, planType);
+  try {
+    const res = await api.post("/schedules/diet-plan", {
+      userId: me.value.id,
+      date,
+      dietPlanId,
+      planName,
+      planType,
+      meals,
+    });
+    if (res.data?.alreadyScheduled) {
+      showToast(`${planName} is already on your schedule for today (full daily plan).`);
+    } else {
+      showToast(`Added ${planName} to today's schedule (Breakfast, Lunch, Dinner, Snack).`);
+    }
+  } catch (error) {
+    showToast(
+      error?.response?.data?.message ||
+        "This meal plan could not be scheduled without time conflicts. Please clear some time slots or choose another date."
+    );
+  }
+  await loadScheduleRowsForFavorites();
+}
+
 function detailBadges(row) {
   const meta = row.metadata || {};
   if (row.type === "workout") {
@@ -410,7 +486,12 @@ function detailBadges(row) {
 }
 
 onMounted(async () => {
-  await Promise.all([ensureFavoritesLoaded(), loadRecommendationPool()]);
+  try {
+    me.value = await api.get("/users/me").then((r) => r.data);
+  } catch {
+    me.value = null;
+  }
+  await Promise.all([ensureFavoritesLoaded(), loadRecommendationPool(), loadScheduleRowsForFavorites()]);
 });
 </script>
 
@@ -496,6 +577,15 @@ onMounted(async () => {
           <div class="quick-actions">
             <button v-if="row.type === 'workout'" type="button" class="small-btn" @click="startWorkout(row)">Start</button>
             <button v-if="row.type === 'workout'" type="button" class="small-btn ghost" @click="addWorkoutToPlan(row)">Add to Plan</button>
+            <button
+              v-if="row.type === 'diet' && extractDietPlanIdFromFavorite(row)"
+              type="button"
+              class="small-btn"
+              :class="{ ghost: isFavoriteDietPlanOnScheduleToday(row) }"
+              @click="toggleDietFavoriteSchedule(row)"
+            >
+              {{ isFavoriteDietPlanOnScheduleToday(row) ? "Remove from Schedule" : "Apply Plan" }}
+            </button>
             <button type="button" class="small-btn ghost" @click="openItem(row)">
               {{
                 row.type === "course"

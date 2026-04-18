@@ -75,3 +75,14 @@ export function saveWorkoutSessionState({ userId, taskId, state }) {
     // ignore localStorage write failure
   }
 }
+
+export function clearWorkoutSessionState({ userId, taskId }) {
+  const uid = toText(userId);
+  const tid = toText(taskId);
+  if (!uid || !tid) return;
+  try {
+    localStorage.removeItem(storageKey(uid, tid));
+  } catch {
+    // ignore
+  }
+}

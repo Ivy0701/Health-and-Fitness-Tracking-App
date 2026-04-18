@@ -7,6 +7,7 @@ const ScheduleSkip = require("../../models/ScheduleSkip");
 const Workout = require("../../models/Workout");
 const User = require("../../models/User");
 const { buildCourseExercises, summarizeCourseExercises } = require("../../utils/courseSession");
+const { applyMetBurnsToExercises } = require("../../utils/workoutCaloriesBurn");
 
 function defaultExercisesPreview({ title, category }) {
   const text = String(title || "").toLowerCase();
@@ -231,6 +232,9 @@ const updateProgress = asyncHandler(async (req, res) => {
   const diffDays =
     Math.floor((new Date(`${targetDate}T00:00:00`) - new Date(`${enrolled.start_date}T00:00:00`)) / 86400000) + 1;
   const dayIndex = Math.max(1, diffDays);
+  const userLean = await User.findById(req.user.id).select("weight").lean();
+  const wkg = userLean?.weight;
+  const courseCat = String(enrolledWithCourse?.course_id?.category || "");
   let row = await CourseDailyProgress.findOne({ user_id: req.user.id, enrolled_course_id, date: targetDate });
   if (!row) {
     row = await CourseDailyProgress.create({
@@ -238,12 +242,12 @@ const updateProgress = asyncHandler(async (req, res) => {
       enrolled_course_id,
       date: targetDate,
       status: "not_started",
-      exercises: buildCourseExercises(enrolledWithCourse.course_id, dayIndex),
+      exercises: buildCourseExercises(enrolledWithCourse.course_id, dayIndex, wkg),
       is_completed: false,
       completed_at: null,
     });
   } else if (!Array.isArray(row.exercises) || !row.exercises.length) {
-    row.exercises = buildCourseExercises(enrolledWithCourse.course_id, dayIndex);
+    row.exercises = buildCourseExercises(enrolledWithCourse.course_id, dayIndex, wkg);
   }
 
   const wasCompletedBefore = Boolean(row.is_completed);
@@ -264,16 +268,24 @@ const updateProgress = asyncHandler(async (req, res) => {
     row.is_completed = summary.status === "completed";
     row.completed_at = row.is_completed ? new Date() : null;
   } else if (typeof is_completed === "boolean") {
-    row.exercises = row.exercises.map((item) => ({
-      ...item.toObject?.(),
-      status: is_completed ? "completed" : "not_started",
-    }));
+    row.exercises = row.exercises.map((item) => {
+      const base = typeof item.toObject === "function" ? item.toObject() : { ...item };
+      return {
+        ...base,
+        status: is_completed ? "completed" : "not_started",
+      };
+    });
     row.status = is_completed ? "completed" : "not_started";
     row.is_completed = is_completed;
     row.completed_at = is_completed ? new Date() : null;
   } else {
     return res.status(400).json({ message: "Provide exercise update or is_completed" });
   }
+
+  const plainExercises = row.exercises.map((item) => (typeof item.toObject === "function" ? item.toObject() : { ...item }));
+  row.exercises = applyMetBurnsToExercises(plainExercises, courseCat, wkg);
+  if (typeof row.markModified === "function") row.markModified("exercises");
+
   await row.save();
 
   const targetDays = Number(enrolledWithCourse?.course_id?.duration_days || 7);

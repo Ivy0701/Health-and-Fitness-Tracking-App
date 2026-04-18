@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const asyncHandler = require("../../utils/asyncHandler");
+const scheduleTime = require("../../utils/scheduleTime");
 const ScheduleItem = require("../../models/ScheduleItem");
 const ScheduleSkip = require("../../models/ScheduleSkip");
 const Course = require("../../models/Course");
@@ -39,6 +40,49 @@ function normalizeItemType(value) {
 function isPlanBackedItem(row) {
   const itemType = String(row?.itemType || "").toLowerCase();
   return Boolean(row?.planId) || Boolean(row?.courseId) || itemType === "course" || itemType === "course_session";
+}
+
+const DIET_PLAN_APPLY_SOURCE = "diet_plan_apply";
+
+function isDietPlanApplyRow(row, dietPlanId) {
+  const pid = String(dietPlanId || "").trim();
+  if (!pid) return false;
+  return (
+    String(row?.itemType || "").toLowerCase() === "diet" &&
+    String(row?.scheduleSource || "") === DIET_PLAN_APPLY_SOURCE &&
+    String(row?.dietPlanId || "").trim() === pid
+  );
+}
+
+/** True when this plan has exactly one row per breakfast/lunch/dinner/snack for the day. */
+function isCompleteDietPlanApplyGroup(rows, dietPlanId) {
+  const rel = (rows || []).filter((r) => isDietPlanApplyRow(r, dietPlanId));
+  if (rel.length !== 4) return false;
+  const meals = rel.map((r) => String(r?.meal || "").toLowerCase());
+  if (new Set(meals).size !== 4) return false;
+  return scheduleTime.DIET_PLAN_MEAL_ORDER.every((m) => meals.includes(m));
+}
+
+async function repairDietOverlapsForUser(userId, dayRows) {
+  if (!Array.isArray(dayRows) || !dayRows.length) return;
+  const dateKey = String(dayRows[0]?.date || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return;
+
+  for (let pass = 0; pass < 16; pass += 1) {
+    const diets = dayRows.filter((r) => String(r?.itemType || "").toLowerCase() === "diet");
+    let changed = false;
+    for (const drow of diets) {
+      if (!drow?._id) continue;
+      if (!scheduleTime.hasScheduleConflict(drow, dayRows, String(drow._id))) continue;
+      const newTime = scheduleTime.resolveDietRowOverlap(dateKey, drow, dayRows);
+      if (newTime && newTime !== String(drow.time || "").slice(0, 5)) {
+        await ScheduleItem.updateOne({ _id: drow._id, userId }, { $set: { time: newTime, overlapAccepted: false } });
+        drow.time = newTime;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
 }
 
 async function removeSingleItemAndLinkedState({ row, userId }) {
@@ -83,10 +127,32 @@ async function removeSingleItemAndLinkedState({ row, userId }) {
 const list = asyncHandler(async (req, res) => {
   const userId = req.params.userId;
   if (String(userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
-  const rows = await ScheduleItem.find({ userId, itemType: { $ne: "diet" } })
+  await ScheduleItem.deleteMany({
+    userId,
+    itemType: "diet",
+    scheduleSource: "diet_log_sync",
+  });
+  let rows = await ScheduleItem.find({ userId })
     .populate("courseId", "isPremium")
     .sort({ date: 1, time: 1, createdAt: -1 })
     .lean();
+
+  const byDate = new Map();
+  for (const r of rows) {
+    const d = String(r?.date || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
+    if (!byDate.has(d)) byDate.set(d, []);
+    byDate.get(d).push(r);
+  }
+  for (const [, dayRows] of byDate) {
+    await repairDietOverlapsForUser(req.user.id, dayRows);
+  }
+
+  rows = await ScheduleItem.find({ userId })
+    .populate("courseId", "isPremium")
+    .sort({ date: 1, time: 1, createdAt: -1 })
+    .lean();
+
   const out = rows.map((row) => {
     const pop = row.courseId;
     const courseIsPremium = Boolean(pop && typeof pop === "object" && pop.isPremium);
@@ -101,12 +167,126 @@ const list = asyncHandler(async (req, res) => {
   res.json(out);
 });
 
+const applyDietPlan = asyncHandler(async (req, res) => {
+  const uid = req.body.userId || req.user.id;
+  if (String(uid) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  const dateKey = String(req.body.date || "").trim();
+  const dietPlanId = String(req.body.dietPlanId || "").trim();
+  const planName = String(req.body.planName || "").trim();
+  const planType = String(req.body.planType || "").trim();
+  const meals = Array.isArray(req.body.meals) ? req.body.meals : [];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey) || !dietPlanId || !planName) {
+    return res.status(400).json({ message: "date, dietPlanId and planName are required" });
+  }
+
+  const mealSpecs = scheduleTime.DIET_PLAN_MEAL_ORDER.map((key) => {
+    const m = meals.find((x) => String(x?.mealType || "").toLowerCase() === key) || {};
+    const label = key.charAt(0).toUpperCase() + key.slice(1);
+    const kcal = Math.max(0, Number(m.calories) || 0);
+    return {
+      mealType: key,
+      title: `${label} · ${planName}`,
+      subtitle: `${planName} · ${label} · ${kcal ? `${kcal} kcal` : "Planned"}`,
+      totalCalories: kcal,
+      durationMinutes: 30,
+    };
+  });
+
+  const existing = await ScheduleItem.find({ userId: uid, date: dateKey }).lean();
+
+  if (isCompleteDietPlanApplyGroup(existing, dietPlanId)) {
+    const items = existing.filter((r) => isDietPlanApplyRow(r, dietPlanId));
+    return res.status(200).json({ alreadyScheduled: true, items });
+  }
+
+  const baseline = existing.filter((r) => !isDietPlanApplyRow(r, dietPlanId));
+
+  const sim = scheduleTime.simulateDietPlanApply(dateKey, baseline, mealSpecs);
+  if (!sim.ok) {
+    return res.status(400).json({ message: sim.message || scheduleTime.DIET_PLAN_APPLY_FAIL });
+  }
+
+  await ScheduleItem.deleteMany({
+    userId: uid,
+    date: dateKey,
+    itemType: "diet",
+    scheduleSource: DIET_PLAN_APPLY_SOURCE,
+    dietPlanId,
+  });
+
+  const docs = sim.placements.map((p) => ({
+    userId: uid,
+    itemType: "diet",
+    title: p.title,
+    subtitle: p.subtitle,
+    meal: p.meal,
+    planName,
+    dietPlanId,
+    scheduleSource: DIET_PLAN_APPLY_SOURCE,
+    totalCalories: p.totalCalories,
+    date: dateKey,
+    time: p.time,
+    durationMinutes: p.durationMinutes,
+    note: "",
+    courseId: null,
+    planId: null,
+    linkedDietId: null,
+    overlapAccepted: false,
+    is_completed: false,
+    completed_at: null,
+    category: planType || "",
+  }));
+
+  const created = await ScheduleItem.insertMany(docs);
+  res.status(201).json(created);
+});
+
+const removeDietPlanApply = asyncHandler(async (req, res) => {
+  const dateKey = String(req.query.date || "").trim();
+  const dietPlanId = String(req.query.dietPlanId || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+    return res.status(400).json({ message: "date (YYYY-MM-DD) is required" });
+  }
+  if (!dietPlanId) {
+    return res.status(400).json({ message: "dietPlanId is required to remove a meal plan from the schedule" });
+  }
+  const r = await ScheduleItem.deleteMany({
+    userId: req.user.id,
+    date: dateKey,
+    itemType: "diet",
+    scheduleSource: DIET_PLAN_APPLY_SOURCE,
+    dietPlanId,
+  });
+  res.json({ deleted: r.deletedCount || 0 });
+});
+
 const create = asyncHandler(async (req, res) => {
-  const { userId, title, planName, taskName, date, time, note, courseId, planId, durationMinutes, overlapAccepted, itemType, subtitle, category } = req.body;
+  const {
+    userId,
+    title,
+    planName,
+    taskName,
+    date,
+    time,
+    note,
+    courseId,
+    planId,
+    durationMinutes,
+    itemType,
+    subtitle,
+    category,
+    meal,
+    mealType,
+    totalCalories,
+    linkedDietId,
+    dietPlanId: bodyDietPlanId,
+    scheduleSource: bodyScheduleSource,
+  } = req.body;
   const uid = userId || req.user.id;
   if (String(uid) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
   const resolvedTitle = String(title || planName || taskName || "").trim();
-  if (!resolvedTitle || !date || !time) return res.status(400).json({ message: "title, date and time are required" });
+  const dateKey = String(date || "").trim();
+  if (!resolvedTitle || !dateKey) return res.status(400).json({ message: "title and date are required" });
 
   if (courseId && mongoose.isValidObjectId(courseId)) {
     const r = await assertNotJoiningPremiumCourse({ userId: uid, courseIds: [courseId] });
@@ -118,19 +298,66 @@ const create = asyncHandler(async (req, res) => {
     }
   }
 
+  const nType = normalizeItemType(itemType);
+  const mealKey = String(meal || mealType || "").trim().toLowerCase();
+  const kcal = totalCalories != null ? Math.max(0, Number(totalCalories)) : 0;
+  const durFromBody = durationMinutes != null ? Math.max(1, Number(durationMinutes)) : null;
+  const duration =
+    durFromBody && Number.isFinite(durFromBody)
+      ? durFromBody
+      : scheduleTime.defaultDurationMinutes(nType, { durationMinutes: durFromBody, itemType: nType });
+
+  const existing = await ScheduleItem.find({ userId: uid, date: dateKey }).lean();
+  const hadExplicitTime = String(time || "").trim().length > 0;
+  let resolvedTime = String(time || "").trim().slice(0, 5);
+  if (!resolvedTime) {
+    resolvedTime = scheduleTime.findNextAvailableTimeSlot(dateKey, duration, existing, {
+      itemType: nType,
+      mealType: mealKey || (nType === "diet" ? "lunch" : undefined),
+    });
+    if (!resolvedTime) {
+      return res.status(400).json({ message: "No available time slots were found for this day." });
+    }
+  }
+
+  const candidate = {
+    date: dateKey,
+    time: resolvedTime,
+    durationMinutes: duration,
+    itemType: nType,
+    title: resolvedTitle,
+  };
+  if (scheduleTime.hasScheduleConflict(candidate, existing, null)) {
+    return res.status(409).json({
+      message: scheduleTime.SCHEDULE_CONFLICT_MESSAGE,
+      code: "schedule_conflict",
+    });
+  }
+
   const row = await ScheduleItem.create({
     userId: uid,
-    itemType: normalizeItemType(itemType),
+    itemType: nType,
     category: category != null ? String(category).trim() : "",
+    meal: nType === "diet" ? mealKey || "lunch" : meal != null ? String(meal).trim().toLowerCase() : "",
+    totalCalories: Number.isFinite(kcal) ? kcal : 0,
     title: resolvedTitle,
     subtitle: subtitle != null ? String(subtitle).trim() : "",
     planId: planId || null,
-    date,
-    time,
-    note,
+    date: dateKey,
+    time: resolvedTime,
+    note: note != null ? String(note) : "",
     courseId: courseId || null,
-    durationMinutes: durationMinutes != null ? Math.max(1, Number(durationMinutes)) : 60,
-    overlapAccepted: Boolean(overlapAccepted),
+    linkedDietId: mongoose.isValidObjectId(linkedDietId) ? linkedDietId : null,
+    durationMinutes: duration,
+    overlapAccepted: false,
+    planName: planName != null ? String(planName).trim() : "",
+    dietPlanId: bodyDietPlanId != null ? String(bodyDietPlanId).trim() : "",
+    scheduleSource:
+      bodyScheduleSource != null
+        ? String(bodyScheduleSource).trim()
+        : nType === "diet"
+          ? "manual"
+          : "",
   });
   if (row.planId || row.courseId) {
     const or = [];
@@ -142,7 +369,69 @@ const create = asyncHandler(async (req, res) => {
       ...(or.length ? { $or: or } : {}),
     });
   }
-  res.status(201).json(row);
+  const payload = row.toObject ? row.toObject() : row;
+  if (!hadExplicitTime) {
+    payload.scheduleNotice = `No time selected. Scheduled automatically at ${resolvedTime}.`;
+  }
+  res.status(201).json(payload);
+});
+
+const update = asyncHandler(async (req, res) => {
+  const row = await ScheduleItem.findById(req.params.id);
+  if (!row) return res.status(404).json({ message: "Schedule item not found" });
+  if (String(row.userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+
+  const patch = {};
+  if (req.body.title != null) patch.title = String(req.body.title).trim();
+  if (req.body.note != null) patch.note = String(req.body.note);
+  if (req.body.date != null) patch.date = String(req.body.date).trim();
+  if (req.body.time != null) patch.time = String(req.body.time).trim().slice(0, 5);
+  if (req.body.durationMinutes != null) patch.durationMinutes = Math.max(1, Number(req.body.durationMinutes));
+  if (req.body.itemType != null) patch.itemType = normalizeItemType(req.body.itemType);
+  if (req.body.category != null) patch.category = String(req.body.category).trim();
+  if (req.body.subtitle != null) patch.subtitle = String(req.body.subtitle).trim();
+  if (req.body.meal != null) patch.meal = String(req.body.meal).trim().toLowerCase();
+  if (req.body.totalCalories != null) patch.totalCalories = Math.max(0, Number(req.body.totalCalories));
+
+  Object.assign(row, patch);
+  const dateKey = String(row.date || "").trim();
+  const nType = normalizeItemType(row.itemType);
+  const duration =
+    patch.durationMinutes != null && Number(patch.durationMinutes) >= 1
+      ? Number(patch.durationMinutes)
+      : row.durationMinutes != null && Number(row.durationMinutes) >= 1
+        ? Number(row.durationMinutes)
+        : scheduleTime.defaultDurationMinutes(nType, row);
+
+  let resolvedTime = String(row.time || "").trim().slice(0, 5);
+  const existing = await ScheduleItem.find({ userId: req.user.id, date: dateKey, _id: { $ne: row._id } }).lean();
+
+  if (!resolvedTime) {
+    resolvedTime = scheduleTime.findNextAvailableTimeSlot(dateKey, duration, existing, {
+      itemType: nType,
+      mealType: row.meal || (nType === "diet" ? "lunch" : undefined),
+    });
+    if (!resolvedTime) {
+      return res.status(400).json({ message: "No available time slots were found for this day." });
+    }
+    row.time = resolvedTime;
+  }
+
+  const merged = {
+    date: dateKey,
+    time: String(row.time).slice(0, 5),
+    durationMinutes: duration,
+    itemType: nType,
+    title: String(row.title || "").trim() || "Item",
+  };
+  if (scheduleTime.hasScheduleConflict(merged, existing, null)) {
+    return res.status(409).json({ message: scheduleTime.SCHEDULE_CONFLICT_MESSAGE, code: "schedule_conflict" });
+  }
+
+  row.durationMinutes = duration;
+  row.overlapAccepted = false;
+  await row.save();
+  res.json(row);
 });
 
 const remove = asyncHandler(async (req, res) => {
@@ -270,26 +559,67 @@ const batchCreate = asyncHandler(async (req, res) => {
     });
   }
 
+  const dateKeys = Array.from(new Set(slice.map((it) => String(it?.date || "").trim()).filter(Boolean)));
+  const existingAll = await ScheduleItem.find({ userId: uid, date: { $in: dateKeys } }).lean();
+  const accumulated = [...existingAll];
+
   const docs = [];
   for (const it of slice) {
     const resolvedTitle = String(it.title || it.planName || it.taskName || "").trim();
-    if (!resolvedTitle || !it.date || !it.time) {
-      return res.status(400).json({ message: "Each item needs title, date, and time" });
+    const dateStr = String(it.date || "").trim();
+    if (!resolvedTitle || !dateStr) {
+      return res.status(400).json({ message: "Each item needs title and date" });
     }
-    docs.push({
+    const nType = normalizeItemType(it.itemType);
+    const dur =
+      it.durationMinutes != null && Number.isFinite(Number(it.durationMinutes))
+        ? Math.max(1, Number(it.durationMinutes))
+        : scheduleTime.defaultDurationMinutes(nType, it);
+
+    let timeStr = String(it.time || "").trim().slice(0, 5);
+    const sameDay = accumulated.filter((r) => String(r.date) === dateStr);
+    if (!timeStr) {
+      timeStr = scheduleTime.findNextAvailableTimeSlot(dateStr, dur, sameDay, { itemType: nType });
+      if (!timeStr) {
+        return res.status(400).json({
+          message: "No available time slots were found for this day.",
+          code: "no_slot",
+          date: dateStr,
+          title: resolvedTitle,
+        });
+      }
+    }
+
+    const candidate = { date: dateStr, time: timeStr, durationMinutes: dur, itemType: nType, title: resolvedTitle };
+    if (scheduleTime.hasScheduleConflict(candidate, accumulated, null)) {
+      return res.status(409).json({
+        message: scheduleTime.SCHEDULE_CONFLICT_MESSAGE,
+        code: "schedule_conflict",
+        date: dateStr,
+        time: timeStr,
+        title: resolvedTitle,
+      });
+    }
+
+    const doc = {
       userId: uid,
-      itemType: normalizeItemType(it.itemType),
+      itemType: nType,
       category: it.category != null ? String(it.category).trim() : "",
       title: resolvedTitle,
       subtitle: it.subtitle != null ? String(it.subtitle).trim() : "",
       planId: it.planId || null,
-      date: String(it.date).trim(),
-      time: String(it.time).trim().slice(0, 5),
+      date: dateStr,
+      time: timeStr,
       note: it.note != null ? String(it.note) : "",
       courseId: it.courseId || null,
-      durationMinutes: it.durationMinutes != null ? Math.max(1, Number(it.durationMinutes)) : 60,
-      overlapAccepted: Boolean(it.overlapAccepted),
-    });
+      durationMinutes: dur,
+      overlapAccepted: false,
+      planName: it.planName != null ? String(it.planName).trim() : "",
+      dietPlanId: it.dietPlanId != null ? String(it.dietPlanId).trim() : "",
+      scheduleSource: it.scheduleSource != null ? String(it.scheduleSource).trim() : nType === "diet" ? "manual" : "",
+    };
+    docs.push(doc);
+    accumulated.push({ ...doc, _id: new mongoose.Types.ObjectId() });
   }
   const created = await ScheduleItem.insertMany(docs);
   await Promise.all(
@@ -317,5 +647,5 @@ const removeByCourse = asyncHandler(async (req, res) => {
   res.json({ deleted: r.deletedCount });
 });
 
-module.exports = { list, create, remove, batchCreate, removeByCourse };
+module.exports = { list, create, update, remove, batchCreate, removeByCourse, applyDietPlan, removeDietPlanApply };
 

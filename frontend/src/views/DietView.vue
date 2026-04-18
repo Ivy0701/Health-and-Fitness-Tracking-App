@@ -6,6 +6,7 @@ import api from "../services/api";
 import { useAuthStore } from "../stores/auth";
 import { useFavorites } from "../services/favorites";
 import { getTodayLocalDate } from "../utils/dateLocal";
+import { buildDietPlanMealsPayload, isDietPlanFullyOnSchedule } from "../utils/dietPlanSchedulePayload";
 
 const MEAL_TYPES = [
   { value: "breakfast", label: "Breakfast" },
@@ -157,6 +158,7 @@ const DATE_WINDOW_DAYS = 9;
 const DATE_SHIFT_DAYS = 7;
 const dateWindowStart = ref(shiftDateKey(todayKey, -Math.floor(DATE_WINDOW_DAYS / 2)));
 const me = ref(null);
+const scheduleRows = ref([]);
 const loading = ref(false);
 const searchingFoods = ref(false);
 const submitting = ref(false);
@@ -272,7 +274,11 @@ const isEditing = computed(() => Boolean(editingId.value));
 const selectedPlan = computed(() => PLAN_DEFINITIONS.find((x) => x.id === selectedPlanId.value) || null);
 const planForRecommendation = computed(() => selectedPlan.value || PLAN_DEFINITIONS[0]);
 const appliedPlan = computed(() => PLAN_DEFINITIONS.find((x) => x.id === appliedPlanId.value) || null);
-const isSelectedPlanApplied = computed(() => Boolean(selectedPlan.value && appliedPlanId.value === selectedPlan.value.id));
+/** Whole plan (4 meals) on schedule for selected date — not a single meal row. */
+const isSelectedPlanOnScheduleForDate = computed(() =>
+  Boolean(selectedPlan.value && isDietPlanFullyOnSchedule(scheduleRows.value, selectedDate.value, selectedPlan.value.id))
+);
+
 const defaultDynamicPlanType = computed(() => {
   const direction = estimateGoalDirection();
   if (direction === "loss") return "weight_loss";
@@ -453,6 +459,19 @@ async function loadRecords(dateKey = selectedDate.value) {
   records.value = Array.isArray(data) ? data : [];
 }
 
+async function loadScheduleRows() {
+  if (!me.value?.id) {
+    scheduleRows.value = [];
+    return;
+  }
+  try {
+    const { data } = await api.get(`/schedules/${me.value.id}`);
+    scheduleRows.value = Array.isArray(data) ? data : [];
+  } catch {
+    scheduleRows.value = [];
+  }
+}
+
 async function loadOverview(dateKey = selectedDate.value) {
   console.debug("[Diet][Overview] request", {
     userId: me.value?.id || "",
@@ -491,6 +510,7 @@ async function loadForDate() {
       loadRecords(dateKey),
       loadOverview(dateKey),
       loadPlanFoodLibraryIfNeeded(),
+      loadScheduleRows(),
     ]);
     if (requestId !== loadRequestSeq) return;
     if (recordsRes.status === "rejected") {
@@ -841,18 +861,56 @@ async function focusPlanFromQuery() {
   }, 2200);
 }
 
-function applySelectedPlan() {
-  if (!selectedPlan.value) return;
-  if (isSelectedPlanApplied.value) {
-    appliedPlanId.value = "";
-    persistAppliedPlanToStorage();
-    pageSuccess.value = `${selectedPlan.value.name} removed from Recommended Plan mode.`;
+async function applySelectedPlan() {
+  if (!selectedPlan.value || !me.value?.id) return;
+  pageError.value = "";
+  pageSuccess.value = "";
+
+  if (isSelectedPlanOnScheduleForDate.value) {
+    try {
+      await api.delete("/schedules/diet-plan", {
+        params: { date: selectedDate.value, dietPlanId: selectedPlan.value.id },
+      });
+    } catch (error) {
+      pageError.value = error?.response?.data?.message || "Failed to remove plan from schedule.";
+      return;
+    }
+    if (appliedPlanId.value === selectedPlan.value.id) {
+      appliedPlanId.value = "";
+      persistAppliedPlanToStorage();
+    }
+    await loadScheduleRows();
+    pageSuccess.value = `${selectedPlan.value.name} was removed from your schedule for ${selectedDate.value}.`;
     return;
   }
-  appliedPlanId.value = selectedPlan.value.id;
-  persistAppliedPlanToStorage();
+
+  const targetKcal = calculatePlanCalories(selectedPlan.value.type);
+  const meals = buildDietPlanMealsPayload(targetKcal, selectedPlan.value.type);
+  try {
+    const res = await api.post("/schedules/diet-plan", {
+      userId: me.value.id,
+      date: selectedDate.value,
+      dietPlanId: selectedPlan.value.id,
+      planName: selectedPlan.value.name,
+      planType: selectedPlan.value.type,
+      meals,
+    });
+    if (res.data?.alreadyScheduled) {
+      pageSuccess.value = `${selectedPlan.value.name} is already on your schedule for ${selectedDate.value} (full daily plan).`;
+    } else {
+      appliedPlanId.value = selectedPlan.value.id;
+      persistAppliedPlanToStorage();
+      pageSuccess.value = `${selectedPlan.value.name} was added to your schedule for ${selectedDate.value} (Breakfast, Lunch, Dinner, Snack).`;
+    }
+  } catch (error) {
+    pageError.value =
+      error?.response?.data?.message ||
+      "This meal plan could not be scheduled without time conflicts. Please clear some time slots or choose another date.";
+    return;
+  }
+
   recordMode.value = "recommended";
-  pageSuccess.value = `${selectedPlan.value.name} applied to Recommended Plan mode.`;
+  await loadScheduleRows();
 }
 
 async function toggleSelectedPlanFavorite() {
@@ -1255,10 +1313,18 @@ watch(
           <div>
             <h4>{{ selectedPlan.name }} · {{ formatCaloriesNumber(adjustedPlanCalories) }} kcal target</h4>
             <p class="muted">Nutrition-focused daily recommendation split by meal.</p>
+            <p v-if="appliedPlanId === selectedPlan.id && !isSelectedPlanOnScheduleForDate" class="muted small-hint">
+              This plan is active for recommendations below. Use Apply Plan to add the full daily meal plan (four meals) to
+              your Schedule for {{ selectedDate }}.
+            </p>
           </div>
           <div class="selected-head-actions">
-            <button type="button" :class="['tiny-btn', isSelectedPlanApplied ? 'applied-btn' : 'ghost-btn']" @click="applySelectedPlan">
-              {{ isSelectedPlanApplied ? "Remove Applied Plan" : "Apply Plan" }}
+            <button
+              type="button"
+              :class="['tiny-btn', isSelectedPlanOnScheduleForDate ? 'applied-btn' : 'ghost-btn']"
+              @click="applySelectedPlan"
+            >
+              {{ isSelectedPlanOnScheduleForDate ? "Remove from Schedule" : "Apply Plan" }}
             </button>
             <button type="button" :class="['tiny-btn', isSelectedPlanFavorited ? 'saved-btn' : 'ghost-btn']" @click="toggleSelectedPlanFavorite">
               {{ isSelectedPlanFavorited ? "Remove from Favorites" : "Add to Favorites" }}
@@ -1591,6 +1657,12 @@ watch(
 .result-hint {
   margin: 2px 0 0;
   font-size: 12px;
+}
+
+.small-hint {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .food-cards {

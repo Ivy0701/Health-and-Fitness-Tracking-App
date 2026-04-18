@@ -6,6 +6,12 @@ import api from "../services/api";
 import { useAuthStore } from "../stores/auth";
 import { calculateBmiValue } from "../utils/bmi";
 import { getTodayLocalDate } from "../utils/dateLocal";
+import { isDietFoodLogScheduleRow } from "../utils/dietPlanSchedulePayload";
+import {
+  calculateWorkoutCaloriesBurned,
+  exerciseEffectiveDurationMinutes,
+  resolveWeightKg,
+} from "../utils/workoutCaloriesBurn";
 
 const loading = ref(true);
 const route = useRoute();
@@ -21,28 +27,6 @@ const enrolledCourses = ref([]);
 const workoutPlans = ref([]);
 const weeklyRows = ref([]);
 const inOutRows = ref([]);
-
-const MET_MAP = {
-  Running: 10,
-  Cycling: 8,
-  Swimming: 9,
-  "Jump Rope": 11,
-  Walking: 4,
-  Walk: 4,
-  HIIT: 10,
-  "Weight Lifting": 6,
-  "Push-up": 5,
-  "Pull-up": 6,
-  Squat: 6,
-  Deadlift: 7,
-  Yoga: 3,
-  Stretching: 2,
-  Pilates: 4,
-  Basketball: 8,
-  Football: 9,
-  Badminton: 7,
-  Tennis: 7,
-};
 
 function asNumber(value) {
   const n = Number(value);
@@ -91,14 +75,6 @@ function parseClockMinutes(value) {
   return hh * 60 + mm;
 }
 
-function getMet(name) {
-  const direct = MET_MAP[name];
-  if (direct) return direct;
-  const lower = String(name || "").toLowerCase();
-  const key = Object.keys(MET_MAP).find((item) => item.toLowerCase() === lower);
-  return key ? MET_MAP[key] : 0;
-}
-
 function isCompletedTask(task) {
   return task?.is_completed === true || task?.completed === true || String(task?.status || "").toLowerCase() === "completed";
 }
@@ -108,21 +84,49 @@ function isCompletedCourseExercise(exercise) {
 }
 
 function getTaskBurn(task, weight) {
-  const exerciseName = String(task?.exercise_name || task?.exerciseName || task?.type || "").trim();
-  const met = getMet(exerciseName);
-  if (met <= 0 || weight <= 0) return 0;
   const duration = asNumber(task?.duration_per_day ?? task?.durationPerDay ?? task?.duration);
   if (duration <= 0) return 0;
-  return met * weight * (duration / 60);
+  return calculateWorkoutCaloriesBurned({
+    durationMinutes: duration,
+    category: String(task?.category || ""),
+    title: String(task?.exercise_name || task?.exerciseName || task?.type || "").trim(),
+    weightKg: resolveWeightKg(weight),
+  });
 }
 
 function getCourseCompletedBurn(task) {
-  if (Number.isFinite(Number(task?.burned_so_far))) return asNumber(task.burned_so_far);
+  const w = resolveWeightKg(weightForBurn.value);
+  const cat = String(task?.category || "");
   if (!Array.isArray(task?.exercises)) return 0;
   return task.exercises.reduce((sum, exercise) => {
     if (!isCompletedCourseExercise(exercise)) return sum;
-    return sum + asNumber(exercise?.estimated_burn);
+    return (
+      sum +
+      calculateWorkoutCaloriesBurned({
+        durationMinutes: exerciseEffectiveDurationMinutes(exercise),
+        category: cat,
+        title: exercise?.title,
+        weightKg: w,
+      })
+    );
   }, 0);
+}
+
+function getCoursePlannedBurnKcal(task) {
+  const w = resolveWeightKg(weightForBurn.value);
+  const cat = String(task?.category || "");
+  if (!Array.isArray(task?.exercises)) return 0;
+  return task.exercises.reduce(
+    (sum, exercise) =>
+      sum +
+      calculateWorkoutCaloriesBurned({
+        durationMinutes: exerciseEffectiveDurationMinutes(exercise),
+        category: cat,
+        title: exercise?.title,
+        weightKg: w,
+      }),
+    0
+  );
 }
 
 function getCoursePendingExercises(task) {
@@ -252,7 +256,11 @@ const statCards = computed(() => [
 ]);
 
 const todayScheduleItems = computed(() =>
-  Array.isArray(allSchedules.value) ? allSchedules.value.filter((item) => String(item?.date || "") === todayKey.value) : []
+  Array.isArray(allSchedules.value)
+    ? allSchedules.value.filter(
+        (item) => String(item?.date || "") === todayKey.value && !isDietFoodLogScheduleRow(item)
+      )
+    : []
 );
 const todayPendingScheduleItems = computed(() => todayScheduleItems.value.filter((item) => !item?.is_completed));
 const pendingCourseExercises = computed(() => todayCourseTasks.value.reduce((sum, task) => sum + getCoursePendingExercises(task), 0));
@@ -291,20 +299,92 @@ const startTodayLink = computed(() => {
   return "/workout";
 });
 
+function pickScheduleItemName(item) {
+  const candidates = [item?.title, item?.name, item?.planName, item?.plan_name, item?.courseName, item?.taskName];
+  for (const value of candidates) {
+    const text = String(value || "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+/** Align with Schedule list: VIP / Course / Workout / Diet / Personal / Reminder. */
+function scheduleItemTypeTag(item) {
+  if (item?.courseIsPremium) return "VIP";
+  const it = String(item?.itemType || "").toLowerCase();
+  if (item?.courseId || it === "course" || it === "course_session") return "Course";
+  if (it === "workout" || it === "exercise") return "Workout";
+  if (it === "diet") return "Diet";
+  if (it === "personal") return "Personal";
+  if (it === "reminder") return "Reminder";
+  if (it === "manual") return "Personal";
+  return "Reminder";
+}
+
+function scheduleItemDisplayTitle(item) {
+  const low = String(item?.itemType || "").toLowerCase();
+  if (low === "diet") {
+    const raw = pickScheduleItemName(item);
+    if (raw && !/^diet$/i.test(raw)) return raw;
+    const plan = String(item?.planName || "").trim();
+    const meal = String(item?.meal || "").toLowerCase();
+    const mealLabel =
+      meal === "breakfast"
+        ? "Breakfast"
+        : meal === "lunch"
+          ? "Lunch"
+          : meal === "dinner"
+            ? "Dinner"
+            : meal === "snack"
+              ? "Snack"
+              : "Meal";
+    if (plan) return `${mealLabel} · ${plan}`;
+    const sub = String(item?.subtitle || "").trim();
+    if (sub) return `${mealLabel} · ${sub.split(" - ")[0]}`;
+    return `${mealLabel} · Diet`;
+  }
+
+  const typeTag = scheduleItemTypeTag(item);
+
+  if (item?.courseIsPremium) {
+    return safeText(pickScheduleItemName(item), "VIP Session");
+  }
+
+  if (low === "course" || item?.courseId) {
+    const title = safeText(pickScheduleItemName(item), "Course");
+    const sub = String(item?.subtitle || "").trim();
+    if (sub) {
+      if (/^plan day/i.test(sub)) return `${title} · ${sub}`;
+      return `${title} - ${sub}`;
+    }
+    return title;
+  }
+
+  const rawName = pickScheduleItemName(item);
+  const genericSet = new Set(["vip", "course", "workout", "reminder", "personal", "manual", "item", "diet"]);
+  if (rawName && !genericSet.has(rawName.toLowerCase())) return rawName;
+  return rawName || typeTag;
+}
+
 const upcomingToday = computed(() => {
   const now = new Date();
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   return todayPendingScheduleItems.value
     .map((item) => ({
       id: String(item?._id || `${item?.title}-${item?.time}`),
-      title: safeText(item?.title, "Session"),
+      title: scheduleItemDisplayTitle(item),
       time: safeText(item?.time, "00:00"),
       minutes: parseClockMinutes(item?.time),
-      type: item?.courseId || String(item?.itemType || "").toLowerCase() === "course" ? "Course" : "Workout",
+      type: scheduleItemTypeTag(item),
+      sortKey: `${String(item?.time || "00:00").padStart(5, "0")}|${String(item?._id || pickScheduleItemName(item))}`,
     }))
     .filter((item) => item.minutes >= nowMinutes)
-    .sort((a, b) => a.minutes - b.minutes)
-    .slice(0, 3);
+    .sort((a, b) => {
+      if (a.minutes !== b.minutes) return a.minutes - b.minutes;
+      return a.sortKey.localeCompare(b.sortKey);
+    })
+    .slice(0, 3)
+    .map(({ sortKey, ...rest }) => rest);
 });
 
 function normalizePlanProgress(total, completed) {
@@ -355,7 +435,7 @@ const activePlansDisplay = computed(() => {
         statusKey: progress.statusKey,
         hasTodayTask: true,
         progressPercent: progress.percent,
-        totalKcal: Math.round(asNumber(task?.estimated_burn)),
+        totalKcal: Math.round(getCoursePlannedBurnKcal(task)),
         durationText,
         actionLabel: planActionLabel(progress.statusKey),
       };

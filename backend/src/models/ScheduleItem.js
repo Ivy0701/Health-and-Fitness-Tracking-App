@@ -20,6 +20,12 @@ const scheduleItemSchema = new mongoose.Schema(
     overlapAccepted: { type: Boolean, default: false },
     is_completed: { type: Boolean, default: false },
     completed_at: { type: Date, default: null },
+    /** Human-readable diet plan name (e.g. "Hot Meal Plans") when itemType is diet */
+    planName: { type: String, trim: true, default: "" },
+    /** Stable id from PLAN_DEFINITIONS (e.g. "hot") for diet_plan_apply rows */
+    dietPlanId: { type: String, trim: true, default: "" },
+    /** diet_plan_apply | diet_log_sync | manual | "" */
+    scheduleSource: { type: String, trim: true, default: "" },
   },
   { timestamps: true, versionKey: false }
 );

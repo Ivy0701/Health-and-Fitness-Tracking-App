@@ -12,6 +12,7 @@ const WorkoutDailyStatus = require("../../models/WorkoutDailyStatus");
 const EnrolledCourse = require("../../models/EnrolledCourse");
 const Favorite = require("../../models/Favorite");
 const Course = require("../../models/Course");
+const { calculateWorkoutCaloriesBurned, resolveWeightKg } = require("../../utils/workoutCaloriesBurn");
 const REFUND_STATUSES = ["pending", "approved", "rejected"];
 const ACTIVE_VIP_PLANS = ["monthly", "yearly"];
 
@@ -66,6 +67,20 @@ function emptyWorkoutStatusBreakdown() {
   };
 }
 
+/** Prefer stored caloriesBurned; if logged as 0, recompute from MET using type + duration. */
+function effectiveStoredWorkoutBurn(doc, weightKg) {
+  const stored = Number(doc?.caloriesBurned) || 0;
+  if (stored > 0) return stored;
+  const dur = Number(doc?.duration) || 0;
+  if (dur <= 0) return 0;
+  return calculateWorkoutCaloriesBurned({
+    title: doc?.type || "",
+    category: "",
+    durationMinutes: dur,
+    weightKg,
+  });
+}
+
 function isUserVipActive(user, now = new Date()) {
   const flag = Boolean(user?.vip_status || user?.isVip);
   const plan = String(user?.vipPlan || "none");
@@ -94,10 +109,12 @@ const getDashboard = asyncHandler(async (req, res) => {
       .select("bmi recordedAt")
       .sort({ recordedAt: -1, createdAt: -1 })
       .lean(),
-    User.findById(userId).select("bmi").lean(),
+    User.findById(userId).select("bmi weight").lean(),
   ]);
 
-  const [totalWorkouts, caloriesBurnedRows, caloriesConsumedRows, recentWorkout, recentDiet, recentSchedule, weeklyWorkoutRows, weeklyCaloriesOutRows, weeklyCaloriesInRows, monthlyWorkoutRows, monthlyDietRows, schedulesCount] =
+  const weightForBurn = resolveWeightKg(profile?.weight);
+
+  const [totalWorkouts, caloriesBurnedRows, caloriesConsumedRows, recentWorkout, recentDiet, recentSchedule, weeklyWorkoutRows, weekWorkoutBurnDocs, weeklyCaloriesInRows, monthWorkoutBurnDocs, monthlyDietRows, schedulesCount] =
     await Promise.all([
       Workout.countDocuments({ userId }),
       Workout.aggregate([
@@ -120,15 +137,12 @@ const getDashboard = asyncHandler(async (req, res) => {
           },
         },
       ]),
-      Workout.aggregate([
-        { $match: { userId: userObjectId, date: { $gte: weekStart, $lte: todayEnd } } },
-        {
-          $group: {
-            _id: { $dateToString: { format: "%Y-%m-%d", date: "$date" } },
-            caloriesOut: { $sum: "$caloriesBurned" },
-          },
-        },
-      ]),
+      Workout.find({
+        userId: userObjectId,
+        date: { $gte: weekStart, $lte: todayEnd },
+      })
+        .select("type duration caloriesBurned date")
+        .lean(),
       Diet.aggregate([
         { $match: { userId: userObjectId, date: { $gte: weekStart, $lte: todayEnd } } },
         {
@@ -138,15 +152,12 @@ const getDashboard = asyncHandler(async (req, res) => {
           },
         },
       ]),
-      Workout.aggregate([
-        { $match: { userId: userObjectId, date: { $gte: monthStart, $lte: todayEnd } } },
-        {
-          $group: {
-            _id: { $dateToString: { format: "%Y-%m", date: "$date" } },
-            caloriesOut: { $sum: "$caloriesBurned" },
-          },
-        },
-      ]),
+      Workout.find({
+        userId: userObjectId,
+        date: { $gte: monthStart, $lte: todayEnd },
+      })
+        .select("type duration caloriesBurned date")
+        .lean(),
       Diet.aggregate([
         { $match: { userId: userObjectId, date: { $gte: monthStart, $lte: todayEnd } } },
         {
@@ -160,7 +171,11 @@ const getDashboard = asyncHandler(async (req, res) => {
     ]);
 
   const workoutMap = new Map(weeklyWorkoutRows.map((row) => [row._id, row.workouts]));
-  const caloriesOutMap = new Map(weeklyCaloriesOutRows.map((row) => [row._id, row.caloriesOut]));
+  const caloriesOutMap = new Map();
+  for (const doc of weekWorkoutBurnDocs || []) {
+    const key = safeIsoDate(doc.date);
+    caloriesOutMap.set(key, (caloriesOutMap.get(key) || 0) + effectiveStoredWorkoutBurn(doc, weightForBurn));
+  }
   const caloriesInMap = new Map(weeklyCaloriesInRows.map((row) => [row._id, row.caloriesIn]));
   const weeklyWorkout = [];
   const caloriesInVsOut = [];
@@ -176,11 +191,17 @@ const getDashboard = asyncHandler(async (req, res) => {
     caloriesInVsOut.push({
       day: date.toLocaleDateString("en-US", { weekday: "short" }),
       in: caloriesInMap.get(key) || 0,
-      out: caloriesOutMap.get(key) || 0,
+      out: caloriesOutMap.get(key) ?? 0,
     });
   }
 
-  const monthOutMap = new Map(monthlyWorkoutRows.map((row) => [row._id, row.caloriesOut]));
+  const monthOutMap = new Map();
+  for (const doc of monthWorkoutBurnDocs || []) {
+    const d = new Date(doc.date);
+    if (Number.isNaN(d.getTime())) continue;
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    monthOutMap.set(key, (monthOutMap.get(key) || 0) + effectiveStoredWorkoutBurn(doc, weightForBurn));
+  }
   const monthInMap = new Map(monthlyDietRows.map((row) => [row._id, row.caloriesIn]));
   const monthlyTrend = [];
   for (let i = 5; i >= 0; i -= 1) {
@@ -201,6 +222,14 @@ const getDashboard = asyncHandler(async (req, res) => {
   const totalCaloriesBurned = caloriesBurnedRows[0]?.total || 0;
   const totalCaloriesConsumed = caloriesConsumedRows[0]?.total || 0;
 
+  let recentWorkoutPayload = recentWorkout;
+  if (recentWorkoutPayload && !(Number(recentWorkoutPayload.caloriesBurned) > 0)) {
+    recentWorkoutPayload = {
+      ...recentWorkoutPayload,
+      caloriesBurned: effectiveStoredWorkoutBurn(recentWorkoutPayload, weightForBurn),
+    };
+  }
+
   res.json({
     summary: {
       totalWorkouts: totalWorkouts || 0,
@@ -215,12 +244,12 @@ const getDashboard = asyncHandler(async (req, res) => {
       monthlyTrend,
     },
     recentActivity: {
-      workout: recentWorkout
+      workout: recentWorkoutPayload
         ? {
-            title: recentWorkout.type,
-            value: `${recentWorkout.duration || 0} min`,
-            extra: `${recentWorkout.caloriesBurned || 0} kcal`,
-            at: recentWorkout.date,
+            title: recentWorkoutPayload.type,
+            value: `${recentWorkoutPayload.duration || 0} min`,
+            extra: `${recentWorkoutPayload.caloriesBurned || 0} kcal`,
+            at: recentWorkoutPayload.date,
           }
         : null,
       diet: recentDiet

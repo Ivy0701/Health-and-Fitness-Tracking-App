@@ -1,12 +1,18 @@
 <script setup>
-import { computed, nextTick, onActivated, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import WorkoutDateSlider from "../components/workout/WorkoutDateSlider.vue";
 import api from "../services/api";
 import { useRoute, useRouter } from "vue-router";
 import { useFavorites } from "../services/favorites";
-import { buildWorkoutSessionTaskId, loadWorkoutSessionState } from "../utils/workoutSessionState";
+import { buildWorkoutSessionTaskId, clearWorkoutSessionState, loadWorkoutSessionState } from "../utils/workoutSessionState";
 import { compareDateKeys, getTodayLocalDate, normalizeDateKey as normalizeLocalDateKey } from "../utils/dateLocal";
+import {
+  calculateWorkoutCaloriesBurned,
+  exerciseEffectiveDurationMinutes,
+  resolveWeightKg,
+  taskUsesAssumedMetForBurn,
+} from "../utils/workoutCaloriesBurn";
 
 const route = useRoute();
 const router = useRouter();
@@ -27,6 +33,7 @@ const todayInfo = ref({
   tasks: [],
   workout_tasks: [],
   course_tasks: [],
+  skipped_plan_ids: [],
 });
 const selectedDate = ref(getTodayLocalDate());
 const todayDateKey = computed(() => getTodayLocalDate());
@@ -34,6 +41,14 @@ const focusedPlanId = ref("");
 const expandedCourseIds = ref(new Set());
 const courseExerciseLoadingKeys = ref(new Set());
 let focusTimer = null;
+/** Temp highlight for course card when opening Workout from Schedule modal "Go". */
+const flashingCourseCardKey = ref("");
+let courseCardFlashTimer = null;
+let scheduleCourseFocusTimer = null;
+
+/** Schedule row id currently playing delete animation */
+const removingWorkoutScheduleId = ref("");
+const deletingWorkoutOpKeys = ref(new Set());
 
 const EXERCISE_GROUPS = [
   {
@@ -53,28 +68,6 @@ const EXERCISE_GROUPS = [
     options: ["Basketball", "Football", "Badminton", "Tennis"],
   },
 ];
-
-const MET_MAP = {
-  Running: 10,
-  Cycling: 8,
-  Swimming: 9,
-  "Jump Rope": 11,
-  Walking: 4,
-  Walk: 4,
-  HIIT: 10,
-  "Weight Lifting": 6,
-  "Push-up": 5,
-  "Pull-up": 6,
-  Squat: 6,
-  Deadlift: 7,
-  Yoga: 3,
-  Stretching: 2,
-  Pilates: 4,
-  Basketball: 8,
-  Football: 9,
-  Badminton: 7,
-  Tennis: 7,
-};
 
 const form = reactive({
   exercise: "Running",
@@ -190,6 +183,63 @@ async function focusPlanFromQuery() {
   }, 2200);
 }
 
+/**
+ * From Schedule slot modal: set date, scroll Course Tasks, match card by schedule item / course id / title, flash highlight.
+ */
+async function focusCourseTaskFromScheduleQuery() {
+  if (String(route.query.fromSchedule || "") !== "1") return;
+
+  const focusCourseId = String(route.query.focusCourseId || "").trim();
+  const focusScheduleItemId = String(route.query.focusScheduleItemId || "").trim();
+  const focusCourseName = String(route.query.focusCourseName || "").trim();
+  if (!focusCourseId && !focusScheduleItemId && !focusCourseName) return;
+
+  await nextTick();
+
+  const section = document.querySelector('[data-workout-section="course-tasks"]');
+  if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
+
+  await nextTick();
+
+  let matched = null;
+  for (const task of courseTasks.value) {
+    if (focusScheduleItemId && String(task?.schedule_item_id || "").trim() === focusScheduleItemId) {
+      matched = task;
+      break;
+    }
+    const cid = String(task?.course_id || task?.courseId || "").trim();
+    if (focusCourseId && cid && cid === focusCourseId) {
+      matched = task;
+      break;
+    }
+  }
+  if (!matched && focusCourseName) {
+    const lower = focusCourseName.toLowerCase();
+    matched =
+      courseTasks.value.find((t) => {
+        const title = String(t?.title || "").trim().toLowerCase();
+        return title && (title === lower || title.includes(lower) || lower.includes(title));
+      }) || null;
+  }
+
+  const domKey = matched ? courseCardDomKey(matched) : "";
+  if (domKey) {
+    await nextTick();
+    const card = document.querySelector(`[data-course-card-key="${domKey}"]`);
+    if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (courseCardFlashTimer) window.clearTimeout(courseCardFlashTimer);
+    flashingCourseCardKey.value = domKey;
+    courseCardFlashTimer = window.setTimeout(() => {
+      flashingCourseCardKey.value = "";
+    }, 2000);
+  }
+
+  if (scheduleCourseFocusTimer) window.clearTimeout(scheduleCourseFocusTimer);
+  scheduleCourseFocusTimer = window.setTimeout(() => {
+    router.replace({ path: "/workout", query: { date: selectedDate.value } });
+  }, 450);
+}
+
 async function loadProfile() {
   const { data } = await api.get("/user/profile");
   userWeight.value = typeof data?.weight === "number" ? data.weight : null;
@@ -204,6 +254,68 @@ async function loadTodayInfo() {
 const hasPlans = computed(() => plans.value.length > 0);
 function normalizeDateKey(value) {
   return normalizeLocalDateKey(value);
+}
+
+function diffInDaysInclusiveClient(startDateKey, endDateKey) {
+  const start = new Date(`${normalizeDateKey(startDateKey)}T00:00:00`);
+  const end = new Date(`${normalizeDateKey(endDateKey)}T00:00:00`);
+  const diff = Math.floor((end - start) / 86400000);
+  return diff + 1;
+}
+
+function planStartDateKeyFromPlan(plan) {
+  const raw = plan?.start_date ?? plan?.startDate ?? plan?.created_at;
+  if (!raw) return normalizeDateKey(getTodayLocalDate());
+  return normalizeDateKey(raw);
+}
+
+function isPlanActiveOnDateClient(plan, targetDateKey) {
+  const startDateKey = planStartDateKeyFromPlan(plan);
+  const dayCount = Number(plan?.days ?? 0) || 0;
+  if (dayCount <= 0 || !targetDateKey) return false;
+  const day = diffInDaysInclusiveClient(startDateKey, targetDateKey);
+  return day >= 1 && day <= dayCount;
+}
+
+function buildSyntheticPlanTaskFromPlan(plan, dateKey) {
+  const pid = workoutItemId(plan);
+  return {
+    schedule_item_id: null,
+    workout_plan_id: pid || null,
+    exercise_name: plan.exercise_name || plan.exerciseName || "Workout",
+    category: plan.category || "",
+    duration_per_day: Number(plan.duration_per_day ?? plan.durationPerDay ?? 0) || 0,
+    days: plan.days,
+    is_custom: Boolean(plan.is_custom ?? plan.isCustom),
+    date: dateKey,
+    is_completed: false,
+    task_status: "not_started",
+    remaining_seconds: null,
+    completed_at: null,
+  };
+}
+
+function workoutTaskRowKey(task) {
+  const sid = String(task?.schedule_item_id || "").trim();
+  const pid = String(task?.workout_plan_id || "").trim();
+  if (sid) return `s-${sid}`;
+  if (pid) return `p-${pid}`;
+  const name = String(task?.exercise_name || "");
+  return `m-${name}-${task?.duration_per_day || 0}`;
+}
+
+function resolvePlanForTask(task) {
+  const pid = String(task?.workout_plan_id || "").trim();
+  if (!pid) return null;
+  return plans.value.find((p) => workoutItemId(p) === pid) || null;
+}
+
+function workoutDeleteProgressKey(task) {
+  const sid = String(task?.schedule_item_id || "").trim();
+  if (sid) return `sid:${sid}`;
+  const pid = String(task?.workout_plan_id || "").trim();
+  if (pid) return `skip:${pid}:${normalizeDateKey(selectedDate.value)}`;
+  return "";
 }
 
 function taskDateKey(task, fallbackDate = "") {
@@ -221,7 +333,22 @@ const workoutTasks = computed(() => {
   const rows = todayInfo.value.workout_tasks || todayInfo.value.tasks || [];
   const selectedKey = normalizeDateKey(selectedDate.value);
   const fallbackDate = normalizeDateKey(todayInfo.value?.date || selectedDate.value);
-  return rows.filter((task) => taskDateKey(task, fallbackDate) === selectedKey);
+  const filteredRows = rows.filter((task) => taskDateKey(task, fallbackDate) === selectedKey);
+
+  const skipped = new Set((todayInfo.value.skipped_plan_ids || []).map((id) => String(id)));
+  const activePlans = plans.value.filter(
+    (p) => isPlanActiveOnDateClient(p, selectedKey) && !skipped.has(workoutItemId(p))
+  );
+  const planIdsInFiltered = new Set(
+    filteredRows.map((t) => String(t.workout_plan_id || "").trim()).filter(Boolean)
+  );
+  const extras = [];
+  for (const plan of activePlans) {
+    const pid = workoutItemId(plan);
+    if (!pid || planIdsInFiltered.has(pid)) continue;
+    extras.push(buildSyntheticPlanTaskFromPlan(plan, selectedKey));
+  }
+  return [...filteredRows, ...extras];
 });
 
 const courseTasks = computed(() => {
@@ -274,21 +401,15 @@ function getDurationMinutes(input) {
   return asNumber(raw);
 }
 
-function getMetForExerciseName(name) {
-  const direct = MET_MAP[name];
-  if (direct) return direct;
-  const lower = String(name || "").toLowerCase();
-  const key = Object.keys(MET_MAP).find((k) => k.toLowerCase() === lower);
-  return key ? MET_MAP[key] : 0;
-}
-
 function estimateBurnKcal(input) {
-  const weight = asNumber(userWeight.value);
-  if (weight <= 0) return 0;
-  const met = getMetForExerciseName(getExerciseName(input));
-  if (met <= 0) return 0;
-  const hours = getDurationMinutes(input) / 60;
-  return Math.max(0, met * weight * hours);
+  const duration = getDurationMinutes(input);
+  if (duration <= 0) return 0;
+  return calculateWorkoutCaloriesBurned({
+    durationMinutes: duration,
+    category: String(input?.category || ""),
+    title: getExerciseName(input),
+    weightKg: userWeight.value,
+  });
 }
 
 function isCompletedTask(task) {
@@ -305,6 +426,15 @@ function isCourseExerciseInProgress(exercise) {
 
 function courseTaskKey(task) {
   return String(task?.enrolled_course_id || task?.course_id || task?._id || "");
+}
+
+function courseCardDomKey(task) {
+  return String(task?.enrolled_course_id || task?.course_id || "").trim();
+}
+
+function isCourseCardFlashing(task) {
+  const k = courseCardDomKey(task);
+  return Boolean(k && flashingCourseCardKey.value === k);
 }
 
 function toggleCourseTaskExpanded(task) {
@@ -399,11 +529,7 @@ function isTimerCourseExercise(exercise) {
 }
 
 function getCourseExerciseDurationMinutes(exercise) {
-  const minutes = Number(exercise?.duration_minutes || 0);
-  if (minutes > 0) return Math.max(1, Math.round(minutes));
-  const holdSeconds = Number(exercise?.hold_seconds || 0);
-  if (holdSeconds > 0) return Math.max(1, Math.ceil(holdSeconds / 60));
-  return 1;
+  return exerciseEffectiveDurationMinutes(exercise);
 }
 
 function courseExerciseStatusLabel(exercise) {
@@ -424,15 +550,49 @@ function courseExerciseActionLabel(exercise) {
 }
 
 function getCourseTaskPlannedBurn(task) {
-  if (Number.isFinite(Number(task?.estimated_burn))) return asNumber(task.estimated_burn);
+  const w = resolveWeightKg(userWeight.value);
+  const cat = String(task?.category || "");
   if (!Array.isArray(task?.exercises)) return 0;
-  return task.exercises.reduce((sum, exercise) => sum + asNumber(exercise?.estimated_burn), 0);
+  return task.exercises.reduce(
+    (sum, exercise) =>
+      sum +
+      calculateWorkoutCaloriesBurned({
+        durationMinutes: getCourseExerciseDurationMinutes(exercise),
+        category: cat,
+        title: exercise?.title,
+        weightKg: w,
+      }),
+    0
+  );
 }
 
 function getCourseTaskCompletedBurn(task) {
-  if (Number.isFinite(Number(task?.burned_so_far))) return asNumber(task.burned_so_far);
+  const w = resolveWeightKg(userWeight.value);
+  const cat = String(task?.category || "");
   if (!Array.isArray(task?.exercises)) return 0;
-  return task.exercises.reduce((sum, exercise) => (isCourseExerciseCompleted(exercise) ? sum + asNumber(exercise?.estimated_burn) : sum), 0);
+  return task.exercises.reduce((sum, exercise) => {
+    if (!isCourseExerciseCompleted(exercise)) return sum;
+    return (
+      sum +
+      calculateWorkoutCaloriesBurned({
+        durationMinutes: getCourseExerciseDurationMinutes(exercise),
+        category: cat,
+        title: exercise?.title,
+        weightKg: w,
+      })
+    );
+  }, 0);
+}
+
+function formatCourseExerciseBurnKcal(task, exercise) {
+  return formatKcal(
+    calculateWorkoutCaloriesBurned({
+      durationMinutes: getCourseExerciseDurationMinutes(exercise),
+      category: String(task?.category || ""),
+      title: exercise?.title,
+      weightKg: userWeight.value,
+    })
+  );
 }
 
 async function updateCourseExercise(task, exercise, nextStatus) {
@@ -479,7 +639,16 @@ async function handleCourseExerciseAction(task, exercise) {
         exercise: String(exercise?.title || "Course Exercise"),
         duration: String(getCourseExerciseDurationMinutes(exercise)),
         category: "Course",
-        estimatedBurn: String(Math.round(asNumber(exercise?.estimated_burn))),
+        estimatedBurn: String(
+          Math.round(
+            calculateWorkoutCaloriesBurned({
+              durationMinutes: getCourseExerciseDurationMinutes(exercise),
+              category: String(task?.category || ""),
+              title: exercise?.title,
+              weightKg: userWeight.value,
+            })
+          )
+        ),
       },
     });
     return;
@@ -504,7 +673,7 @@ const burnedSoFar = computed(() => {
 const showWeightUnavailableHint = computed(() => typeof userWeight.value !== "number" && workoutTasks.value.length > 0);
 
 const hasCustomOrUnknownTask = computed(() =>
-  workoutTasks.value.some((task) => getMetForExerciseName(getExerciseName(task)) <= 0)
+  workoutTasks.value.some((task) => taskUsesAssumedMetForBurn(task?.category, getExerciseName(task)))
 );
 
 function startWorkoutTask(task) {
@@ -555,10 +724,69 @@ function taskRuntimeState(task) {
   return saved;
 }
 
+/** Plan-backed tasks have `workout_plan_id`; do not label them Manual just because they have a linked schedule row. */
 function taskSourceLabel(task) {
-  if (task?.source_type === "manual_schedule" || task?.schedule_item_id) return "Manual";
+  if (task?.workout_plan_id) return task?.is_custom ? "Custom" : "Plan";
+  if (String(task?.source_type || "").toLowerCase() === "manual_schedule") return "Manual";
+  if (task?.schedule_item_id) return "Manual";
   if (task?.is_custom) return "Custom";
   return "Plan";
+}
+
+function isWorkoutRowDeletable(task) {
+  if (isPastSelectedDate.value) return false;
+  if (String(task?.schedule_item_id || "").trim()) return true;
+  if (String(task?.workout_plan_id || "").trim()) return true;
+  return false;
+}
+
+function isDeletingWorkoutTask(task) {
+  const key = workoutDeleteProgressKey(task);
+  return Boolean(key) && deletingWorkoutOpKeys.value.has(key);
+}
+
+async function handleDeleteWorkoutFromDay(task) {
+  if (!isWorkoutRowDeletable(task)) return;
+  const opKey = workoutDeleteProgressKey(task);
+  if (!opKey) return;
+  if (!window.confirm("Are you sure you want to delete this workout?")) return;
+
+  error.value = "";
+  success.value = "";
+  deletingWorkoutOpKeys.value = new Set([...deletingWorkoutOpKeys.value, opKey]);
+  const sid = String(task.schedule_item_id || "").trim();
+  if (sid) removingWorkoutScheduleId.value = sid;
+  await new Promise((r) => setTimeout(r, 180));
+
+  try {
+    const planIdStr = String(task.workout_plan_id || "").trim();
+    if (sid) {
+      const taskId = buildWorkoutSessionTaskId({
+        planId: planIdStr || "",
+        scheduleItemId: sid,
+      });
+      clearWorkoutSessionState({ userId: currentUserId.value, taskId });
+      await api.delete(`/schedules/${sid}`, { params: { scope: "single" } });
+    } else if (planIdStr) {
+      const taskId = buildWorkoutSessionTaskId({
+        planId: planIdStr,
+        scheduleItemId: "",
+      });
+      clearWorkoutSessionState({ userId: currentUserId.value, taskId });
+      await api.post("/workout/plan/skip-day", { date: selectedDate.value, planId: planIdStr });
+    } else {
+      throw new Error("Nothing to delete");
+    }
+    await Promise.all([loadTodayInfo(), loadPlans()]);
+    success.value = "Workout deleted";
+  } catch (err) {
+    error.value = err?.response?.data?.message || err?.message || "Could not delete this workout.";
+  } finally {
+    const next = new Set(deletingWorkoutOpKeys.value);
+    next.delete(opKey);
+    deletingWorkoutOpKeys.value = next;
+    removingWorkoutScheduleId.value = "";
+  }
 }
 
 function workoutActionLabel(task) {
@@ -680,7 +908,7 @@ async function savePlan() {
 
 onMounted(async () => {
   const routeDate = typeof route.query.date === "string" ? normalizeDateKey(route.query.date) : "";
-  if (route.query.fromSession === "1" && routeDate) {
+  if ((route.query.fromSession === "1" || route.query.fromSchedule === "1") && routeDate) {
     selectedDate.value = routeDate;
   } else {
     selectedDate.value = getTodayLocalDate();
@@ -688,6 +916,9 @@ onMounted(async () => {
   try {
     await Promise.all([loadPlans(), loadProfile(), loadTodayInfo(), ensureFavoritesLoaded()]);
     await focusPlanFromQuery();
+    if (route.query.fromSchedule === "1") {
+      await focusCourseTaskFromScheduleQuery();
+    }
   } catch (err) {
     error.value = err?.response?.data?.message || "Failed to load workout data.";
   }
@@ -695,7 +926,10 @@ onMounted(async () => {
 
 onActivated(async () => {
   try {
-    await Promise.all([loadProfile(), loadTodayInfo()]);
+    await Promise.all([loadProfile(), loadTodayInfo(), loadPlans()]);
+    if (String(route.query.fromSchedule || "") === "1") {
+      await focusCourseTaskFromScheduleQuery();
+    }
   } catch (err) {
     error.value = err?.response?.data?.message || "Failed to refresh workout data.";
   }
@@ -714,12 +948,34 @@ watch(
     if (typeof nextDate !== "string" || !nextDate) return;
     const normalized = normalizeDateKey(nextDate);
     if (!normalized) return;
-    if (route.query.fromSession === "1") {
+    if (route.query.fromSession === "1" || route.query.fromSchedule === "1") {
       selectedDate.value = normalized;
     }
     await loadTodayInfo();
+    if (route.query.fromSchedule === "1") {
+      await focusCourseTaskFromScheduleQuery();
+    }
   }
 );
+
+watch(
+  () => route.fullPath,
+  async (to, from) => {
+    if (!from) return;
+    if (route.path !== "/workout") return;
+    if (String(route.query.fromSchedule || "") !== "1") return;
+    const routeDate = typeof route.query.date === "string" ? normalizeDateKey(route.query.date) : "";
+    if (routeDate) selectedDate.value = routeDate;
+    await loadTodayInfo();
+    await focusCourseTaskFromScheduleQuery();
+  }
+);
+
+onBeforeUnmount(() => {
+  if (focusTimer) window.clearTimeout(focusTimer);
+  if (courseCardFlashTimer) window.clearTimeout(courseCardFlashTimer);
+  if (scheduleCourseFocusTimer) window.clearTimeout(scheduleCourseFocusTimer);
+});
 
 async function handleDateChange(dateKey) {
   selectedDate.value = dateKey;
@@ -748,7 +1004,12 @@ async function handleDateChange(dateKey) {
           <h4>Workout Tasks</h4>
           <div v-if="!workoutTasks.length" class="estimate-unavailable">No workout scheduled for this day</div>
           <ul v-else class="today-list">
-            <li v-for="task in workoutTasks" :key="task.workout_plan_id || task.schedule_item_id || task.id || task._id" class="today-item">
+            <li
+              v-for="task in workoutTasks"
+              :key="workoutTaskRowKey(task)"
+              class="today-item"
+              :class="{ 'is-removing': String(task.schedule_item_id || '') === removingWorkoutScheduleId }"
+            >
               <div class="today-text">
                 <strong>{{ task.exercise_name }}</strong>
                 <span>- {{ task.duration_per_day }} min</span>
@@ -756,7 +1017,7 @@ async function handleDateChange(dateKey) {
                 <span v-if="workoutRuntimeStatusLabel(task)" class="task-source">{{ workoutRuntimeStatusLabel(task) }}</span>
                 <span class="task-kcal">Estimated burn: {{ formatKcal(estimateBurnKcal(task)) }}</span>
               </div>
-              <div class="task-action">
+              <div class="task-action workout-task-actions">
                 <button
                   v-if="!isCompletedTask(task) && (isTodaySelectedDate || isFutureSelectedDate)"
                   class="start-btn"
@@ -773,11 +1034,17 @@ async function handleDateChange(dateKey) {
           </ul>
         </div>
 
-        <div class="task-section">
+        <div class="task-section" data-workout-section="course-tasks">
           <h4>Course Tasks</h4>
           <div v-if="!courseTasks.length" class="estimate-unavailable">No course task for this day</div>
           <ul v-else class="today-list">
-            <li v-for="task in courseTasks" :key="task.enrolled_course_id" class="today-item course-task-item">
+            <li
+              v-for="task in courseTasks"
+              :key="task.enrolled_course_id"
+              class="today-item course-task-item"
+              :class="{ 'course-card-flash': isCourseCardFlashing(task) }"
+              :data-course-card-key="courseCardDomKey(task) || undefined"
+            >
               <div class="today-text">
                 <strong>{{ task.title }}</strong>
                 <span>- Day {{ task.day }}/{{ task.duration_days }}</span>
@@ -798,7 +1065,10 @@ async function handleDateChange(dateKey) {
               <div v-if="Array.isArray(task.exercises) && task.exercises.length" class="course-task-detail">
                 <div class="course-task-summary">
                   <span>{{ courseProgressText(task) }}</span>
-                  <span>Burned: {{ formatKcal(task.burned_so_far || 0) }} / {{ formatKcal(task.estimated_burn || 0) }}</span>
+                  <span
+                    >Burned: {{ formatKcal(getCourseTaskCompletedBurn(task)) }} /
+                    {{ formatKcal(getCourseTaskPlannedBurn(task)) }}</span
+                  >
                 </div>
                 <ul v-if="isCourseTaskExpanded(task)" class="course-exercise-list">
                   <li
@@ -809,7 +1079,7 @@ async function handleDateChange(dateKey) {
                     <div class="course-exercise-text">
                       <strong>{{ exercise.title }}</strong>
                       <span v-if="courseExerciseMeta(exercise)">- {{ courseExerciseMeta(exercise) }}</span>
-                      <span class="task-kcal">Estimated burn: {{ formatKcal(exercise.estimated_burn || 0) }}</span>
+                      <span class="task-kcal">Estimated burn: {{ formatCourseExerciseBurnKcal(task, exercise) }}</span>
                       <span class="task-source">{{ courseExerciseStatusLabel(exercise) }}</span>
                     </div>
                     <div class="task-action">
@@ -911,23 +1181,43 @@ async function handleDateChange(dateKey) {
         <p v-if="success" class="success-text">{{ success }}</p>
 
         <section class="plan-list">
+          <p v-if="!workoutTasks.length" class="muted plan-list-empty">No workout items for this day.</p>
           <article
-            v-for="plan in plans"
-            :key="plan.id || plan._id"
+            v-for="task in workoutTasks"
+            :key="workoutTaskRowKey(task)"
             class="card"
-            :class="{ focused: focusedPlanId === workoutItemId(plan) }"
-            :data-plan-id="workoutItemId(plan)"
+            :class="{ focused: focusedPlanId === String(task.workout_plan_id || '') }"
+            :data-plan-id="String(task.workout_plan_id || '')"
           >
             <div class="plan-row-head">
-              <button type="button" class="tiny-fav-btn" :class="{ active: isWorkoutFavorited(plan) }" @click="toggleWorkoutFavorite(plan)">
-                {{ isWorkoutFavorited(plan) ? "★ Saved" : "☆ Save" }}
-              </button>
+              <div class="plan-head-actions">
+                <button
+                  v-if="resolvePlanForTask(task)"
+                  type="button"
+                  class="tiny-fav-btn"
+                  :class="{ active: isWorkoutFavorited(resolvePlanForTask(task)) }"
+                  @click="toggleWorkoutFavorite(resolvePlanForTask(task))"
+                >
+                  {{ isWorkoutFavorited(resolvePlanForTask(task)) ? "★ Saved" : "☆ Save" }}
+                </button>
+                <button
+                  v-if="isWorkoutRowDeletable(task)"
+                  type="button"
+                  class="plan-delete-btn"
+                  :disabled="isDeletingWorkoutTask(task)"
+                  title="Delete workout"
+                  aria-label="Delete workout"
+                  @click="handleDeleteWorkoutFromDay(task)"
+                >
+                  Delete
+                </button>
+              </div>
             </div>
-            <h4>{{ plan.exercise_name || plan.exerciseName }}</h4>
-            <p>Category: {{ plan.category }}</p>
-            <p>Days: {{ plan.days }}</p>
-            <p>Duration / day: {{ plan.duration_per_day || plan.durationPerDay }} min</p>
-            <p>Estimated burn: {{ formatKcal(estimateBurnKcal(plan)) }}</p>
+            <h4>{{ task.exercise_name }}</h4>
+            <p>Category: {{ task.category }}</p>
+            <p>Days: {{ task.days }}</p>
+            <p>Duration / day: {{ task.duration_per_day }} min</p>
+            <p>Estimated burn: {{ formatKcal(estimateBurnKcal(task)) }}</p>
           </article>
         </section>
       </article>
@@ -1050,6 +1340,12 @@ async function handleDateChange(dateKey) {
   align-items: start;
 }
 
+.course-task-item.course-card-flash {
+  box-shadow: 0 0 0 2px rgba(72, 174, 164, 0.38);
+  background: #f0fcf9;
+  transition: background 0.25s ease, box-shadow 0.25s ease;
+}
+
 .course-task-detail {
   grid-column: 1 / -1;
   margin-top: 8px;
@@ -1099,10 +1395,22 @@ async function handleDateChange(dateKey) {
 }
 
 .task-action {
-  flex: 0 0 108px;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: flex-end;
+}
+
+.task-action.workout-task-actions {
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 220px;
+}
+
+.today-item.is-removing {
+  opacity: 0.35;
+  transform: translateY(4px);
+  transition: opacity 0.22s ease, transform 0.22s ease;
 }
 
 .task-kcal {
@@ -1205,6 +1513,42 @@ async function handleDateChange(dateKey) {
 .plan-row-head {
   display: flex;
   justify-content: flex-end;
+}
+
+.plan-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.plan-list-empty {
+  margin: 0 0 10px;
+}
+
+.plan-delete-btn {
+  border: 1px solid #e8a8a8;
+  background: #fdeaea;
+  color: #b42318;
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.plan-delete-btn:hover:not(:disabled) {
+  background: #f3bcbc;
+  border-color: #c94a4a;
+  color: #7f1d1d;
+}
+
+.plan-delete-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .tiny-fav-btn {

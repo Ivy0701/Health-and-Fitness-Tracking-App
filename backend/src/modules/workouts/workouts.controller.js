@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const asyncHandler = require("../../utils/asyncHandler");
 const WorkoutPlan = require("../../models/WorkoutPlan");
 const WorkoutDailyStatus = require("../../models/WorkoutDailyStatus");
@@ -5,31 +6,12 @@ const User = require("../../models/User");
 const EnrolledCourse = require("../../models/EnrolledCourse");
 const CourseDailyProgress = require("../../models/CourseDailyProgress");
 const ScheduleItem = require("../../models/ScheduleItem");
+const scheduleTime = require("../../utils/scheduleTime");
 const ScheduleSkip = require("../../models/ScheduleSkip");
 const Workout = require("../../models/Workout");
 const { buildCourseExercises, summarizeCourseExercises } = require("../../utils/courseSession");
+const { calculateWorkoutCaloriesBurned, applyMetBurnsToExercises } = require("../../utils/workoutCaloriesBurn");
 
-const MET_MAP = {
-  running: 10,
-  cycling: 8,
-  swimming: 9,
-  "jump rope": 11,
-  walking: 4,
-  walk: 4,
-  hiit: 10,
-  "weight lifting": 6,
-  "push-up": 5,
-  "pull-up": 6,
-  squat: 6,
-  deadlift: 7,
-  yoga: 3,
-  stretching: 2,
-  pilates: 4,
-  basketball: 8,
-  football: 9,
-  badminton: 7,
-  tennis: 7,
-};
 const WORKOUT_TASK_STATUSES = new Set(["not_started", "in_progress", "paused", "completed", "missed", "scheduled"]);
 
 function toDateKey(date = new Date()) {
@@ -60,21 +42,6 @@ function diffInDaysInclusive(startDateKey, now = new Date()) {
   const today = parseDateKey(toDateKey(now));
   const diff = Math.floor((today - start) / 86400000);
   return diff + 1;
-}
-
-function getMetForExerciseName(name) {
-  const key = String(name || "").trim().toLowerCase();
-  return MET_MAP[key] || 0;
-}
-
-function estimateWorkoutBurn({ exerciseName, durationMinutes, weight }) {
-  const safeWeight = Number(weight);
-  const safeDuration = Number(durationMinutes);
-  if (!Number.isFinite(safeWeight) || safeWeight <= 0) return 0;
-  if (!Number.isFinite(safeDuration) || safeDuration <= 0) return 0;
-  const met = getMetForExerciseName(exerciseName);
-  if (!met) return 0;
-  return Math.round(met * safeWeight * (safeDuration / 60));
 }
 
 function normalizeTaskStatus(raw) {
@@ -179,13 +146,29 @@ const getTodayPlan = asyncHandler(async (req, res) => {
       time: String(plan.fixed_time || "07:00").slice(0, 5),
       note: String(plan.note || ""),
       durationMinutes: Number(plan.duration_per_day || 30),
-      overlapAccepted: true,
+      overlapAccepted: false,
       is_completed: false,
       completed_at: null,
     });
   }
   if (missingPlanScheduleDocs.length) {
-    await ScheduleItem.insertMany(missingPlanScheduleDocs);
+    const existingDay = await ScheduleItem.find({ userId: req.user.id, date }).lean();
+    const acc = [...existingDay];
+    const toInsert = [];
+    for (const doc of missingPlanScheduleDocs) {
+      const dur = Math.max(1, Number(doc.durationMinutes) || 30);
+      let timeStr = String(doc.time || "07:00").slice(0, 5);
+      const cand = { date, time: timeStr, durationMinutes: dur, itemType: "workout", title: doc.title };
+      if (scheduleTime.hasScheduleConflict(cand, acc, null)) {
+        const slot = scheduleTime.findNextAvailableTimeSlot(date, dur, acc, { itemType: "workout" });
+        if (!slot) continue;
+        timeStr = slot;
+      }
+      const row = { ...doc, time: timeStr, overlapAccepted: false };
+      toInsert.push(row);
+      acc.push({ ...row, _id: new mongoose.Types.ObjectId() });
+    }
+    if (toInsert.length) await ScheduleItem.insertMany(toInsert);
     scheduleWorkoutItems = await ScheduleItem.find({
       userId: req.user.id,
       date,
@@ -313,7 +296,8 @@ const getTodayPlan = asyncHandler(async (req, res) => {
                 duration: item.duration_minutes,
                 category: enrolledCourses.find((row) => String(row._id) === String(item.enrolled_course_id))?.course_id?.category || "",
               },
-              item.day
+              item.day,
+              user?.weight
             ),
             is_completed: false,
             completed_at: null,
@@ -328,7 +312,8 @@ const getTodayPlan = asyncHandler(async (req, res) => {
           duration: item.duration_minutes,
           category: enrolledCourses.find((row) => String(row._id) === String(item.enrolled_course_id))?.course_id?.category || "",
         },
-        item.day
+        item.day,
+        user?.weight
       );
       const summary = summarizeCourseExercises(existing.exercises);
       existing.status = summary.status;
@@ -362,12 +347,28 @@ const getTodayPlan = asyncHandler(async (req, res) => {
       note: "",
       courseId: item.course_id || null,
       durationMinutes: Number(item.duration_minutes || 30),
-      overlapAccepted: true,
+      overlapAccepted: false,
       is_completed: false,
       completed_at: null,
     }));
   if (missingCourseDocs.length) {
-    await ScheduleItem.insertMany(missingCourseDocs);
+    const existingDayCourse = await ScheduleItem.find({ userId: req.user.id, date }).lean();
+    const accC = [...existingDayCourse];
+    const toInsertCourse = [];
+    for (const doc of missingCourseDocs) {
+      const dur = Math.max(1, Number(doc.durationMinutes) || 30);
+      let timeStr = String(doc.time || "08:00").slice(0, 5);
+      const cand = { date, time: timeStr, durationMinutes: dur, itemType: "course", title: doc.title };
+      if (scheduleTime.hasScheduleConflict(cand, accC, null)) {
+        const slot = scheduleTime.findNextAvailableTimeSlot(date, dur, accC, { itemType: "course" });
+        if (!slot) continue;
+        timeStr = slot;
+      }
+      const row = { ...doc, time: timeStr, overlapAccepted: false };
+      toInsertCourse.push(row);
+      accC.push({ ...row, _id: new mongoose.Types.ObjectId() });
+    }
+    if (toInsertCourse.length) await ScheduleItem.insertMany(toInsertCourse);
     scheduleCourseItems = await ScheduleItem.find({
       userId: req.user.id,
       date,
@@ -383,21 +384,27 @@ const getTodayPlan = asyncHandler(async (req, res) => {
     const linkedItem =
       scheduleCourseItems.find((s) => String(s?.courseId || "") === String(item.course_id || "")) || null;
     const progress = courseProgressMap.get(`${item.enrolled_course_id}`);
+    const courseCategory =
+      enrolledCourses.find((row) => String(row._id) === String(item.enrolled_course_id))?.course_id?.category || "";
+    const rawExercises = Array.isArray(progress?.exercises) ? progress.exercises : [];
+    const exercisesWithBurn = applyMetBurnsToExercises(rawExercises, courseCategory, user?.weight);
+    const summary = summarizeCourseExercises(exercisesWithBurn);
     return {
       schedule_item_id: linkedItem?._id || null,
       enrolled_course_id: item.enrolled_course_id,
       course_id: item.course_id,
       title: linkedItem?.title || item.title,
+      category: String(courseCategory || ""),
       date,
       day: item.day,
       duration_days: item.duration_days,
       duration_per_day: item.duration_minutes,
-      exercises: Array.isArray(progress?.exercises) ? progress.exercises : [],
+      exercises: exercisesWithBurn,
       status: progress?.status || (progress?.is_completed ? "completed" : "not_started"),
-      total_exercises: summarizeCourseExercises(progress?.exercises || []).total_exercises,
-      completed_exercises: summarizeCourseExercises(progress?.exercises || []).completed_exercises,
-      estimated_burn: summarizeCourseExercises(progress?.exercises || []).estimated_burn,
-      burned_so_far: summarizeCourseExercises(progress?.exercises || []).burned_so_far,
+      total_exercises: summary.total_exercises,
+      completed_exercises: summary.completed_exercises,
+      estimated_burn: summary.estimated_burn,
+      burned_so_far: summary.burned_so_far,
       is_completed: Boolean(progress?.is_completed ?? linkedItem?.is_completed),
       completed_at: progress?.completed_at || linkedItem?.completed_at || null,
     };
@@ -426,6 +433,7 @@ const getTodayPlan = asyncHandler(async (req, res) => {
     tasks: allWorkoutTasks,
     workout_tasks: allWorkoutTasks,
     course_tasks: courseTasks,
+    skipped_plan_ids: Array.from(skippedPlanIds),
   });
 });
 
@@ -487,10 +495,11 @@ const updateTodayStatus = asyncHandler(async (req, res) => {
         userId: req.user.id,
         type: scheduleItem.title || "Workout",
         duration: Number(scheduleItem.durationMinutes || 30),
-        caloriesBurned: estimateWorkoutBurn({
-          exerciseName: scheduleItem.title || "Workout",
+        caloriesBurned: calculateWorkoutCaloriesBurned({
+          title: scheduleItem.title || "Workout",
+          category: scheduleItem.category || "",
           durationMinutes: Number(scheduleItem.durationMinutes || 30),
-          weight: user?.weight,
+          weightKg: user?.weight,
         }),
         date: new Date(`${normalizedDate}T00:00:00`),
         note: "Completed from workout task",
@@ -556,10 +565,11 @@ const updateTodayStatus = asyncHandler(async (req, res) => {
       userId: req.user.id,
       type: plan.exercise_name || "Workout",
       duration: Number(plan.duration_per_day || 30),
-      caloriesBurned: estimateWorkoutBurn({
-        exerciseName: plan.exercise_name || "Workout",
+      caloriesBurned: calculateWorkoutCaloriesBurned({
+        title: plan.exercise_name || "Workout",
+        category: plan.category || "",
         durationMinutes: Number(plan.duration_per_day || 30),
-        weight: user?.weight,
+        weightKg: user?.weight,
       }),
       date: new Date(`${normalizedDate}T00:00:00`),
       note: "Completed from plan task",
@@ -605,5 +615,25 @@ const stopPlan = asyncHandler(async (req, res) => {
   res.json({ ok: true, removed_plan_id: plan._id });
 });
 
-module.exports = { listPlans, getTaskDetail, createPlan, getTodayPlan, updateTodayStatus, stopPlan };
+/** Skip one calendar day for a workout plan (no schedule row, or UI-only removal without deleting the whole plan). */
+const skipPlanForDay = asyncHandler(async (req, res) => {
+  const date = isValidDateKey(req.body?.date) ? req.body.date : toDateKey(new Date());
+  const planId = req.body?.planId;
+  if (!mongoose.Types.ObjectId.isValid(String(planId || ""))) {
+    return res.status(400).json({ message: "planId is required" });
+  }
+  const plan = await WorkoutPlan.findOne({ _id: planId, user_id: req.user.id });
+  if (!plan) return res.status(404).json({ message: "Workout plan not found" });
+  if (!isPlanActiveOnDate(plan, date)) {
+    return res.status(400).json({ message: "Plan is not active on that date" });
+  }
+  await ScheduleSkip.updateOne(
+    { userId: req.user.id, date, planId: plan._id },
+    { $setOnInsert: { userId: req.user.id, date, planId: plan._id } },
+    { upsert: true }
+  );
+  res.json({ ok: true, date, planId: String(plan._id) });
+});
+
+module.exports = { listPlans, getTaskDetail, createPlan, getTodayPlan, updateTodayStatus, stopPlan, skipPlanForDay };
 
