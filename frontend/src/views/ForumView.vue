@@ -19,15 +19,20 @@ const commentDrafts = ref({});
 const commentInputRefs = ref({});
 const { favorites, isFavorited, toggleFavorite, ensureFavoritesLoaded } = useFavorites();
 const focusedPostId = ref("");
-const notificationsOpen = ref(false);
 const createModalOpen = ref(false);
 const saveNotice = ref("");
 const feedError = ref("");
 const postsLoading = ref(true);
+const publishSubmitting = ref(false);
+const publishError = ref(false);
+const likeBusyPostId = ref("");
+const commentBusyPostId = ref("");
+/** Current user's posts from `GET /forum/posts/mine` (includes warned/removed). */
+const myPosts = ref([]);
 let focusTimer = null;
 
 const forumCenter = useForumCenterStore();
-const { currentUser: me, posts, notifications, savedPostIds } = storeToRefs(forumCenter);
+const { currentUser: me, posts, savedPostIds } = storeToRefs(forumCenter);
 
 const BASE_TAG_OPTIONS = [
   { value: "diet", label: "Diet" },
@@ -123,13 +128,15 @@ function isCurrentUserPost(p) {
   return false;
 }
 
-const visiblePosts = computed(() => {
-  let rows = [...posts.value].filter((p) => String(p?.status || "normal").toLowerCase() !== "removed");
-  const q = searchQuery.value.trim().toLowerCase();
+const feedSource = computed(() => (activeFilter.value === "mine" ? myPosts.value : posts.value));
 
-  if (activeFilter.value === "mine") {
-    rows = rows.filter((p) => isCurrentUserPost(p));
+const visiblePosts = computed(() => {
+  let rows = [...feedSource.value];
+  if (activeFilter.value !== "mine") {
+    rows = rows.filter((p) => String(p?.status || "normal").toLowerCase() !== "removed");
   }
+
+  const q = searchQuery.value.trim().toLowerCase();
 
   if (q) {
     rows = rows.filter(
@@ -177,13 +184,18 @@ const emptyFeedMessage = computed(() => {
 });
 
 const isDatabaseEmpty = computed(
-  () => !postsLoading.value && !feedError.value && (Array.isArray(posts.value) ? posts.value.length : 0) === 0
+  () =>
+    !postsLoading.value &&
+    !feedError.value &&
+    (Array.isArray(posts.value) ? posts.value.length : 0) === 0 &&
+    activeFilter.value !== "mine" &&
+    activeFilter.value !== "favorites"
 );
 
-const unreadNotificationsCount = computed(() => forumCenter.unreadCount);
 const trimmedTitle = computed(() => String(form.title || "").trim());
 const trimmedContent = computed(() => String(form.content || "").trim());
 const isPublishDisabled = computed(() => !trimmedTitle.value || !trimmedContent.value);
+const myUserId = computed(() => String(me.value?.id || me.value?._id || "").trim());
 
 function syncSavedPostIdsFromFavorites() {
   const ids = (Array.isArray(favorites.value) ? favorites.value : [])
@@ -224,12 +236,18 @@ function addCustomTag() {
 
 function handleTitleInput() {
   if (publishErrors.title) publishErrors.title = "";
-  if (publishNotice.value) publishNotice.value = "";
+  if (publishNotice.value) {
+    publishNotice.value = "";
+    publishError.value = false;
+  }
 }
 
 function handleContentInput() {
   if (publishErrors.content) publishErrors.content = "";
-  if (publishNotice.value) publishNotice.value = "";
+  if (publishNotice.value) {
+    publishNotice.value = "";
+    publishError.value = false;
+  }
 }
 
 function validatePublishForm() {
@@ -238,8 +256,10 @@ function validatePublishForm() {
   const valid = !publishErrors.title && !publishErrors.content;
   if (!valid) {
     publishNotice.value = "Please fill in all required fields before publishing";
+    publishError.value = true;
   } else {
     publishNotice.value = "";
+    publishError.value = false;
   }
   return valid;
 }
@@ -249,6 +269,7 @@ function normalizeComments(comments, postId) {
   return rows
     .map((comment, index) => ({
       id: String(comment?.id || comment?._id || `${postId}-comment-${index + 1}`),
+      userId: String(comment?.userId ?? comment?.user?._id ?? "").trim(),
       authorName: String(comment?.authorName || comment?.author?.name || "Community friend"),
       text: String(comment?.text || comment?.content || "").trim(),
       createdAt: comment?.createdAt || new Date().toISOString(),
@@ -273,35 +294,63 @@ function initializePostState(postRows) {
   });
 }
 
+function applyPostFromApi(raw) {
+  const [one] = initializePostState([raw]);
+  return one;
+}
+
+function mergeNormalizedPostIntoLocalLists(normalized) {
+  if (!normalized?._id) return;
+  forumCenter.replacePost(normalized);
+  const id = String(normalized._id || "");
+  const mi = myPosts.value.findIndex((p) => String(p?._id || "") === id);
+  if (mi === -1) return;
+  const next = [...myPosts.value];
+  next[mi] = normalized;
+  myPosts.value = next;
+}
+
+async function fetchMyPosts() {
+  const uid = String(me.value?.id || me.value?._id || "").trim();
+  if (!uid) {
+    myPosts.value = [];
+    return;
+  }
+  try {
+    const rows = await api.get("/forum/posts/mine").then((r) => (Array.isArray(r.data) ? r.data : []));
+    myPosts.value = initializePostState(rows);
+  } catch {
+    myPosts.value = [];
+  }
+}
+
 async function load() {
   postsLoading.value = true;
   feedError.value = "";
   try {
     const [user, forumPosts] = await Promise.all([
       api.get("/users/me").then((r) => r.data),
-      api.get("/forum/posts").then((r) => r.data),
+      api.get("/forum/posts").then((r) => (Array.isArray(r.data) ? r.data : [])),
     ]);
     forumCenter.setCurrentUser(user);
-    const realPosts = Array.isArray(forumPosts) ? forumPosts : [];
-    forumCenter.syncPosts(initializePostState(realPosts));
+    forumCenter.syncPosts(initializePostState(forumPosts));
+    await fetchMyPosts();
     syncSavedPostIdsFromFavorites();
   } catch (e) {
     forumCenter.syncPosts([]);
+    myPosts.value = [];
     feedError.value = e?.response?.data?.message || e?.message || "Failed to load forum posts.";
   } finally {
     postsLoading.value = false;
   }
 }
 
-async function fetchNotifications() {
-  const rows = await api.get("/notifications").then((r) => (Array.isArray(r.data) ? r.data : []));
-  forumCenter.setNotifications(rows);
-}
-
 async function focusPostById(postId, options = {}) {
   const targetId = String(postId || "").trim();
   if (!targetId) return;
-  const exists = posts.value.some((post) => String(post?._id || "") === targetId);
+  const exists =
+    posts.value.some((post) => String(post?._id || "") === targetId) ||
+    myPosts.value.some((post) => String(post?._id || "") === targetId);
   if (!exists) return;
   if (options.resetFilter !== false) {
     activeFilter.value = "all";
@@ -374,47 +423,56 @@ function validatePostForFavorite(post) {
   return { postId, title, content };
 }
 
-function handleToggleLike(postId, event) {
+async function handleToggleLike(postId, event) {
   event?.stopPropagation();
-  forumCenter.togglePostLike(postId);
+  const id = String(postId || "").trim();
+  if (!id || likeBusyPostId.value === id) return;
+  likeBusyPostId.value = id;
+  saveNotice.value = "";
+  try {
+    const { data } = await api.patch(`/forum/posts/${id}/like`);
+    const normalized = applyPostFromApi(data);
+    mergeNormalizedPostIntoLocalLists(normalized);
+    await fetchMyPosts();
+  } catch (e) {
+    saveNotice.value = e?.response?.data?.message || e?.message || "Failed to update like.";
+  } finally {
+    likeBusyPostId.value = "";
+  }
 }
 
-function handleSubmitComment(postId, text) {
+async function handleSubmitComment(postId, text) {
   const cleanText = String(text || "").trim();
-  if (!cleanText) return;
   const targetId = String(postId || "").trim();
-  if (!targetId) return;
-  const newComment = {
-    id: Date.now().toString(),
-    authorName: "Me",
-    text: cleanText,
-    createdAt: new Date().toISOString(),
-  };
-  const nextPosts = posts.value.map((post) => {
-    if (String(post?._id || "") !== targetId) return post;
-    const existingComments = Array.isArray(post?.comments) ? post.comments : [];
-    return {
-      ...post,
-      comments: [...existingComments, newComment],
-    };
-  });
-  forumCenter.syncPosts(nextPosts);
-  setCommentDraft(postId, "");
+  if (!cleanText || !targetId || commentBusyPostId.value === targetId) return;
+  commentBusyPostId.value = targetId;
+  saveNotice.value = "";
+  try {
+    const { data } = await api.post(`/forum/posts/${targetId}/comments`, { content: cleanText });
+    const normalized = applyPostFromApi(data);
+    mergeNormalizedPostIntoLocalLists(normalized);
+    await fetchMyPosts();
+    setCommentDraft(postId, "");
+  } catch (e) {
+    saveNotice.value = e?.response?.data?.message || e?.message || "Failed to post comment.";
+  } finally {
+    commentBusyPostId.value = "";
+  }
 }
 
-function handleDeleteComment(postId, commentId) {
+async function handleDeleteComment(postId, commentId) {
   const targetPostId = String(postId || "").trim();
   const targetCommentId = String(commentId || "").trim();
   if (!targetPostId || !targetCommentId) return;
-  const nextPosts = posts.value.map((post) => {
-    if (String(post?._id || "") !== targetPostId) return post;
-    const existingComments = Array.isArray(post?.comments) ? post.comments : [];
-    return {
-      ...post,
-      comments: existingComments.filter((comment) => String(comment?.id || "") !== targetCommentId),
-    };
-  });
-  forumCenter.syncPosts(nextPosts);
+  saveNotice.value = "";
+  try {
+    const { data } = await api.delete(`/forum/posts/${targetPostId}/comments/${targetCommentId}`);
+    const normalized = applyPostFromApi(data);
+    mergeNormalizedPostIntoLocalLists(normalized);
+    await fetchMyPosts();
+  } catch (e) {
+    saveNotice.value = e?.response?.data?.message || e?.message || "Failed to delete comment.";
+  }
 }
 
 async function handleReplyComment(postId, comment) {
@@ -450,26 +508,44 @@ async function handleShareComment(postId, commentId) {
 
 async function addPost() {
   if (!validatePublishForm()) return;
-  await api.post("/forum/posts", {
-    title: trimmedTitle.value,
-    content: trimmedContent.value,
-    tags: selectedTags.value,
-  });
-  form.title = "";
-  form.content = "";
-  selectedTags.value = [];
-  customTagInput.value = "";
-  showCustomTagInput.value = false;
-  publishErrors.title = "";
-  publishErrors.content = "";
+  publishSubmitting.value = true;
+  publishError.value = false;
   publishNotice.value = "";
-  await load();
-  createModalOpen.value = false;
+  try {
+    await api.post("/forum/posts", {
+      title: trimmedTitle.value,
+      content: trimmedContent.value,
+      tags: selectedTags.value,
+    });
+    form.title = "";
+    form.content = "";
+    selectedTags.value = [];
+    customTagInput.value = "";
+    showCustomTagInput.value = false;
+    publishErrors.title = "";
+    publishErrors.content = "";
+    publishNotice.value = "Post created successfully.";
+    publishError.value = false;
+    await load();
+    createModalOpen.value = false;
+  } catch (e) {
+    publishNotice.value = e?.response?.data?.message || e?.message || "Failed to create post.";
+    publishError.value = true;
+  } finally {
+    publishSubmitting.value = false;
+  }
 }
 
 async function removePost(id) {
-  await api.delete(`/forum/posts/${id}`);
-  await load();
+  const key = String(id || "").trim();
+  if (!key) return;
+  saveNotice.value = "";
+  try {
+    await api.delete(`/forum/posts/${key}`);
+    await load();
+  } catch (e) {
+    saveNotice.value = e?.response?.data?.message || e?.message || "Failed to delete post.";
+  }
 }
 
 function isForumFavorited(postId) {
@@ -513,27 +589,11 @@ async function toggleForumFavorite(post) {
   }
 }
 
-function toggleNotificationsPanel() {
-  notificationsOpen.value = !notificationsOpen.value;
-  if (!notificationsOpen.value) return;
-  fetchNotifications().catch(() => {
-    forumCenter.setNotifications([]);
-  });
-}
-
-function toggleMinePostsView() {
+async function toggleMinePostsView() {
   if (!me.value) return;
-  activeFilter.value = activeFilter.value === "mine" ? "all" : "mine";
-}
-
-async function openNotification(item) {
-  notificationsOpen.value = false;
-  if (item?.isRead === false) {
-    await api.post("/notifications/read").catch(() => null);
-    forumCenter.markAllNotificationsRead();
-  }
-  if (item?.postId) await focusPostById(item.postId);
-  else if (item?.relatedPostId) await focusPostById(item.relatedPostId);
+  const next = activeFilter.value === "mine" ? "all" : "mine";
+  activeFilter.value = next;
+  if (next === "mine") await fetchMyPosts();
 }
 
 async function openSavedPost(postId) {
@@ -557,9 +617,6 @@ function handleGlobalKeydown(event) {
 onMounted(async () => {
   await Promise.all([load(), ensureFavoritesLoaded()]);
   syncSavedPostIdsFromFavorites();
-  await fetchNotifications().catch(() => {
-    forumCenter.setNotifications([]);
-  });
   await focusPostFromQuery();
   window.addEventListener("keydown", handleGlobalKeydown);
 });
@@ -585,6 +642,7 @@ watch(
 
 watch(me, (u) => {
   if (!u && activeFilter.value === "mine") activeFilter.value = "all";
+  if (!u) myPosts.value = [];
 });
 </script>
 
@@ -598,34 +656,16 @@ watch(me, (u) => {
           <p class="forum-sub">Share meals, workouts, and habits—stay motivated together.</p>
         </div>
         <div class="forum-head-actions">
-          <div class="forum-head-action-group">
-            <button type="button" class="notify-btn" @click="toggleNotificationsPanel">
-              <span aria-hidden="true">🔔</span>
-              <span v-if="unreadNotificationsCount > 0" class="notify-badge">{{ unreadNotificationsCount }}</span>
-            </button>
-            <button
-              v-if="me"
-              type="button"
-              class="forum-my-posts-btn"
-              :class="{ active: activeFilter === 'mine' }"
-              :aria-pressed="activeFilter === 'mine' ? 'true' : 'false'"
-              @click="toggleMinePostsView"
-            >
-              My Posts
-            </button>
-          </div>
-          <div v-if="notificationsOpen" class="notify-dropdown">
-            <p class="notify-title">Notifications</p>
-            <ul v-if="notifications.length" class="notify-list">
-              <li v-for="item in notifications" :key="item._id || item.id">
-                <button type="button" class="notify-item" @click="openNotification(item)">
-                  <span>{{ item.message }}</span>
-                  <small>{{ formatRelativeTime(item.createdAt) }}</small>
-                </button>
-              </li>
-            </ul>
-            <p v-else class="notify-empty">No notifications yet.</p>
-          </div>
+          <button
+            v-if="me"
+            type="button"
+            class="forum-my-posts-btn"
+            :class="{ active: activeFilter === 'mine' }"
+            :aria-pressed="activeFilter === 'mine' ? 'true' : 'false'"
+            @click="toggleMinePostsView"
+          >
+            My Posts
+          </button>
         </div>
       </div>
     </header>
@@ -667,9 +707,7 @@ watch(me, (u) => {
       <article v-else-if="isDatabaseEmpty" class="post-card empty-post-card empty-post-card--hero" aria-live="polite">
         <div class="empty-icon" aria-hidden="true">💬</div>
         <h3 class="empty-state-title">No posts yet</h3>
-        <p class="empty-state-body">
-          There are no real forum posts yet. Create the first post to start the discussion.
-        </p>
+        <p class="empty-state-body">No posts yet. Create the first one to start the discussion.</p>
         <button type="button" class="empty-create-btn" @click="openCreateModal">Create post</button>
       </article>
       <template v-else-if="filteredPosts.length">
@@ -731,6 +769,7 @@ watch(me, (u) => {
               type="button"
               class="stat stat-btn like-btn"
               :class="{ liked: p.isLiked }"
+              :disabled="likeBusyPostId === p._id"
               @click="handleToggleLike(p._id, $event)"
             >
               <span class="stat-icon" aria-hidden="true">{{ p.isLiked ? "♥" : "♡" }}</span>
@@ -747,7 +786,7 @@ watch(me, (u) => {
           </div>
 
           <section v-if="isCommentSectionOpen(p._id)" class="comments-panel">
-            <ul v-if="getCommentCount(p)" class="mock-comment-list">
+            <ul v-if="getCommentCount(p)" class="forum-comment-list">
               <li v-for="comment in getPostComments(p)" :key="comment.id" class="mock-comment-item">
                 <div class="mock-comment-avatar" :style="{ background: avatarColor(comment.authorName) }">
                   <span class="avatar-letter mock-comment-avatar-letter">{{ avatarInitial(comment.authorName) }}</span>
@@ -764,7 +803,7 @@ watch(me, (u) => {
                     <button type="button" class="mock-comment-action" @click="handleReplyComment(p._id, comment)">Reply</button>
                     <button type="button" class="mock-comment-action" @click="handleShareComment(p._id, comment.id)">Share</button>
                     <button
-                      v-if="comment.authorName === 'Me'"
+                      v-if="myUserId && String(comment.userId || '') === myUserId"
                       type="button"
                       class="mock-comment-action"
                       @click="handleDeleteComment(p._id, comment.id)"
@@ -786,7 +825,9 @@ watch(me, (u) => {
                 @input="setCommentDraft(p._id, $event.target.value)"
                 @keydown.enter.prevent="handleSubmitComment(p._id, getCommentDraft(p._id))"
               />
-              <button type="submit" class="comment-submit">Send</button>
+              <button type="submit" class="comment-submit" :disabled="commentBusyPostId === p._id">
+                {{ commentBusyPostId === p._id ? "Sending…" : "Send" }}
+              </button>
             </form>
           </section>
         </article>
@@ -850,9 +891,11 @@ watch(me, (u) => {
             </div>
           </div>
           <div class="create-actions">
-            <button type="submit" class="publish-btn" :disabled="isPublishDisabled">Publish Post</button>
+            <button type="submit" class="publish-btn" :disabled="isPublishDisabled || publishSubmitting">
+              {{ publishSubmitting ? "Publishing…" : "Publish Post" }}
+            </button>
           </div>
-          <p v-if="publishNotice" class="publish-notice">{{ publishNotice }}</p>
+          <p v-if="publishNotice" class="publish-notice" :class="{ 'publish-notice--error': publishError }">{{ publishNotice }}</p>
         </form>
       </section>
     </div>
@@ -881,12 +924,6 @@ watch(me, (u) => {
   flex-shrink: 0;
 }
 
-.forum-head-action-group {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
 .forum-my-posts-btn {
   border: 1px solid #c8dbd7;
   background: #f7fcfa;
@@ -912,98 +949,6 @@ watch(me, (u) => {
   border-color: #5eb5a8;
   color: #1a454d;
   box-shadow: 0 0 0 1px rgba(52, 139, 147, 0.28);
-}
-
-.notify-btn {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  border: 1px solid #c8dbd7;
-  background: #f7fcfa;
-  color: var(--c6);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-}
-
-.notify-btn:hover {
-  border-color: var(--c3);
-  background: #eef8f4;
-}
-
-.notify-badge {
-  position: absolute;
-  top: -6px;
-  right: -6px;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: #ef4444;
-  color: #ffffff;
-  font-size: 11px;
-  line-height: 18px;
-  font-weight: 700;
-  text-align: center;
-}
-
-.notify-dropdown {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 8px);
-  width: min(360px, 86vw);
-  max-height: 320px;
-  overflow: auto;
-  border-radius: 14px;
-  border: 1px solid #d9e9e6;
-  background: #ffffff;
-  box-shadow: 0 8px 18px rgb(47 72 88 / 0.16);
-  padding: 10px;
-  z-index: 12;
-}
-
-.notify-title {
-  margin: 0 0 8px;
-  font-size: 0.85rem;
-  color: var(--c6);
-  font-weight: 700;
-}
-
-.notify-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 8px;
-}
-
-.notify-item {
-  width: 100%;
-  text-align: left;
-  border: 1px solid #dceae6;
-  background: #f7fcfa;
-  border-radius: 10px;
-  padding: 8px 10px;
-  display: grid;
-  gap: 4px;
-}
-
-.notify-item span {
-  color: #34505b;
-  font-size: 0.84rem;
-  line-height: 1.35;
-}
-
-.notify-item small {
-  color: #7a919a;
-  font-size: 0.74rem;
-}
-
-.notify-empty {
-  margin: 6px 0 2px;
-  color: #7a919a;
-  font-size: 0.84rem;
 }
 
 .forum-title {
@@ -1224,10 +1169,26 @@ watch(me, (u) => {
   margin: 2px 0 0;
   padding: 8px 10px;
   border-radius: 10px;
-  border: 1px solid #f0c7c7;
+  border: 1px solid #c8ded7;
+  background: #f0faf6;
+  color: #1b5c4a;
+  font-size: 0.8rem;
+}
+
+.publish-notice--error {
+  border-color: #f0c7c7;
   background: #fff7f7;
   color: #a55858;
-  font-size: 0.8rem;
+}
+
+.like-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.comment-submit:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 
 .post-list {
@@ -1734,7 +1695,7 @@ watch(me, (u) => {
   padding: 4px 2px;
 }
 
-.mock-comment-list {
+.forum-comment-list {
   list-style: none;
   margin: 0 0 8px;
   padding: 0;
@@ -2026,10 +1987,6 @@ watch(me, (u) => {
 
   .forum-head-row {
     align-items: center;
-  }
-
-  .notify-dropdown {
-    right: -4px;
   }
 }
 </style>

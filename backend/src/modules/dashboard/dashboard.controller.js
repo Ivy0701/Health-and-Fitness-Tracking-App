@@ -6,6 +6,7 @@ const Diet = require("../../models/Diet");
 const ScheduleItem = require("../../models/ScheduleItem");
 const User = require("../../models/User");
 const ForumPost = require("../../models/ForumPost");
+const Notification = require("../../models/Notification");
 const CourseDailyProgress = require("../../models/CourseDailyProgress");
 const WorkoutPlan = require("../../models/WorkoutPlan");
 const WorkoutDailyStatus = require("../../models/WorkoutDailyStatus");
@@ -56,6 +57,7 @@ function toForumModerationRow(row) {
       : Number(row?.commentCount || 0),
     status,
     warningMessage: String(row?.warningMessage || "").trim(),
+    removalReason: String(row?.removalReason || "").trim(),
     moderatedAt: row?.moderatedAt || null,
     moderatedBy: String(row?.moderatedBy || "").trim(),
     createdAt: row?.createdAt || null,
@@ -983,7 +985,9 @@ const listForumModerationPosts = asyncHandler(async (req, res) => {
   const rows = await ForumPost.find(forumPostsModerationListFilter())
     .sort({ createdAt: -1, updatedAt: -1 })
     .limit(limit)
-    .select("title content authorName tags likedBy comments status warningMessage moderatedAt moderatedBy createdAt")
+    .select(
+      "title content authorName tags likedBy comments status warningMessage removalReason moderatedAt moderatedBy createdAt"
+    )
     .lean();
   res.json(rows.map((row) => toForumModerationRow(row)));
 });
@@ -1002,6 +1006,28 @@ const addForumWarning = asyncHandler(async (req, res) => {
   row.moderatedAt = new Date();
   row.moderatedBy = moderator;
   await row.save();
+
+  const postTitle = String(row.title || "Untitled")
+    .trim()
+    .slice(0, 180)
+    .replace(/"/g, "'");
+  const reasonText = row.warningMessage.slice(0, 500);
+  await Notification.deleteMany({
+    userId: row.userId,
+    type: "post_warning",
+    relatedPostId: row._id,
+    isRead: false,
+  });
+  await Notification.create({
+    userId: row.userId,
+    type: "post_warning",
+    title: "Post warning",
+    message: `Your post "${postTitle}" received a moderator warning.`,
+    reason: reasonText,
+    relatedPostId: row._id,
+    isRead: false,
+  });
+
   res.json(toForumModerationRow(row));
 });
 
@@ -1023,12 +1049,43 @@ const removeForumPost = asyncHandler(async (req, res) => {
   const postId = String(req.params.postId || "").trim();
   if (!mongoose.Types.ObjectId.isValid(postId)) return res.status(400).json({ message: "Invalid post id." });
   const moderator = String(req.body?.moderatedBy || req.user?.email || req.user?.id || "system-status-console").trim();
+  const removalReason = String(req.body?.removalReason || req.body?.reason || req.body?.adminNote || "").trim();
   const row = await ForumPost.findById(postId);
   if (!row) return res.status(404).json({ message: "Post not found." });
+  if (String(row.status || "") === "removed") {
+    return res.json({ success: true, postId, alreadyRemoved: true });
+  }
+  if (!removalReason) {
+    return res.status(400).json({ message: "removalReason is required." });
+  }
+  const reasonStored = removalReason.slice(0, 1000);
+  const postTitle = String(row.title || "Untitled")
+    .trim()
+    .slice(0, 180)
+    .replace(/"/g, "'");
   row.status = "removed";
+  row.removalReason = reasonStored;
   row.moderatedAt = new Date();
   row.moderatedBy = moderator;
   await row.save();
+
+  const dup = await Notification.exists({
+    userId: row.userId,
+    type: "post_removed",
+    relatedPostId: row._id,
+  });
+  if (!dup) {
+    await Notification.create({
+      userId: row.userId,
+      type: "post_removed",
+      title: "Post removed",
+      message: `Your post "${postTitle}" was removed by an administrator.`,
+      reason: reasonStored,
+      relatedPostId: row._id,
+      isRead: false,
+    });
+  }
+
   res.json({ success: true, postId });
 });
 

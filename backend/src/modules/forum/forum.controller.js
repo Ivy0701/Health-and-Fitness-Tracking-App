@@ -3,7 +3,7 @@ const ForumPost = require("../../models/ForumPost");
 const User = require("../../models/User");
 const Notification = require("../../models/Notification");
 const { isLegacyDemoForumTitle } = require("../../utils/forumLegacyDemoTitles");
-const { forumPostsUserVisibleFilter } = require("../../utils/forumUserVisibleFilter");
+const { forumPostsUserVisibleFilter, forumPostsMineFilter } = require("../../utils/forumUserVisibleFilter");
 
 const LEGACY_TAG_TO_EN = {
   饮食: "diet",
@@ -51,6 +51,7 @@ function serializePost(row, userId) {
     tags: tagsForResponse(obj.tags),
     status: ["normal", "warned", "removed"].includes(String(obj.status || "")) ? String(obj.status) : "normal",
     warningMessage: String(obj.warningMessage || "").trim(),
+    removalReason: String(obj.removalReason || "").trim(),
     moderatedAt: obj.moderatedAt || null,
     moderatedBy: String(obj.moderatedBy || "").trim(),
     likeCount: likedBy.length,
@@ -74,6 +75,11 @@ async function createPostNotification({ receiverUserId, actorUserId, type, messa
 
 const list = asyncHandler(async (req, res) => {
   const rows = await ForumPost.find(forumPostsUserVisibleFilter()).sort({ createdAt: -1 });
+  res.json(rows.map((row) => serializePost(row, req.user.id)));
+});
+
+const listMine = asyncHandler(async (req, res) => {
+  const rows = await ForumPost.find(forumPostsMineFilter(req.user.id)).sort({ createdAt: -1 });
   res.json(rows.map((row) => serializePost(row, req.user.id)));
 });
 
@@ -233,5 +239,5 @@ const remove = asyncHandler(async (req, res) => {
   res.json({ success: true });
 });
 
-module.exports = { list, create, detail, remove, toggleLike, addComment, updateComment, deleteComment };
+module.exports = { list, listMine, create, detail, remove, toggleLike, addComment, updateComment, deleteComment };
 

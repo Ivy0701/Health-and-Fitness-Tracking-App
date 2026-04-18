@@ -19,6 +19,8 @@ const forumPostSchema = new mongoose.Schema(
     ],
     status: { type: String, enum: ["normal", "warned", "removed"], default: "normal", index: true },
     warningMessage: { type: String, trim: true, default: "" },
+    /** Filled when status becomes removed (moderator-supplied). */
+    removalReason: { type: String, trim: true, default: "" },
     moderatedAt: { type: Date, default: null },
     moderatedBy: { type: String, trim: true, default: "" },
     likeCount: { type: Number, default: 0, min: 0 },

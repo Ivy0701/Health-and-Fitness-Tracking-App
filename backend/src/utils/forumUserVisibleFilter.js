@@ -21,8 +21,17 @@ function forumPostsModerationListFilter() {
   };
 }
 
+/** Current user's posts (all moderation states except legacy demo titles). Used for My Posts. */
+function forumPostsMineFilter(userId) {
+  return {
+    userId,
+    title: { $nin: [...LEGACY_DEMO_FORUM_TITLES] },
+  };
+}
+
 module.exports = {
   forumPostsUserVisibleFilter,
   forumPostsModerationListFilter,
+  forumPostsMineFilter,
   LEGACY_DEMO_FORUM_TITLES,
 };

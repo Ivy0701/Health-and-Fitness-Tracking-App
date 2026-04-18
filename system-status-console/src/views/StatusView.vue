@@ -23,6 +23,9 @@ const warningTargetPost = ref(null);
 const warningMessageInput = ref("");
 const viewPostModalOpen = ref(false);
 const viewPostTarget = ref(null);
+const removePostModalOpen = ref(false);
+const removePostTarget = ref(null);
+const removalReasonInput = ref("");
 
 function n(v) {
   const x = Number(v);
@@ -247,17 +250,31 @@ async function removeWarning(row) {
   }
 }
 
-async function deletePost(row) {
-  const postId = String(row?.id || "").trim();
-  if (!postId || forumActionLoadingId.value) return;
-  const ok = window.confirm("Are you sure you want to delete this post?");
-  if (!ok) return;
+function openRemovePostModal(row) {
+  if (!row || String(row?.status || "") === "removed" || forumActionLoadingId.value) return;
+  removePostTarget.value = row;
+  removalReasonInput.value = "";
+  removePostModalOpen.value = true;
+}
+
+function closeRemovePostModal() {
+  removePostModalOpen.value = false;
+  removePostTarget.value = null;
+  removalReasonInput.value = "";
+}
+
+async function submitRemovePost() {
+  const postId = String(removePostTarget.value?.id || "").trim();
+  const reason = String(removalReasonInput.value || "").trim();
+  if (!postId || !reason || forumActionLoadingId.value) return;
   forumActionLoadingId.value = `delete:${postId}`;
   forumNotice.value = "";
+  forumError.value = "";
   try {
-    await api.delete(`/dashboard/forum-moderation/${postId}`);
+    await api.delete(`/dashboard/forum-moderation/${postId}`, { data: { removalReason: reason } });
+    closeRemovePostModal();
     await Promise.all([loadForumModeration(), loadSystemStatus()]);
-    forumNotice.value = "Post deleted.";
+    forumNotice.value = "Post removed and author notified.";
   } catch (err) {
     forumError.value = err?.response?.data?.message || "Failed to delete post.";
   } finally {
@@ -637,7 +654,7 @@ onMounted(async () => {
                         type="button"
                         class="btn-bad"
                         :disabled="Boolean(forumActionLoadingId) || row.status === 'removed'"
-                        @click="deletePost(row)"
+                        @click="openRemovePostModal(row)"
                       >
                         Delete
                       </button>
@@ -699,12 +716,49 @@ onMounted(async () => {
     </section>
   </div>
 
+  <div v-if="removePostModalOpen" class="modal-backdrop" @click.self="closeRemovePostModal">
+    <section class="modal-card" role="dialog" aria-modal="true" aria-label="Remove post">
+      <h3>Remove post</h3>
+      <p class="hint">
+        This will hide the post from the forum and notify the author. A removal reason is required (shown to the author).
+      </p>
+      <p class="mono small">
+        <strong>{{ removePostTarget?.title || "Untitled" }}</strong>
+        · {{ removePostTarget?.authorName || "—" }}
+      </p>
+      <label class="field-label">
+        Removal reason
+        <textarea v-model="removalReasonInput" rows="4" placeholder="Explain why this post was removed…" />
+      </label>
+      <div class="action-row modal-actions">
+        <button type="button" class="btn-plain" @click="closeRemovePostModal" :disabled="Boolean(forumActionLoadingId)">
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="btn-bad"
+          :disabled="!removalReasonInput.trim() || Boolean(forumActionLoadingId)"
+          @click="submitRemovePost"
+        >
+          {{
+            forumActionLoadingId && String(forumActionLoadingId).startsWith("delete:")
+              ? "Removing…"
+              : "Confirm removal"
+          }}
+        </button>
+      </div>
+    </section>
+  </div>
+
   <div v-if="viewPostModalOpen" class="modal-backdrop" @click.self="closeViewPost">
     <section class="modal-card" role="dialog" aria-modal="true" aria-label="View post">
       <h3>{{ viewPostTarget?.title || "Post" }}</h3>
       <p class="mono small">Author: {{ viewPostTarget?.authorName || "—" }} · {{ formatDateTime(viewPostTarget?.createdAt) }}</p>
       <p v-if="viewPostTarget?.status === 'warned' && viewPostTarget?.warningMessage" class="warn-text">
         Warning: {{ viewPostTarget.warningMessage }}
+      </p>
+      <p v-if="viewPostTarget?.status === 'removed' && viewPostTarget?.removalReason" class="warn-text removal-text">
+        Removal reason: {{ viewPostTarget.removalReason }}
       </p>
       <p class="post-body">{{ viewPostTarget?.content || "No content." }}</p>
       <div class="action-row modal-actions">
@@ -1126,12 +1180,26 @@ onMounted(async () => {
   gap: 8px;
 }
 
+.field-label {
+  display: grid;
+  gap: 6px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #2f4858;
+}
+
 .modal-card textarea {
   width: 100%;
   border: 1px solid #c8dbd7;
   border-radius: 10px;
   padding: 10px;
   font: inherit;
+}
+
+.removal-text {
+  border-color: #fecaca;
+  background: #fff1f1;
+  color: #991b1b;
 }
 
 .modal-actions {
