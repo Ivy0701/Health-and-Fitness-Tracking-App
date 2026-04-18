@@ -618,14 +618,16 @@ watch(
           </ul>
         </section>
 
-        <section class="double-col">
+        <section class="double-col double-col--plans">
           <article class="panel">
             <h2>Upcoming</h2>
-            <ul v-if="upcomingToday.length" class="simple-list">
-              <li v-for="item in upcomingToday" :key="item.id">
-                <span class="time">{{ item.time }}</span>
-                <span class="title">{{ item.title }}</span>
-                <span class="type">{{ item.type }}</span>
+            <ul v-if="upcomingToday.length" class="upcoming-list">
+              <li v-for="item in upcomingToday" :key="item.id" class="upcoming-item">
+                <div class="upcoming-item-left">
+                  <span class="upcoming-time">{{ item.time }}</span>
+                  <span class="upcoming-title">{{ item.title }}</span>
+                </div>
+                <span class="upcoming-type">{{ item.type }}</span>
               </li>
             </ul>
             <p v-else class="empty">No upcoming sessions today</p>
@@ -944,44 +946,104 @@ watch(
 .double-col {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  gap: 20px;
+  align-items: stretch;
 }
 
-.simple-list {
+.double-col--plans {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+}
+
+.double-col > .panel {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  min-height: 0;
+}
+
+.double-col > .panel > h2,
+.double-col > .panel > .panel-title-row {
+  flex-shrink: 0;
+}
+
+.double-col > .panel > .upcoming-list,
+.double-col > .panel > .active-plan-list,
+.double-col > .panel > .weekly-chart,
+.double-col > .panel > .chart-empty,
+.double-col > .panel > .inout-chart,
+.double-col > .panel > .activity-list,
+.double-col > .panel > .quick-grid,
+.double-col > .panel > .empty {
+  flex: 1 1 auto;
+}
+
+.upcoming-list {
   list-style: none;
   margin: 12px 0 0;
   padding: 0;
-  display: grid;
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
 }
 
-.simple-list li {
-  border-radius: 10px;
-  border: 1px solid #e8ebef;
-  background: #f8fbfa;
-  padding: 8px 10px;
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 9px;
+.upcoming-item {
+  display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 10px 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
 }
 
-.simple-list .time {
+.upcoming-item:not(:last-child) {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.upcoming-item:hover {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.upcoming-item-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.upcoming-time,
+.upcoming-title {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+  line-height: 20px;
+}
+
+.upcoming-time {
   color: #2f4858;
   font-size: 12px;
   font-weight: 700;
+  flex-shrink: 0;
 }
 
-.simple-list .title {
+.upcoming-title {
   color: #4b5563;
   font-size: 13px;
-  min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.simple-list .type {
+.upcoming-type {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
   color: #4b5563;
   font-size: 11px;
+  line-height: 20px;
   border-radius: 999px;
   background: #eef4f2;
   border: 1px solid #d9e6e2;
