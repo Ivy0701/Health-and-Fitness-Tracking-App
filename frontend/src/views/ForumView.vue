@@ -47,14 +47,20 @@ const TAG_LABEL_MAP = {
   general: "General",
 };
 
-const FILTER_CHIPS = [
+const FILTER_CHIPS_BASE = [
   { id: "all", label: "All" },
+  { id: "mine", label: "My Posts" },
   { id: "hot", label: "Hot" },
   { id: "new", label: "New" },
   { id: "diet", label: "Diet" },
   { id: "train", label: "Training" },
   { id: "favorites", label: "Favorites" },
 ];
+
+const filterChipsDisplay = computed(() => {
+  if (!me.value) return FILTER_CHIPS_BASE.filter((c) => c.id !== "mine");
+  return FILTER_CHIPS_BASE;
+});
 
 const AVATAR_BG = ["#48aea4", "#70d1ac", "#316879", "#348b93", "#a7f2ad", "#2f4858"];
 
@@ -113,9 +119,26 @@ function engagementScore(p) {
   return (p.likeCount || 0) + getCommentCount(p);
 }
 
+/** Match backend posts (`userId` + `authorName`) and any client-normalized shape. */
+function isCurrentUserPost(p) {
+  const uid = String(me.value?.id || me.value?._id || "").trim();
+  const uname = String(me.value?.username || "").trim().toLowerCase();
+  if (!uid && !uname) return false;
+  const pid = String(p?.userId ?? "").trim();
+  if (uid && pid && pid === uid) return true;
+  const author = String(p?.authorName || "").trim().toLowerCase();
+  if (uname && author && author === uname) return true;
+  return false;
+}
+
 const visiblePosts = computed(() => {
   let rows = [...posts.value];
   const q = searchQuery.value.trim().toLowerCase();
+
+  if (activeFilter.value === "mine") {
+    rows = rows.filter((p) => isCurrentUserPost(p));
+  }
+
   if (q) {
     rows = rows.filter(
       (p) =>
@@ -150,6 +173,12 @@ const filteredPosts = computed(() => {
   if (activeFilter.value !== "favorites") return visiblePosts.value;
   const saved = new Set(savedPostIds.value.map((id) => String(id)));
   return visiblePosts.value.filter((post) => saved.has(String(post?._id || "")));
+});
+
+const emptyFeedMessage = computed(() => {
+  if (activeFilter.value === "mine") return "You haven't posted anything yet.";
+  if (activeFilter.value === "favorites") return "No saved posts yet.";
+  return "No relevant content found.";
 });
 
 const unreadNotificationsCount = computed(() => forumCenter.unreadCount);
@@ -519,6 +548,10 @@ watch(
   },
   { deep: true }
 );
+
+watch(me, (u) => {
+  if (!u && activeFilter.value === "mine") activeFilter.value = "all";
+});
 </script>
 
 <template>
@@ -554,7 +587,7 @@ watch(
     <div class="forum-toolbar panel toolbar-panel">
       <div class="filter-scroll" role="tablist" aria-label="Post filters">
         <button
-          v-for="chip in FILTER_CHIPS"
+          v-for="chip in filterChipsDisplay"
           :key="chip.id"
           type="button"
           role="tab"
@@ -598,7 +631,10 @@ watch(
                 <span class="avatar-letter">{{ avatarInitial(p.authorName) }}</span>
               </div>
               <div class="author-text">
-                <span class="nickname">{{ displayNickname(p.authorName) }}</span>
+                <div class="author-line">
+                  <span class="nickname">{{ displayNickname(p.authorName) }}</span>
+                  <span v-if="activeFilter === 'mine' && isCurrentUserPost(p)" class="your-post-badge">Your post</span>
+                </div>
                 <time class="rel-time" :datetime="p.createdAt">{{ formatRelativeTime(p.createdAt) }}</time>
               </div>
             </div>
@@ -694,8 +730,8 @@ watch(
         </article>
       </template>
       <article v-else class="post-card empty-post-card" aria-live="polite">
-        <div class="empty-icon" aria-hidden="true">🔎</div>
-        <p class="empty-title">No relevant content found.</p>
+        <div class="empty-icon" aria-hidden="true">{{ activeFilter === "mine" ? "📝" : "🔎" }}</div>
+        <p class="empty-title">{{ emptyFeedMessage }}</p>
       </article>
     </section>
 
@@ -1241,6 +1277,28 @@ watch(
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+}
+
+.author-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.your-post-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #2f6f62;
+  background: #e4f4ee;
+  border: 1px solid #b8dfd2;
+  border-radius: 999px;
+  padding: 2px 8px;
+  line-height: 1.3;
+  flex-shrink: 0;
 }
 
 .nickname {

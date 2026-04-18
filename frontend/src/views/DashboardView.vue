@@ -681,7 +681,6 @@ watch(
               <h2>Today's Focus</h2>
               <p>Action guide for your day</p>
             </div>
-            <RouterLink :to="startTodayLink" class="panel-action">Start Today</RouterLink>
           </div>
           <div class="focus-grid">
             <article v-for="item in todayFocusItems" :key="item.key" class="focus-item">
@@ -696,6 +695,16 @@ watch(
           <ul>
             <li v-for="line in todaySummaryItems" :key="line">{{ line }}</li>
           </ul>
+        </section>
+
+        <section class="panel quick-actions-panel">
+          <h2>Quick Actions</h2>
+          <div class="quick-grid">
+            <RouterLink to="/workout" class="quick-btn">Start Workout</RouterLink>
+            <RouterLink to="/diet" class="quick-btn">Log Meal</RouterLink>
+            <RouterLink to="/schedule" class="quick-btn">View Schedule</RouterLink>
+            <RouterLink to="/profile" class="quick-btn">Update Profile</RouterLink>
+          </div>
         </section>
 
         <section class="double-col double-col--plans">
@@ -787,29 +796,17 @@ watch(
           </article>
         </section>
 
-        <section class="double-col">
-          <article class="panel">
-            <h2>Recent Activity</h2>
-            <ul v-if="recentActivities.length" class="activity-list">
-              <li v-for="item in recentActivities" :key="item.id">
-                <span class="icon">{{ activityIcon(item.type) }}</span>
-                <span class="main">{{ item.type }}: {{ item.title }}</span>
-                <span class="detail">{{ item.detail }}</span>
-                <span class="at">{{ formatClock(item.time) }}</span>
-              </li>
-            </ul>
-            <p v-else class="empty">No recent activity yet</p>
-          </article>
-
-          <article class="panel">
-            <h2>Quick Actions</h2>
-            <div class="quick-grid">
-              <RouterLink to="/workout" class="quick-btn">Start Workout</RouterLink>
-              <RouterLink to="/diet" class="quick-btn">Log Meal</RouterLink>
-              <RouterLink to="/schedule" class="quick-btn">View Schedule</RouterLink>
-              <RouterLink to="/profile" class="quick-btn">Update Profile</RouterLink>
-            </div>
-          </article>
+        <section class="panel recent-activity-panel">
+          <h2>Recent Activity</h2>
+          <ul v-if="recentActivities.length" class="activity-list">
+            <li v-for="item in recentActivities" :key="item.id">
+              <span class="icon">{{ activityIcon(item.type) }}</span>
+              <span class="main">{{ item.type }}: {{ item.title }}</span>
+              <span class="detail">{{ item.detail }}</span>
+              <span class="at">{{ formatClock(item.time) }}</span>
+            </li>
+          </ul>
+          <p v-else class="empty">No recent activity yet</p>
         </section>
 
         <section class="insight-card">
@@ -970,22 +967,6 @@ watch(
   margin: 6px 0 0;
   color: #6b7280;
   font-size: 13px;
-}
-
-.panel-action {
-  text-decoration: none;
-  border-radius: 14px;
-  padding: 9px 14px;
-  color: #ffffff;
-  font-size: 13px;
-  font-weight: 700;
-  background: linear-gradient(120deg, #48aea4 0%, #316879 100%);
-  transition: transform 0.18s ease, box-shadow 0.18s ease;
-}
-
-.panel-action:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 10px 14px rgba(47, 72, 88, 0.16);
 }
 
 .focus-grid {
