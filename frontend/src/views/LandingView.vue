@@ -1,45 +1,59 @@
 <template>
   <main class="page landing-page">
+    <div class="landing-bg" aria-hidden="true">
+      <span class="landing-blob landing-blob--a" />
+      <span class="landing-blob landing-blob--b" />
+      <span class="landing-blob landing-blob--c" />
+    </div>
     <div class="landing-shell">
-      <section class="hero panel">
-        <h1 class="title">🌿 Health & Fitness Tracking App</h1>
-        <p class="muted">
+      <section class="hero hero-card panel">
+        <div class="hero-brand" aria-hidden="true">
+          <span class="hero-logo-ring">
+            <span class="hero-logo-inner">🌿</span>
+          </span>
+        </div>
+        <h1 class="hero-title">🌿 Health & Fitness Tracking App</h1>
+        <p class="hero-slogan">Track small steps, shape your healthy rhythm.</p>
+        <p class="hero-lead">
           Track BMI, workouts, diet, schedule, and your daily progress in one dashboard.
         </p>
-        <div class="actions">
-          <router-link class="btn" to="/login">🔐 Login</router-link>
-          <router-link class="btn ghost" to="/register">📝 Register</router-link>
+        <div class="hero-actions">
+          <router-link class="landing-btn landing-btn--primary" to="/login">🔐 Login</router-link>
+          <router-link class="landing-btn landing-btn--secondary" to="/register">📝 Register</router-link>
         </div>
       </section>
-      <section class="features-grid">
-        <article class="feature-card">
-          <div class="feature-head">
-            <span class="feature-icon">📊</span>
-            <div class="feature-title">Dashboard overview</div>
-          </div>
-          <p class="feature-desc">Track your daily progress and key stats.</p>
-        </article>
-        <article class="feature-card">
-          <div class="feature-head">
-            <span class="feature-icon">💪</span>
-            <div class="feature-title">Workout records</div>
-          </div>
-          <p class="feature-desc">Log workouts and monitor performance.</p>
-        </article>
-        <article class="feature-card">
-          <div class="feature-head">
-            <span class="feature-icon">🥗</span>
-            <div class="feature-title">Diet tracking</div>
-          </div>
-          <p class="feature-desc">Manage calorie intake and nutrition.</p>
-        </article>
-        <article class="feature-card">
-          <div class="feature-head">
-            <span class="feature-icon">🗓</span>
-            <div class="feature-title">Smart schedule</div>
-          </div>
-          <p class="feature-desc">Plan and organize your fitness routine.</p>
-        </article>
+
+      <section class="features-section">
+        <div class="features-grid">
+          <article class="feature-card feature-card--dashboard">
+            <div class="feature-head">
+              <span class="feature-icon-wrap" aria-hidden="true"><span class="feature-icon">📊</span></span>
+              <div class="feature-title">Dashboard overview</div>
+            </div>
+            <p class="feature-desc">Track your daily progress and key stats.</p>
+          </article>
+          <article class="feature-card feature-card--workout">
+            <div class="feature-head">
+              <span class="feature-icon-wrap" aria-hidden="true"><span class="feature-icon">💪</span></span>
+              <div class="feature-title">Workout records</div>
+            </div>
+            <p class="feature-desc">Log workouts and monitor performance.</p>
+          </article>
+          <article class="feature-card feature-card--diet">
+            <div class="feature-head">
+              <span class="feature-icon-wrap" aria-hidden="true"><span class="feature-icon">🥗</span></span>
+              <div class="feature-title">Diet tracking</div>
+            </div>
+            <p class="feature-desc">Manage calorie intake and nutrition.</p>
+          </article>
+          <article class="feature-card feature-card--schedule">
+            <div class="feature-head">
+              <span class="feature-icon-wrap" aria-hidden="true"><span class="feature-icon">🗓</span></span>
+              <div class="feature-title">Smart schedule</div>
+            </div>
+            <p class="feature-desc">Plan and organize your fitness routine.</p>
+          </article>
+        </div>
       </section>
     </div>
   </main>
@@ -47,26 +61,224 @@
 
 <style scoped>
 .landing-page.page {
-  padding: 14px 20px 20px;
-  min-height: calc(100vh - 20px);
+  position: relative;
+  isolation: isolate;
+  padding: 28px 20px 36px;
+  min-height: calc(100vh - 24px);
   display: flex;
   align-items: center;
+  justify-content: center;
+  max-width: none;
+  margin: 0;
+  overflow-x: hidden;
+  background: linear-gradient(
+    165deg,
+    #f0fcf7 0%,
+    #e4f7f2 28%,
+    #dff5f0 52%,
+    #e8faf6 78%,
+    #f5fdfb 100%
+  );
+}
+
+.landing-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.landing-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(64px);
+  opacity: 0.45;
+}
+
+.landing-blob--a {
+  width: min(72vw, 420px);
+  height: min(72vw, 420px);
+  background: radial-gradient(circle at 30% 30%, rgba(112, 209, 172, 0.55), rgba(167, 242, 173, 0.2) 55%, transparent 70%);
+  top: -8%;
+  right: -12%;
+}
+
+.landing-blob--b {
+  width: min(55vw, 320px);
+  height: min(55vw, 320px);
+  background: radial-gradient(circle at 50% 50%, rgba(72, 174, 164, 0.35), rgba(221, 239, 242, 0.25) 60%, transparent 72%);
+  bottom: 18%;
+  left: -10%;
+}
+
+.landing-blob--c {
+  width: min(40vw, 260px);
+  height: min(40vw, 260px);
+  background: radial-gradient(circle at 60% 40%, rgba(200, 235, 220, 0.7), transparent 65%);
+  top: 42%;
+  left: 50%;
+  transform: translateX(-42%);
+  opacity: 0.35;
+  filter: blur(48px);
 }
 
 .landing-shell {
+  position: relative;
+  z-index: 1;
   width: 100%;
-  max-width: 980px;
+  max-width: 920px;
   margin: 0 auto;
   display: grid;
-  gap: 14px;
+  gap: 22px;
 }
 
 .hero {
   text-align: center;
   margin: 0;
 }
-.actions { display: flex; justify-content: center; gap: 12px; margin: 14px 0; }
-.ghost { background: linear-gradient(90deg, #48aea4, #348b93); }
+
+.hero.panel {
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  border-radius: 24px;
+  padding: 28px 26px 30px;
+  box-shadow:
+    0 4px 6px rgba(47, 72, 88, 0.04),
+    0 18px 40px rgba(52, 139, 147, 0.1),
+    0 1px 0 rgba(255, 255, 255, 0.9) inset;
+}
+
+.hero-brand {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 14px;
+}
+
+.hero-logo-ring {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 18px;
+  background: linear-gradient(145deg, rgba(167, 242, 173, 0.55), rgba(72, 174, 164, 0.35));
+  box-shadow:
+    0 6px 16px rgba(52, 139, 147, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+}
+
+.hero-logo-inner {
+  font-size: 1.65rem;
+  line-height: 1;
+  filter: drop-shadow(0 1px 2px rgba(47, 72, 88, 0.12));
+}
+
+.hero-title {
+  margin: 0 0 12px;
+  font-size: clamp(1.45rem, 4vw, 2rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: #1e3d3a;
+  background: linear-gradient(120deg, #2a5c55 0%, #2f4858 40%, #348b93 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.hero-slogan {
+  margin: 0 auto 14px;
+  max-width: 36rem;
+  font-size: clamp(1.02rem, 2.4vw, 1.2rem);
+  font-weight: 600;
+  line-height: 1.45;
+  letter-spacing: 0.01em;
+  color: #2d6b62;
+}
+
+.hero-lead {
+  margin: 0 auto 22px;
+  max-width: 34rem;
+  font-size: 0.94rem;
+  line-height: 1.55;
+  color: #6a8a91;
+  font-weight: 500;
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+}
+
+.landing-btn {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 128px;
+  padding: 12px 22px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  border-radius: 12px;
+  cursor: pointer;
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    filter 0.18s ease,
+    background 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.landing-btn--primary {
+  color: #fff;
+  border: 1px solid rgba(47, 143, 125, 0.45);
+  background: linear-gradient(135deg, #5ec9a8 0%, #3aa89a 45%, #2f8f7d 100%);
+  box-shadow:
+    0 4px 14px rgba(47, 143, 125, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.landing-btn--primary:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    0 8px 22px rgba(47, 143, 125, 0.38),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  filter: brightness(1.04);
+}
+
+.landing-btn--primary:active {
+  transform: translateY(0);
+  filter: brightness(0.97);
+  box-shadow: 0 2px 10px rgba(47, 143, 125, 0.28);
+}
+
+.landing-btn--secondary {
+  color: #2a5f58;
+  border: 1.5px solid rgba(72, 174, 164, 0.55);
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 2px 8px rgba(47, 72, 88, 0.06);
+}
+
+.landing-btn--secondary:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(52, 139, 147, 0.65);
+  box-shadow: 0 6px 16px rgba(47, 72, 88, 0.08);
+}
+
+.landing-btn--secondary:active {
+  transform: translateY(0);
+  background: rgba(240, 252, 248, 0.95);
+}
+
+.features-section {
+  width: 100%;
+}
 
 .features-grid {
   display: grid;
@@ -74,61 +286,111 @@
   width: 100%;
   margin: 0;
   align-items: stretch;
-  gap: 16px;
+  gap: 14px;
 }
 
 .feature-card {
   margin: 0;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition:
+    transform 0.22s ease,
+    box-shadow 0.22s ease,
+    border-color 0.22s ease;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  min-height: 132px;
-  height: 132px;
-  padding: 16px;
+  gap: 10px;
+  min-height: 140px;
+  padding: 18px 16px;
   justify-content: flex-start;
   box-sizing: border-box;
-  background: #fff;
-  border: 1px solid #d9e9e6;
-  border-radius: 16px;
-  box-shadow: 0 2px 6px rgba(47, 72, 88, 0.06);
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  border-radius: 18px;
+  box-shadow:
+    0 2px 8px rgba(47, 72, 88, 0.05),
+    0 10px 28px rgba(52, 139, 147, 0.06);
 }
 
 .feature-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 10px 18px rgba(47, 72, 88, 0.14);
+  transform: translateY(-3px);
+  box-shadow:
+    0 8px 22px rgba(47, 72, 88, 0.1),
+    0 16px 36px rgba(52, 139, 147, 0.08);
+}
+
+.feature-card--dashboard {
+  border-top: 3px solid rgba(139, 120, 198, 0.55);
+}
+.feature-card--dashboard .feature-icon-wrap {
+  background: linear-gradient(145deg, rgba(232, 224, 255, 0.95), rgba(210, 196, 250, 0.45));
+  border-color: rgba(180, 160, 230, 0.35);
+}
+
+.feature-card--workout {
+  border-top: 3px solid rgba(232, 150, 96, 0.65);
+}
+.feature-card--workout .feature-icon-wrap {
+  background: linear-gradient(145deg, rgba(255, 236, 220, 0.95), rgba(255, 200, 160, 0.45));
+  border-color: rgba(240, 180, 130, 0.4);
+}
+
+.feature-card--diet {
+  border-top: 3px solid rgba(72, 174, 124, 0.65);
+}
+.feature-card--diet .feature-icon-wrap {
+  background: linear-gradient(145deg, rgba(224, 248, 232, 0.95), rgba(167, 242, 173, 0.4));
+  border-color: rgba(112, 209, 172, 0.45);
+}
+
+.feature-card--schedule {
+  border-top: 3px solid rgba(72, 160, 174, 0.65);
+}
+.feature-card--schedule .feature-icon-wrap {
+  background: linear-gradient(145deg, rgba(220, 244, 244, 0.95), rgba(160, 220, 218, 0.45));
+  border-color: rgba(100, 190, 188, 0.4);
 }
 
 .feature-head {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 26px;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 28px;
+}
+
+.feature-icon-wrap {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: 0 2px 8px rgba(47, 72, 88, 0.06);
 }
 
 .feature-icon {
   line-height: 1;
-  flex: 0 0 auto;
+  font-size: 1.25rem;
 }
 
 .feature-title {
   font-weight: 700;
-  color: var(--c6);
+  color: #2a4549;
   font-size: 0.95rem;
-  line-height: 1.3;
-  min-height: calc(1.3em * 1);
+  line-height: 1.35;
+  min-height: calc(1.35em * 1);
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
+  padding-top: 2px;
 }
 
 .feature-desc {
   margin: 0;
-  color: #56737f;
-  font-size: 0.9rem;
-  line-height: 1.4;
-  min-height: calc(1.4em * 2);
+  color: #5a7a82;
+  font-size: 0.875rem;
+  line-height: 1.45;
+  min-height: calc(1.45em * 2);
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -138,31 +400,47 @@
 @media (max-width: 920px) {
   .landing-page.page {
     min-height: auto;
-    padding: 14px 16px 18px;
+    padding: 22px 16px 28px;
     align-items: stretch;
   }
 
   .landing-shell {
-    max-width: 860px;
+    max-width: 640px;
+    gap: 18px;
   }
 
   .features-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .hero.panel {
+    padding: 24px 20px 26px;
   }
 }
 
 @media (max-width: 620px) {
   .landing-page.page {
-    padding: 12px 12px 16px;
+    padding: 18px 14px 24px;
   }
 
   .landing-shell {
-    gap: 12px;
+    gap: 16px;
   }
 
   .features-grid {
     grid-template-columns: 1fr;
     gap: 12px;
+  }
+
+  .hero-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .landing-btn {
+    width: 100%;
+    min-width: 0;
   }
 }
 </style>

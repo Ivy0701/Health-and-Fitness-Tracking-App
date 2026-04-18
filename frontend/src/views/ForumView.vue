@@ -8,7 +8,6 @@ import { useFavorites } from "../services/favorites";
 import { formatRelativeTime } from "../utils/formatRelativeTime";
 import { useForumCenterStore } from "../stores/forumCenter";
 import { buildForumMockPosts } from "../mocks/forumMockPosts";
-import { FORUM_TAG_OPTIONS_FROM_DIET } from "../constants/dietPlans";
 
 const route = useRoute();
 const form = reactive({ title: "", content: "" });
@@ -29,11 +28,21 @@ let focusTimer = null;
 const forumCenter = useForumCenterStore();
 const { currentUser: me, posts, notifications, savedPostIds } = storeToRefs(forumCenter);
 
-/** Tag options are derived from Diet recipe metadata. */
-const TAG_OPTIONS = FORUM_TAG_OPTIONS_FROM_DIET;
+const BASE_TAG_OPTIONS = [
+  { value: "diet", label: "Diet" },
+  { value: "training", label: "Training" },
+  { value: "fat_loss", label: "Fat loss" },
+  { value: "recovery", label: "Recovery" },
+  { value: "notes", label: "Notes" },
+];
+const tagOptions = ref([...BASE_TAG_OPTIONS]);
 const selectedTags = ref([]);
+const customTagInput = ref("");
+const showCustomTagInput = ref(false);
 
-const TAG_LABEL_MAP = TAG_OPTIONS.reduce((map, item) => ({ ...map, [item.value]: item.label }), { general: "General" });
+const TAG_LABEL_MAP = computed(() =>
+  tagOptions.value.reduce((map, item) => ({ ...map, [item.value]: item.label }), { general: "General" })
+);
 
 /** Content filters only — “My Posts” lives in the header next to notifications. */
 const FILTER_CHIPS = [
@@ -69,7 +78,7 @@ function displayNickname(name) {
 }
 
 function tagLabel(tag) {
-  const known = TAG_LABEL_MAP[tag];
+  const known = TAG_LABEL_MAP.value[tag];
   if (known) return known;
   return String(tag || "")
     .split("_")
@@ -180,6 +189,29 @@ function toggleFormTag(value) {
   const i = selectedTags.value.indexOf(value);
   if (i === -1) selectedTags.value = [...selectedTags.value, value];
   else selectedTags.value = selectedTags.value.filter((t) => t !== value);
+}
+
+function sanitizeTagSlug(label) {
+  return String(label || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
+}
+
+function addCustomTag() {
+  const raw = String(customTagInput.value || "").trim();
+  const value = sanitizeTagSlug(raw);
+  if (!raw || !value) return;
+  if (!tagOptions.value.some((tag) => tag.value === value)) {
+    tagOptions.value = [...tagOptions.value, { value, label: raw }];
+  }
+  if (!selectedTags.value.includes(value)) {
+    selectedTags.value = [...selectedTags.value, value];
+  }
+  customTagInput.value = "";
+  showCustomTagInput.value = false;
 }
 
 function handleTitleInput() {
@@ -413,6 +445,8 @@ async function addPost() {
   form.title = "";
   form.content = "";
   selectedTags.value = [];
+  customTagInput.value = "";
+  showCustomTagInput.value = false;
   publishErrors.title = "";
   publishErrors.content = "";
   publishNotice.value = "";
@@ -765,7 +799,7 @@ watch(me, (u) => {
             <span class="tag-picker-label">Tags</span>
             <div class="tag-picker-chips">
               <button
-                v-for="tag in TAG_OPTIONS"
+                v-for="tag in tagOptions"
                 :key="tag.value"
                 type="button"
                 class="pick-chip"
@@ -774,6 +808,18 @@ watch(me, (u) => {
               >
                 #{{ tag.label }}
               </button>
+              <button type="button" class="pick-chip pick-chip-create" @click="showCustomTagInput = !showCustomTagInput">
+                + Create a new tag
+              </button>
+            </div>
+            <div v-if="showCustomTagInput" class="tag-create-row">
+              <input
+                v-model.trim="customTagInput"
+                type="text"
+                placeholder="Enter tag name"
+                @keydown.enter.prevent="addCustomTag"
+              />
+              <button type="button" class="pick-chip on" @click="addCustomTag">Add</button>
             </div>
           </div>
           <div class="create-actions">
@@ -1086,6 +1132,22 @@ watch(me, (u) => {
   background: linear-gradient(90deg, var(--c4), var(--c5));
   color: #fff;
   border-color: transparent;
+}
+
+.pick-chip-create {
+  border-style: dashed;
+}
+
+.tag-create-row {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.tag-create-row input {
+  flex: 1;
+  min-width: 0;
 }
 
 .create-actions {

@@ -53,6 +53,11 @@ const selectedDate = ref(new Date());
 const weekStart = ref(mondayOfDate(selectedDate.value));
 const listFilter = ref("week");
 const deletingIds = ref(new Set());
+/** Per (day ISO + cluster key) stack order: last-clicked timeline cluster renders on top while its modal is open. */
+const clusterZStack = ref({});
+let clusterZSeq = 8;
+/** Stack key for the cluster whose detail modal is open from the week timeline (cleared on close → z-order resets). */
+const timelineModalClusterStackKey = ref("");
 
 /** Hour labels 00:00 … 23:00 plus 24:00 at the bottom boundary. */
 const hours = computed(() => {
@@ -184,17 +189,27 @@ watch(slotModalOpen, async (open) => {
   slotModalOverlayEl.value?.focus?.();
 });
 
+function clearTimelineClusterFrontFromModal() {
+  const k = String(timelineModalClusterStackKey.value || "").trim();
+  if (!k) return;
+  const next = { ...clusterZStack.value };
+  delete next[k];
+  clusterZStack.value = next;
+  timelineModalClusterStackKey.value = "";
+}
+
 function closeSlotModal() {
+  clearTimelineClusterFrontFromModal();
   slotModalOpen.value = false;
   slotModalItems.value = [];
   slotModalDietDetail.value = null;
 }
 
-/** One decimal for diet kcal totals / rows (avoids 591.4000000000001 display). */
-function formatKcalOneDecimal(value) {
+/** Integer kcal for diet UI (aligned with Diet page + dashboard). */
+function formatDisplayKcal(value) {
   const n = Number(value);
-  if (!Number.isFinite(n)) return "0.0";
-  return (Math.round(n * 10) / 10).toFixed(1);
+  if (!Number.isFinite(n)) return "0";
+  return String(Math.round(n));
 }
 
 async function loadDietMealDetailForModal(scheduleItem) {
@@ -222,9 +237,12 @@ async function loadDietMealDetailForModal(scheduleItem) {
       return String(r.mealType || "").toLowerCase() === meal;
     });
     rows.sort((a, b) => {
-      const ta = new Date(a.recordedAt || a.createdAt || 0).getTime();
-      const tb = new Date(b.recordedAt || b.createdAt || 0).getTime();
-      return ta - tb;
+      const ta = parseTimeToMinutes(a.time || a.recordedTimeLocal);
+      const tb = parseTimeToMinutes(b.time || b.recordedTimeLocal);
+      if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) return ta - tb;
+      const da = new Date(a.recordedAt || a.createdAt || 0).getTime();
+      const db = new Date(b.recordedAt || b.createdAt || 0).getTime();
+      return da - db;
     });
     const total = rows.reduce((sum, r) => sum + (Number.isFinite(Number(r.calories)) ? Number(r.calories) : 0), 0);
     slotModalDietDetail.value = { loading: false, loaded: true, records: rows, mealLabel, total, date: scheduleItem.date, error: "" };
@@ -241,6 +259,12 @@ async function loadDietMealDetailForModal(scheduleItem) {
   }
 }
 
+function bumpClusterToFront(dayIso, cluster) {
+  const key = `${String(dayIso || "").trim()}::${clusterKey(cluster)}`;
+  clusterZSeq += 1;
+  clusterZStack.value = { ...clusterZStack.value, [key]: clusterZSeq };
+}
+
 async function openSlotModal(cluster) {
   slotModalDietDetail.value = null;
   formError.value = "";
@@ -250,6 +274,14 @@ async function openSlotModal(cluster) {
   if (cluster.length === 1 && primary && isDietFoodLogScheduleRow(primary)) {
     if (me.value?.id) await loadDietMealDetailForModal(primary);
   }
+}
+
+async function onTimelineClusterActivate(dayIso, cluster) {
+  const key = `${String(dayIso || "").trim()}::${clusterKey(cluster)}`;
+  clearTimelineClusterFrontFromModal();
+  bumpClusterToFront(dayIso, cluster);
+  timelineModalClusterStackKey.value = key;
+  await openSlotModal(cluster);
 }
 
 function dietPlanGroupKey(it) {
@@ -280,7 +312,8 @@ function timelineBlockTitle(cluster) {
 
 function timelineBlockSubline(cluster) {
   if (cluster.length === 1 && isDietFoodLogScheduleRow(cluster[0])) {
-    return "";
+    const sub = String(cluster[0]?.subtitle || "").trim();
+    return sub;
   }
   if (cluster.length <= 1) return "";
   if (clusterIsSamePlanDietGroup(cluster)) return `${cluster.length} meals`;
@@ -359,7 +392,7 @@ function scheduleItemKcalDisplay(it) {
     return "";
   }
   if (itemTypeLower(it) === "diet" && Number.isFinite(Number(it?.totalCalories)) && Number(it.totalCalories) > 0) {
-    return `${Number(it.totalCalories)} kcal`;
+    return `${Math.round(Number(it.totalCalories))} kcal`;
   }
   return "";
 }
@@ -467,8 +500,14 @@ function clusterPrimary(cluster) {
   return pickClusterPrimaryItem(cluster);
 }
 
-function clusterStyle(cluster) {
-  return clusterEnvelopeStyle(cluster);
+function clusterStyleWithZ(dayIso, cluster) {
+  const base = clusterEnvelopeStyle(cluster);
+  const key = `${String(dayIso || "").trim()}::${clusterKey(cluster)}`;
+  const z = clusterZStack.value[key];
+  if (z != null && Number.isFinite(Number(z))) {
+    return { ...base, zIndex: Number(z) };
+  }
+  return base;
 }
 
 function prevWeek() {
@@ -925,7 +964,7 @@ async function applyFocusFromQuery() {
                   :key="clusterKey(cluster)"
                   class="cluster"
                   :class="{ 'has-merged': cluster.length > 1 }"
-                  :style="clusterStyle(cluster)"
+                  :style="clusterStyleWithZ(d.iso, cluster)"
                 >
                   <div
                     class="block merged-slot"
@@ -944,9 +983,9 @@ async function applyFocusFromQuery() {
                     }"
                     :title="timelineBlockTitle(cluster)"
                     :data-schedule-id="String(clusterPrimary(cluster)?._id || '')"
-                    @click="openSlotModal(cluster)"
-                    @keydown.enter.prevent="openSlotModal(cluster)"
-                    @keydown.space.prevent="openSlotModal(cluster)"
+                    @click.stop="onTimelineClusterActivate(d.iso, cluster)"
+                    @keydown.enter.prevent="onTimelineClusterActivate(d.iso, cluster)"
+                    @keydown.space.prevent="onTimelineClusterActivate(d.iso, cluster)"
                   >
                     <span class="bhead">
                       <span class="bhead-left">
@@ -1079,12 +1118,12 @@ async function applyFocusFromQuery() {
                   <ul v-if="slotModalDietDetail.records?.length" class="diet-meal-detail-list">
                     <li v-for="r in slotModalDietDetail.records" :key="String(r._id)" class="diet-meal-detail-row diet-meal-detail-row--modal">
                       <span class="dm-name">{{ r.foodName }}</span>
-                      <span class="dm-kcal">{{ formatKcalOneDecimal(r.calories) }} kcal</span>
+                      <span class="dm-kcal">{{ formatDisplayKcal(r.calories) }} kcal</span>
                     </li>
                   </ul>
                   <p v-else class="muted diet-meal-detail-status">No diet records matched this meal block.</p>
                   <p v-if="slotModalDietDetail.records?.length" class="diet-meal-detail-total">
-                    <strong>Total:</strong> {{ formatKcalOneDecimal(slotModalDietDetail.total) }} kcal
+                    <strong>Total:</strong> {{ formatDisplayKcal(slotModalDietDetail.total) }} kcal
                   </p>
                 </template>
               </div>

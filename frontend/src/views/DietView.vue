@@ -15,6 +15,21 @@ const MEAL_TYPES = [
   { value: "snack", label: "Snack" },
 ];
 
+/** Plausible local clock windows for “is this time unusual for this meal?” (minutes from midnight, inclusive). */
+const MEAL_TIME_WINDOWS = {
+  breakfast: { start: 4 * 60, end: 12 * 60 },
+  lunch: { start: 11 * 60, end: 15 * 60 + 30 },
+  dinner: { start: 16 * 60, end: 23 * 60 + 59 },
+  snack: { start: 10 * 60, end: 22 * 60 },
+};
+
+const DEFAULT_TIME_FOR_MEAL = {
+  breakfast: "08:00",
+  lunch: "12:30",
+  dinner: "19:00",
+  snack: "16:00",
+};
+
 const LOCK_FREE_PLAN_COUNT = 4;
 
 const PLAN_CATEGORY_BLUEPRINT = {
@@ -133,13 +148,58 @@ function localHHmmFromRecordedAt(value) {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+function timeStrToMinutes(hhmm) {
+  const s = String(hhmm || "").trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return NaN;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (!Number.isFinite(h) || !Number.isFinite(min) || h < 0 || h > 23 || min < 0 || min > 59) return NaN;
+  return h * 60 + min;
+}
+
+function normalizeHHmmClient(raw) {
+  const s = String(raw || "").trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return "";
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (!Number.isFinite(h) || !Number.isFinite(min) || h < 0 || h > 23 || min < 0 || min > 59) return "";
+  return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+}
+
+function isTimePlausibleForMeal(mealType, hhmm) {
+  const w = MEAL_TIME_WINDOWS[String(mealType || "").toLowerCase()];
+  if (!w) return true;
+  const t = timeStrToMinutes(normalizeHHmmClient(hhmm));
+  if (!Number.isFinite(t)) return false;
+  return t >= w.start && t <= w.end;
+}
+
+function isLocalWeeHours() {
+  const h = new Date().getHours();
+  return h >= 0 && h <= 5;
+}
+
+function defaultSuggestedTimeForMeal(mealType) {
+  return DEFAULT_TIME_FOR_MEAL[String(mealType || "").toLowerCase()] || "12:00";
+}
+
+/** When true, show retroactive-time modal before saving (manual or recommended add). */
+function shouldPromptRetroactiveMeal(mealType, hhmm) {
+  const key = String(mealType || "").toLowerCase();
+  const norm = normalizeHHmmClient(hhmm);
+  if (!norm) return false;
+  if (isLocalWeeHours() && (key === "breakfast" || key === "lunch")) return true;
+  return !isTimePlausibleForMeal(key, norm);
+}
+
 function recordedTimeLocalForSavePayload() {
+  const fromForm = normalizeHHmmClient(form.recordedTimeLocal);
+  if (fromForm) return fromForm;
   if (isEditing.value) {
-    if (form.recordedTimeLocal && /^\d{1,2}:\d{2}$/.test(String(form.recordedTimeLocal).trim())) {
-      return String(form.recordedTimeLocal).trim();
-    }
     const editRow = records.value.find((r) => String(r._id) === String(editingId.value));
-    if (editRow?.recordedTimeLocal) return String(editRow.recordedTimeLocal).trim();
+    if (editRow?.recordedTimeLocal) return normalizeHHmmClient(editRow.recordedTimeLocal) || String(editRow.recordedTimeLocal).trim().slice(0, 5);
     return localHHmmFromRecordedAt(editRow?.recordedAt || editRow?.createdAt);
   }
   return localHHmmNow();
@@ -226,6 +286,15 @@ const loading = ref(false);
 const isOverviewLoading = ref(true);
 const searchingFoods = ref(false);
 const submitting = ref(false);
+const showRetroactiveModal = ref(false);
+const retroModalTime = ref("08:00");
+const retroModalMode = ref("");
+const retroModalMealType = ref("breakfast");
+const retroModalOpenedAtLabel = ref("");
+const retroModalError = ref("");
+const pendingRecommendedPayload = ref(null);
+const suppressRetroPromptOnce = ref(false);
+const retroModalMealLabel = computed(() => MEAL_TYPES.find((m) => m.value === retroModalMealType.value)?.label || "Meal");
 const records = ref([]);
 const isSearchDropdownOpen = ref(false);
 const showFoodOverview = ref(false);
@@ -427,7 +496,7 @@ const calorieStatus = computed(() => {
     return {
       key: "normal",
       color: "var(--c4)",
-      hint: "Loading overview...",
+      hint: "正在加载数据…",
       extra: "",
     };
   }
@@ -438,7 +507,7 @@ const calorieStatus = computed(() => {
     return {
       key: "danger",
       color: "#be3b3b",
-      hint: `You have exceeded today's calorie target by ${formatCalories(exceeded)}. Further high-calorie intake is not recommended today.`,
+      hint: `今日摄入已超过目标 ${formatCalories(exceeded)}，不建议再继续高热量饮食。`,
       extra: `(+${formatCalories(exceeded)})`,
     };
   }
@@ -446,14 +515,14 @@ const calorieStatus = computed(() => {
     return {
       key: "warn",
       color: "#d69a1e",
-      hint: "You are close to your daily calorie target. Be mindful of your remaining intake.",
+      hint: "已接近今日摄入上限，注意控制剩余进食量。",
       extra: "",
     };
   }
   return {
     key: "normal",
     color: "var(--c4)",
-    hint: "You are within your target range today.",
+    hint: "你当前摄入在目标范围内 👍",
     extra: "",
   };
 });
@@ -465,19 +534,19 @@ const donutStyle = computed(() => ({
 const macroCards = computed(() => [
   {
     key: "protein",
-    label: "Protein",
+    label: "蛋白质",
     consumed: Number.isFinite(Number(overview.value.consumed?.protein)) ? roundToOne(overview.value.consumed?.protein) : null,
     target: Number.isFinite(Number(overview.value.target?.protein)) ? roundToOne(overview.value.target?.protein) : null,
   },
   {
     key: "carbs",
-    label: "Carbs",
+    label: "碳水",
     consumed: Number.isFinite(Number(overview.value.consumed?.carbs)) ? roundToOne(overview.value.consumed?.carbs) : null,
     target: Number.isFinite(Number(overview.value.target?.carbs)) ? roundToOne(overview.value.target?.carbs) : null,
   },
   {
     key: "fat",
-    label: "Fat",
+    label: "脂肪",
     consumed: Number.isFinite(Number(overview.value.consumed?.fat)) ? roundToOne(overview.value.consumed?.fat) : null,
     target: Number.isFinite(Number(overview.value.target?.fat)) ? roundToOne(overview.value.target?.fat) : null,
   },
@@ -900,17 +969,59 @@ const activeRecommendedPlanDetails = computed(() => {
   return defaultDynamicPlanDetails.value;
 });
 
-const recommendedModeMeals = computed(() =>
-  activeRecommendedPlanDetails.value.meals.map((meal) => {
-    const cards = meal.items.map((item) => {
-      const recommendationId = `${activeRecommendedPlan.value.id}-${item.recommendationId}`;
-      const linked = records.value.find((x) => String(x.recommendationId || "") === recommendationId);
-      if (linked) return { key: `record-${linked._id}`, mode: "recorded", recommendation: item, record: linked };
-      return { key: `recommend-${item.recommendationId}`, mode: "recommended", recommendation: item, record: null };
+function normalizeMealTypeKey(value) {
+  const key = String(value || "").trim().toLowerCase();
+  return MEAL_TYPES.some((m) => m.value === key) ? key : "snack";
+}
+
+function recordAddedAtLabel(row) {
+  const local = String(row?.recordedTimeLocal || "").trim();
+  if (/^\d{1,2}:\d{2}$/.test(local)) return local;
+  return formatRecordTime(row?.recordedAt || row?.createdAt) || "--:--";
+}
+
+const recommendedModeMeals = computed(() => {
+  const mealMap = new Map(
+    MEAL_TYPES.map((meal) => {
+      const baseMeal = activeRecommendedPlanDetails.value.meals.find((x) => x.mealType === meal.value);
+      return [
+        meal.value,
+        {
+          mealType: meal.value,
+          label: meal.label,
+          targetCalories: Number(baseMeal?.targetCalories || 0),
+          records: [],
+          pendingRecommendations: Array.isArray(baseMeal?.items) ? [...baseMeal.items] : [],
+        },
+      ];
+    })
+  );
+
+  const rows = [...records.value].sort((a, b) => {
+    const ta = new Date(a?.recordedAt || a?.createdAt || 0).getTime();
+    const tb = new Date(b?.recordedAt || b?.createdAt || 0).getTime();
+    return tb - ta;
+  });
+
+  for (const row of rows) {
+    const key = normalizeMealTypeKey(row?.mealType);
+    const bucket = mealMap.get(key);
+    if (!bucket) continue;
+    bucket.records.push(row);
+  }
+
+  for (const meal of mealMap.values()) {
+    const loggedRecommendationIds = new Set(
+      meal.records.map((row) => String(row?.recommendationId || "").trim()).filter(Boolean)
+    );
+    meal.pendingRecommendations = meal.pendingRecommendations.filter((item) => {
+      const rid = `${activeRecommendedPlan.value.id}-${item.recommendationId}`;
+      return !loggedRecommendationIds.has(rid);
     });
-    return { ...meal, cards };
-  })
-);
+  }
+
+  return MEAL_TYPES.map((meal) => mealMap.get(meal.value));
+});
 
 function mealAllocatedCalories(meal) {
   return roundToOne((meal?.items || []).reduce((sum, item) => sum + toNumber(item.estimatedCalories), 0));
@@ -1018,16 +1129,102 @@ async function toggleSelectedPlanFavorite() {
   }
 }
 
-async function saveManualRecord() {
+function openRetroactiveModalForManual(effectiveTimeHHmm) {
+  retroModalMealType.value = form.mealType;
+  const plausible = isTimePlausibleForMeal(form.mealType, effectiveTimeHHmm);
+  retroModalTime.value = plausible ? normalizeHHmmClient(effectiveTimeHHmm) : defaultSuggestedTimeForMeal(form.mealType);
+  retroModalMode.value = "manual";
+  retroModalOpenedAtLabel.value = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  retroModalError.value = "";
+  showRetroactiveModal.value = true;
+}
+
+function openRetroactiveModalForRecommended(mealType, payload) {
+  retroModalMealType.value = mealType;
+  retroModalTime.value = defaultSuggestedTimeForMeal(mealType);
+  pendingRecommendedPayload.value = payload;
+  retroModalMode.value = "recommended";
+  retroModalOpenedAtLabel.value = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  retroModalError.value = "";
+  showRetroactiveModal.value = true;
+}
+
+function cancelRetroactiveModal() {
+  showRetroactiveModal.value = false;
+  retroModalMode.value = "";
+  pendingRecommendedPayload.value = null;
+  retroModalError.value = "";
+}
+
+async function postRecommendedDietPayload(p) {
+  pageError.value = "";
+  pageSuccess.value = "";
+  submitting.value = true;
+  try {
+    await api.post("/diets", p);
+    pageSuccess.value = "Recommended item added to records.";
+    selectedDate.value = p.date || selectedDate.value;
+    await loadForDate();
+  } catch (err) {
+    pageError.value = err?.response?.data?.message || "Failed to add recommended item.";
+  } finally {
+    submitting.value = false;
+  }
+}
+
+async function confirmRetroactiveModal() {
+  retroModalError.value = "";
+  const t = normalizeHHmmClient(retroModalTime.value);
+  if (!t) {
+    retroModalError.value = "Please choose a valid time (HH:mm).";
+    return;
+  }
+  const mode = retroModalMode.value;
+  showRetroactiveModal.value = false;
+  retroModalMode.value = "";
+  if (mode === "recommended" && pendingRecommendedPayload.value) {
+    const p = { ...pendingRecommendedPayload.value, recordedTimeLocal: t };
+    pendingRecommendedPayload.value = null;
+    await postRecommendedDietPayload(p);
+    return;
+  }
+  form.recordedTimeLocal = t;
+  suppressRetroPromptOnce.value = true;
+  await performSaveManualRecord();
+}
+
+async function retroModalUseCurrentTime() {
+  const t = localHHmmNow();
+  retroModalError.value = "";
+  const mode = retroModalMode.value;
+  showRetroactiveModal.value = false;
+  retroModalMode.value = "";
+  if (mode === "recommended" && pendingRecommendedPayload.value) {
+    const p = { ...pendingRecommendedPayload.value, recordedTimeLocal: t };
+    pendingRecommendedPayload.value = null;
+    await postRecommendedDietPayload(p);
+    return;
+  }
+  form.recordedTimeLocal = t;
+  suppressRetroPromptOnce.value = true;
+  await performSaveManualRecord();
+}
+
+async function performSaveManualRecord() {
   formError.value = "";
   pageError.value = "";
   pageSuccess.value = "";
   const message = validateManualForm();
   if (message) {
     formError.value = message;
+    suppressRetroPromptOnce.value = false;
     return;
   }
-
+  if (!me.value?.id) {
+    formError.value = "Not signed in.";
+    suppressRetroPromptOnce.value = false;
+    return;
+  }
   submitting.value = true;
   const payload = {
     userId: me.value.id,
@@ -1058,11 +1255,30 @@ async function saveManualRecord() {
     selectedDate.value = form.date;
     await loadForDate();
     resetManualForm();
+    suppressRetroPromptOnce.value = false;
   } catch (err) {
     formError.value = err?.response?.data?.message || "Failed to save diet record.";
+    suppressRetroPromptOnce.value = false;
   } finally {
     submitting.value = false;
   }
+}
+
+async function saveManualRecord() {
+  formError.value = "";
+  pageError.value = "";
+  pageSuccess.value = "";
+  const message = validateManualForm();
+  if (message) {
+    formError.value = message;
+    return;
+  }
+  const effective = recordedTimeLocalForSavePayload();
+  if (!suppressRetroPromptOnce.value && shouldPromptRetroactiveMeal(form.mealType, effective)) {
+    openRetroactiveModalForManual(effective);
+    return;
+  }
+  await performSaveManualRecord();
 }
 
 async function addRecommendedItem(mealType, item, planId) {
@@ -1088,13 +1304,11 @@ async function addRecommendedItem(mealType, item, planId) {
     recordedAt: new Date().toISOString(),
     recordedTimeLocal: localHHmmNow(),
   };
-  try {
-    await api.post("/diets", payload);
-    pageSuccess.value = "Recommended item added to records.";
-    await loadForDate();
-  } catch (err) {
-    pageError.value = err?.response?.data?.message || "Failed to add recommended item.";
+  if (!suppressRetroPromptOnce.value && shouldPromptRetroactiveMeal(mealType, payload.recordedTimeLocal)) {
+    openRetroactiveModalForRecommended(mealType, payload);
+    return;
   }
+  await postRecommendedDietPayload(payload);
 }
 
 function editRecord(row) {
@@ -1312,46 +1526,48 @@ watch(
         </div>
       </div>
 
-      <p class="muted">Selected date: {{ selectedDate }}</p>
+      <p class="muted">当前日期：{{ selectedDate }}</p>
 
       <div class="overview-grid">
         <article class="overview-card strong">
-          <span>Daily calorie target</span>
+          <span>每日摄入目标</span>
           <strong>{{ isOverviewLoading ? "--" : formatCaloriesOrDash(overview.target.calories) }}</strong>
         </article>
         <article class="overview-card">
-          <span>Consumed</span>
+          <span>已摄入</span>
           <strong>{{ isOverviewLoading ? "--" : formatCaloriesOrDash(overview.consumed.calories) }}</strong>
         </article>
         <article class="overview-card">
-          <span>Remaining</span>
+          <span>剩余可摄入</span>
           <strong :class="{ warn: Number.isFinite(Number(overview.remaining.calories)) && overview.remaining.calories < 0 }">
             {{ isOverviewLoading ? "--" : formatCaloriesOrDash(overview.remaining.calories) }}
           </strong>
         </article>
         <article class="overview-card">
-          <span>Suggested workout burn</span>
+          <span>建议运动消耗</span>
           <strong>{{ isOverviewLoading ? "--" : formatCaloriesOrDash(overview.target.suggestedWorkoutBurn) }}</strong>
         </article>
       </div>
 
       <div class="chart-row">
         <article class="chart-card">
-          <h3>Calorie Progress</h3>
+          <h3>热量摄入进度</h3>
           <div class="donut" :style="donutStyle">
             <div class="donut-inner">
               <strong>{{ isOverviewLoading || caloriePercent == null ? "--" : `${caloriePercent}%` }}</strong>
-              <span>consumed</span>
+              <span>已摄入占比</span>
             </div>
           </div>
           <p class="muted">
-            {{ isOverviewLoading ? "-- / -- kcal" : `${formatCaloriesNumberOrDash(overview.consumed.calories)} / ${formatCaloriesNumberOrDash(overview.target.calories)} kcal` }}
+            {{ isOverviewLoading ? "-- / -- 千卡" : `${formatCaloriesNumberOrDash(overview.consumed.calories)} / ${formatCaloriesNumberOrDash(overview.target.calories)} 千卡` }}
             <span v-if="!isOverviewLoading && calorieStatus.extra"> {{ calorieStatus.extra }}</span>
           </p>
-          <p class="calorie-hint" :data-status="calorieStatus.key">{{ isOverviewLoading ? "--" : calorieStatus.hint }}</p>
+          <p class="calorie-hint" :data-status="isOverviewLoading ? 'loading' : calorieStatus.key">
+            {{ isOverviewLoading ? "正在加载数据…" : calorieStatus.hint }}
+          </p>
         </article>
         <article class="chart-card">
-          <h3>Macro Progress</h3>
+          <h3>营养素摄入</h3>
           <div v-for="card in macroCards" :key="card.key" class="macro-progress">
             <div class="macro-head">
               <span>{{ card.label }}</span>
@@ -1503,28 +1719,28 @@ watch(
         <div class="recommended-board">
           <section v-for="meal in recommendedModeMeals" :key="meal.mealType" class="meal-board">
             <h4>{{ meal.label }} ({{ formatCaloriesNumber(meal.targetCalories) }} kcal target)</h4>
-            <p v-if="!meal.cards.length" class="muted">No recommended items.</p>
-            <article v-for="card in meal.cards" :key="card.key" class="meal-item">
+            <p v-if="!meal.records.length" class="muted">No records for this meal yet.</p>
+            <article v-for="row in meal.records" :key="`record-${row._id}`" class="meal-item">
               <div class="meal-main">
-                <strong>{{ card.recommendation.foodName }}</strong>
-                <span>{{ formatCaloriesNumber(card.recommendation.caloriesPer100g) }} kcal / 100g</span>
-                <span v-if="card.mode === 'recommended'">{{ card.recommendation.recommendedGrams }} g · {{ formatCalories(card.recommendation.estimatedCalories) }}</span>
-                <span v-else-if="card.record">{{ roundToOne(card.record.amountInGrams || card.record.amount || 0) }} g · {{ formatCalories(card.record.calories) }}</span>
-                <span v-if="card.mode === 'recommended'">
-                  P {{ card.recommendation.estimatedProtein }}g · C {{ card.recommendation.estimatedCarbs }}g · F {{ card.recommendation.estimatedFat }}g
-                </span>
-                <span v-else-if="card.record">P {{ roundToOne(card.record.protein) }}g · C {{ roundToOne(card.record.carbs) }}g · F {{ roundToOne(card.record.fat) }}g</span>
-                <span v-if="card.record" class="recorded-tag">
-                  Added at {{ formatRecordTime(card.record.recordedAt || card.record.createdAt) || "--:--" }} · Source: {{ card.record.sourceType || "recommended" }}
-                </span>
+                <strong>{{ row.foodName }}</strong>
+                <span>{{ roundToOne(row.amountInGrams || row.amount || 0) }} g · {{ formatCalories(row.calories) }}</span>
+                <span>P {{ roundToOne(row.protein) }}g · C {{ roundToOne(row.carbs) }}g · F {{ roundToOne(row.fat) }}g</span>
+                <span class="recorded-tag">Added at {{ recordAddedAtLabel(row) }} · Source: {{ row.sourceType || "manual" }}</span>
               </div>
-              <button v-if="card.mode === 'recommended'" type="button" class="tiny-btn" @click="addRecommendedItem(meal.mealType, card.recommendation, activeRecommendedPlan.id)">
-                Add to Records
-              </button>
-              <div v-else-if="card.record" class="record-actions">
-                <button type="button" class="tiny-btn ghost-btn" @click="editRecord(card.record)">Edit</button>
-                <button type="button" class="tiny-btn danger-btn" @click="removeRecord(card.record._id)">Delete</button>
+              <div class="record-actions">
+                <button type="button" class="tiny-btn ghost-btn" @click="editRecord(row)">Edit</button>
+                <button type="button" class="tiny-btn danger-btn" @click="removeRecord(row._id)">Delete</button>
               </div>
+            </article>
+            <p v-if="meal.pendingRecommendations.length" class="muted">Suggestions from current source</p>
+            <article v-for="item in meal.pendingRecommendations" :key="`suggest-${item.recommendationId}`" class="meal-item">
+              <div class="meal-main">
+                <strong>{{ item.foodName }}</strong>
+                <span>{{ formatCaloriesNumber(item.caloriesPer100g) }} kcal / 100g</span>
+                <span>{{ item.recommendedGrams }} g · {{ formatCalories(item.estimatedCalories) }}</span>
+                <span>P {{ item.estimatedProtein }}g · C {{ item.estimatedCarbs }}g · F {{ item.estimatedFat }}g</span>
+              </div>
+              <button type="button" class="tiny-btn" @click="addRecommendedItem(meal.mealType, item, activeRecommendedPlan.id)">Add to Records</button>
             </article>
           </section>
         </div>
@@ -1607,6 +1823,26 @@ watch(
     <p v-if="pageError" class="error">{{ pageError }}</p>
     <p v-if="pageSuccess" class="success">{{ pageSuccess }}</p>
     <p v-if="loading" class="muted loading-text">Loading diet data...</p>
+
+    <div v-if="showRetroactiveModal" class="modal-overlay" @click.self="cancelRetroactiveModal">
+      <div class="modal-content retro-modal" role="dialog" aria-modal="true" aria-labelledby="retro-modal-title">
+        <h3 id="retro-modal-title" class="retro-modal-title">Logging this meal retroactively?</h3>
+        <p class="retro-modal-text">
+          It's currently <strong>{{ retroModalOpenedAtLabel }}</strong> and you chose <strong>{{ retroModalMealLabel }}</strong>. If you ate this earlier
+          but forgot to log it, choose the local time you actually had it so your schedule stays accurate.
+        </p>
+        <label class="retro-time-label">
+          Time you had this meal
+          <input v-model="retroModalTime" type="time" class="retro-time-input" />
+        </label>
+        <p v-if="retroModalError" class="error retro-modal-error">{{ retroModalError }}</p>
+        <div class="retro-modal-actions">
+          <button type="button" class="ghost-btn" @click="cancelRetroactiveModal">Cancel</button>
+          <button type="button" class="ghost-btn" @click="retroModalUseCurrentTime">Use current clock</button>
+          <button type="button" class="retro-confirm-btn" @click="confirmRetroactiveModal">Save with this time</button>
+        </div>
+      </div>
+    </div>
 
     <div v-if="showVipUpgradeModal" class="modal-overlay" @click.self="showVipUpgradeModal = false">
       <div class="modal-content">
@@ -1976,6 +2212,10 @@ watch(
 .calorie-hint {
   margin-top: 8px;
   font-size: 13px;
+}
+
+.calorie-hint[data-status="loading"] {
+  color: #5d7480;
 }
 
 .calorie-hint[data-status="normal"] {
@@ -2587,6 +2827,69 @@ watch(
   background: #fff;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.2);
   text-align: center;
+}
+
+.retro-modal {
+  width: min(92vw, 420px);
+  text-align: left;
+}
+
+.retro-modal-title {
+  margin: 0 0 10px;
+  font-size: 17px;
+  font-weight: 800;
+  color: #28363d;
+  text-align: left;
+}
+
+.retro-modal-text {
+  margin: 0 0 14px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: #4a5f66;
+}
+
+.retro-time-label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374e55;
+  margin-bottom: 12px;
+}
+
+.retro-time-input {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #c5d9d3;
+  font-size: 15px;
+}
+
+.retro-modal-error {
+  margin: 0 0 10px;
+}
+
+.retro-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.retro-confirm-btn {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #2f8f7d;
+  background: linear-gradient(135deg, #49b89f, #2f8f7d);
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.retro-confirm-btn:hover {
+  filter: brightness(1.03);
 }
 
 .vip-modal-title {

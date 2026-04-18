@@ -39,11 +39,6 @@ function formatMealTypeTitleCase(mealType) {
   return "Snack";
 }
 
-function formatTotalKcalLabel(sum) {
-  const n = Math.round(Number(sum) * 10) / 10;
-  return Number.isInteger(n) ? String(n) : n.toFixed(1);
-}
-
 function normalizeHHmm(raw) {
   const s = String(raw ?? "").trim();
   const m = s.match(/^(\d{1,2}):(\d{2})$/);
@@ -60,16 +55,152 @@ function toObjectId(userId) {
   return new mongoose.Types.ObjectId(s);
 }
 
-function dietTitleFromRow(d) {
-  const name = String(d?.foodName || "Diet").trim() || "Diet";
-  const kcal = Number(d?.calories);
-  const k = Number.isFinite(kcal) ? kcal : 0;
-  return `${name} · ${formatTotalKcalLabel(k)} kcal`;
+/**
+ * Earliest wall time among diet rows for this meal (recordedTimeLocal only).
+ * Rows without a valid time are ignored for the min; if none have a time, use meal default.
+ */
+function earliestTimeFromDiets(meal, dietsForMeal) {
+  let bestMin = null;
+  for (const d of dietsForMeal) {
+    const t = normalizeHHmm(d.recordedTimeLocal);
+    if (!t) continue;
+    const m = scheduleTime.parseTimeToMinutes(t);
+    if (!Number.isFinite(m)) continue;
+    if (bestMin == null || m < bestMin) bestMin = m;
+  }
+  if (bestMin != null) return scheduleTime.minutesToHHmm(bestMin);
+  return MEAL_DEFAULT_TIME[meal] || "12:00";
 }
 
 /**
- * One ScheduleItem per Diet document (linkedDietId), scheduleSource=diet_log_sync.
- * Removes orphan diet_log_sync rows for the calendar day (no matching Diet).
+ * One ScheduleItem per (user, date, meal) for scheduleSource=diet_log_sync.
+ * totalCalories = sum of diet rows (decimals allowed); title/subtitle use Math.round for labels.
+ * linkedDietId is always null (aggregate row).
+ */
+async function upsertAggregatedDietLogRow(userId, dateKeyStr, meal, dietsForMeal) {
+  const durationMinutes = 15;
+  const sumKcal = dietsForMeal.reduce((s, d) => {
+    const k = Number(d?.calories);
+    return s + (Number.isFinite(k) ? k : 0);
+  }, 0);
+  const baseTime = earliestTimeFromDiets(meal, dietsForMeal);
+
+  const dupRows = await ScheduleItem.find({
+    userId,
+    date: dateKeyStr,
+    itemType: "diet",
+    scheduleSource: DIET_LOG_SOURCE,
+    meal,
+  })
+    .sort({ createdAt: 1 })
+    .lean();
+
+  if (dupRows.length > 1) {
+    dupRows.sort((a, b) => {
+      const aAgg = a.linkedDietId ? 1 : 0;
+      const bAgg = b.linkedDietId ? 1 : 0;
+      if (aAgg !== bAgg) return aAgg - bAgg;
+      const ta = new Date(a.createdAt || 0).getTime();
+      const tb = new Date(b.createdAt || 0).getTime();
+      if (ta !== tb) return ta - tb;
+      return String(a._id).localeCompare(String(b._id));
+    });
+    const keeperId = dupRows[0]._id;
+    const dupIds = dupRows.slice(1).map((r) => r._id);
+    if (dupIds.length) {
+      await ScheduleItem.deleteMany({ _id: { $in: dupIds }, userId });
+    }
+  }
+
+  const existing = await ScheduleItem.findOne({
+    userId,
+    date: dateKeyStr,
+    itemType: "diet",
+    scheduleSource: DIET_LOG_SOURCE,
+    meal,
+  }).lean();
+
+  const dayRows = await ScheduleItem.find({ userId, date: dateKeyStr }).lean();
+  const excludeId = existing ? String(existing._id) : null;
+
+  let chosenTime = baseTime;
+  const candidate = {
+    date: dateKeyStr,
+    time: chosenTime,
+    durationMinutes,
+    itemType: "diet",
+    title: "🥗 Diet",
+    meal,
+  };
+
+  if (!existing) {
+    if (scheduleTime.hasScheduleConflict(candidate, dayRows, null)) {
+      const slot = scheduleTime.findSlotForDietMeal(dateKeyStr, dayRows, meal, durationMinutes, null);
+      chosenTime = slot || baseTime;
+    }
+  } else if (
+    scheduleTime.hasScheduleConflict({ ...candidate, time: chosenTime }, dayRows, excludeId)
+  ) {
+    const slot = scheduleTime.findSlotForDietMeal(dateKeyStr, dayRows, meal, durationMinutes, excludeId);
+    chosenTime = slot || chosenTime;
+  }
+
+  const roundedLabel = Math.round(sumKcal);
+  const mealLabel = formatMealTypeTitleCase(meal);
+  const patch = {
+    userId,
+    date: dateKeyStr,
+    time: String(chosenTime).slice(0, 5),
+    title: "🥗 Diet",
+    subtitle: `${mealLabel} · ${roundedLabel} kcal`,
+    meal,
+    itemType: "diet",
+    scheduleSource: DIET_LOG_SOURCE,
+    totalCalories: Math.max(0, sumKcal),
+    durationMinutes,
+    note: "",
+    category: "",
+    planName: "",
+    dietPlanId: "",
+    planId: null,
+    courseId: null,
+    linkedDietId: null,
+    overlapAccepted: false,
+  };
+
+  if (existing) {
+    const full = await ScheduleItem.findById(existing._id).lean();
+    if (full?.is_completed) {
+      patch.is_completed = true;
+      patch.completed_at = full.completed_at || null;
+    } else {
+      patch.is_completed = false;
+      patch.completed_at = null;
+    }
+    await ScheduleItem.updateOne({ _id: existing._id, userId }, { $set: patch });
+    const scheduleItemId = existing._id;
+    const dietIds = dietsForMeal.map((d) => d._id).filter(Boolean);
+    if (dietIds.length) {
+      await Diet.updateMany({ _id: { $in: dietIds }, userId }, { $set: { scheduleItemId } });
+    }
+    return scheduleItemId;
+  }
+
+  const created = await ScheduleItem.create({
+    ...patch,
+    is_completed: false,
+    completed_at: null,
+  });
+  const dietIds = dietsForMeal.map((d) => d._id).filter(Boolean);
+  if (dietIds.length) {
+    await Diet.updateMany({ _id: { $in: dietIds }, userId }, { $set: { scheduleItemId: created._id } });
+  }
+  return created._id;
+}
+
+/**
+ * Rebuild diet_log_sync schedule rows from Diet records for one calendar day.
+ * Removes legacy per-record diet_log_sync rows and empty meals.
  */
 async function reconcileDietSchedulesForDate(userId, dateKey) {
   const uid = toObjectId(userId);
@@ -77,10 +208,18 @@ async function reconcileDietSchedulesForDate(userId, dateKey) {
   if (!uid || !isValidDateKey(dateKeyStr)) return;
 
   const diets = await Diet.find({ userId: uid, date: dayRangeFromDateKey(dateKeyStr) }).lean();
-  const dietIds = diets.map((d) => d._id).filter(Boolean);
-
+  const byMeal = new Map();
   for (const d of diets) {
-    await upsertDietLogScheduleRow(uid, d, dateKeyStr);
+    const meal = String(d.mealType || "").toLowerCase();
+    if (!MEAL_TYPES.has(meal)) continue;
+    if (!byMeal.has(meal)) byMeal.set(meal, []);
+    byMeal.get(meal).push(d);
+  }
+
+  const keptIds = [];
+  for (const [meal, list] of byMeal) {
+    const id = await upsertAggregatedDietLogRow(uid, dateKeyStr, meal, list);
+    if (id) keptIds.push(id);
   }
 
   const filterOrphans = {
@@ -90,93 +229,15 @@ async function reconcileDietSchedulesForDate(userId, dateKey) {
     scheduleSource: DIET_LOG_SOURCE,
   };
 
-  if (!dietIds.length) {
+  if (!keptIds.length) {
     await ScheduleItem.deleteMany(filterOrphans);
     return;
   }
 
   await ScheduleItem.deleteMany({
     ...filterOrphans,
-    $or: [{ linkedDietId: null }, { linkedDietId: { $nin: dietIds } }],
+    _id: { $nin: keptIds },
   });
-}
-
-async function upsertDietLogScheduleRow(userId, diet, dateKeyStr) {
-  const meal = String(diet.mealType || "").toLowerCase();
-  if (!MEAL_TYPES.has(meal)) return;
-
-  const durationMinutes = 15;
-  const timeFromDiet = normalizeHHmm(diet.recordedTimeLocal);
-  const baseTime = timeFromDiet || MEAL_DEFAULT_TIME[meal] || "12:00";
-
-  const filter = {
-    userId,
-    linkedDietId: diet._id,
-    scheduleSource: DIET_LOG_SOURCE,
-  };
-
-  let existing = await ScheduleItem.findOne(filter).lean();
-  const dayRows = await ScheduleItem.find({ userId, date: dateKeyStr }).lean();
-
-  let chosenTime = baseTime;
-  if (!existing) {
-    const candidate = {
-      date: dateKeyStr,
-      time: baseTime,
-      durationMinutes,
-      itemType: "diet",
-      title: "Diet",
-      meal,
-    };
-    if (scheduleTime.hasScheduleConflict(candidate, dayRows, null)) {
-      const slot = scheduleTime.findSlotForDietMeal(dateKeyStr, dayRows, meal, durationMinutes, null);
-      chosenTime = slot || baseTime;
-    }
-  } else {
-    chosenTime = baseTime;
-    const candidate = {
-      date: dateKeyStr,
-      time: chosenTime,
-      durationMinutes,
-      itemType: "diet",
-      title: "Diet",
-      meal,
-    };
-    if (scheduleTime.hasScheduleConflict(candidate, dayRows, String(existing._id))) {
-      const slot = scheduleTime.findSlotForDietMeal(dateKeyStr, dayRows, meal, durationMinutes, String(existing._id));
-      chosenTime = slot || chosenTime;
-    }
-  }
-
-  const patch = {
-    userId,
-    date: dateKeyStr,
-    time: String(chosenTime).slice(0, 5),
-    title: dietTitleFromRow(diet),
-    subtitle: formatMealTypeTitleCase(meal),
-    meal,
-    itemType: "diet",
-    scheduleSource: DIET_LOG_SOURCE,
-    totalCalories: Math.max(0, Number(diet.calories) || 0),
-    durationMinutes,
-    note: "",
-    category: "",
-    planName: String(diet.planName || "").trim(),
-    dietPlanId: String(diet.dietPlanId || "").trim(),
-    planId: null,
-    courseId: null,
-    linkedDietId: diet._id,
-    overlapAccepted: false,
-  };
-
-  if (existing) {
-    await ScheduleItem.updateOne({ _id: existing._id, userId }, { $set: patch });
-    await Diet.updateOne({ _id: diet._id, userId }, { $set: { scheduleItemId: existing._id } });
-    return;
-  }
-
-  const created = await ScheduleItem.create(patch);
-  await Diet.updateOne({ _id: diet._id, userId }, { $set: { scheduleItemId: created._id } });
 }
 
 /**
@@ -192,4 +253,6 @@ module.exports = {
   formatDateKeyFromDate,
   dayRangeFromDateKey,
   DIET_LOG_SOURCE,
+  MEAL_TYPES,
+  isValidDateKey,
 };

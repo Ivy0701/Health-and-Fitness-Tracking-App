@@ -3,6 +3,7 @@ const ScheduleItem = require("../models/ScheduleItem");
 
 const DIET_LOG_SYNC_SOURCE = "diet_log_sync";
 const EXPECTED_DURATION = 15;
+const MEAL_KEYS = ["breakfast", "lunch", "dinner", "snack"];
 
 function toObjectId(userId) {
   const s = String(userId || "").trim();
@@ -11,8 +12,8 @@ function toObjectId(userId) {
 }
 
 /**
- * One schedule row per linked Diet record for diet_log_sync.
- * Dedupe key is linkedDietId (strict); legacy rows without linkedDietId are ignored here.
+ * At most one diet_log_sync row per (date, meal) per user.
+ * Prefers aggregate rows (linkedDietId null), then keepScheduleItemId, then oldest.
  * @returns {{ duplicateGroups: number, deletedRows: number }}
  */
 async function dedupeDietLogSyncForUser(userId, options = {}) {
@@ -26,14 +27,16 @@ async function dedupeDietLogSyncForUser(userId, options = {}) {
     itemType: "diet",
     scheduleSource: DIET_LOG_SYNC_SOURCE,
   })
-    .select("_id userId linkedDietId createdAt")
+    .select("_id userId linkedDietId createdAt date meal")
     .lean();
 
   const groups = new Map();
   for (const r of rows) {
-    const linkedId = String(r?.linkedDietId || "").trim();
-    if (!linkedId) continue;
-    const key = linkedId;
+    const dk = String(r?.date || "").trim();
+    const meal = String(r?.meal || "").toLowerCase();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dk)) continue;
+    if (!MEAL_KEYS.includes(meal)) continue;
+    const key = `${dk}:${meal}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(r);
   }
@@ -44,6 +47,9 @@ async function dedupeDietLogSyncForUser(userId, options = {}) {
     if (group.length <= 1) continue;
     duplicateGroups += 1;
     group.sort((a, b) => {
+      const aAgg = a.linkedDietId ? 1 : 0;
+      const bAgg = b.linkedDietId ? 1 : 0;
+      if (aAgg !== bAgg) return aAgg - bAgg;
       const ta = new Date(a.createdAt || 0).getTime();
       const tb = new Date(b.createdAt || 0).getTime();
       if (ta !== tb) return ta - tb;
@@ -55,16 +61,11 @@ async function dedupeDietLogSyncForUser(userId, options = {}) {
       if (preferred) {
         keeper = preferred;
       } else {
-        /**
-         * PUT may pass keepScheduleItemId for the row being edited. If that id is not in this
-         * duplicate group, do not delete anyone here — otherwise we would fall back to "oldest"
-         * keeper and can delete the very document the client is PUTing (404).
-         */
         if (String(process.env.DEBUG_SCHEDULE_PUT_TRACE || "").trim() === "1") {
           // eslint-disable-next-line no-console
           console.warn(
             "[dedupeDietLogSync] skip group: keepScheduleItemId not in duplicate group",
-            JSON.stringify({ keepIdStr, groupIds: group.map((g) => String(g._id)), linkedDietId: String(group[0]?.linkedDietId || "") })
+            JSON.stringify({ keepIdStr, groupIds: group.map((g) => String(g._id)), key: group[0] })
           );
         }
         continue;

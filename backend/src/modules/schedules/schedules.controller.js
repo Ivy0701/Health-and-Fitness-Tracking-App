@@ -13,7 +13,12 @@ const CourseDailyProgress = require("../../models/CourseDailyProgress");
 const { buildCourseExercises, summarizeCourseExercises } = require("../../utils/courseSession");
 const { applyMetBurnsToExercises } = require("../../utils/workoutCaloriesBurn");
 const { runDietScheduleHygieneForUser } = require("../../utils/dietScheduleDataHygiene");
-const { reconcileDietSchedulesForDate } = require("../../utils/dietScheduleSync");
+const {
+  reconcileDietSchedulesForDate,
+  dayRangeFromDateKey,
+  MEAL_TYPES,
+  isValidDateKey,
+} = require("../../utils/dietScheduleSync");
 
 async function isVipUser(userId) {
   const u = await User.findById(userId).select("vip_status isVip").lean();
@@ -58,13 +63,6 @@ function normalizeHHmm(raw) {
   const min = Number(m[2]);
   if (!Number.isFinite(h) || !Number.isFinite(min) || h < 0 || h > 23 || min < 0 || min > 59) return "";
   return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
-}
-
-function parseDateKey(dateKey) {
-  const s = String(dateKey || "").trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
-  const d = new Date(`${s}T00:00:00`);
-  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 function isDietPlanApplyRow(row, dietPlanId) {
@@ -114,11 +112,21 @@ async function removeSingleItemAndLinkedState({ row, userId }) {
     String(row?.scheduleSource || "").trim() === DIET_LOG_SYNC_SOURCE;
 
   if (isDietLogSyncRow) {
+    const dateKey = String(row?.date || "").trim();
     const linkedDietId = String(row?.linkedDietId || "").trim();
     if (mongoose.Types.ObjectId.isValid(linkedDietId)) {
       await Diet.deleteOne({ _id: linkedDietId, userId });
+      await row.deleteOne();
+    } else {
+      const meal = String(row?.meal || "").toLowerCase();
+      if (MEAL_TYPES.has(meal) && isValidDateKey(dateKey)) {
+        await Diet.deleteMany({ userId, mealType: meal, date: dayRangeFromDateKey(dateKey) });
+      }
+      await row.deleteOne();
     }
-    await row.deleteOne();
+    if (isValidDateKey(dateKey)) {
+      await reconcileDietSchedulesForDate(userId, dateKey);
+    }
     return;
   }
 
@@ -252,7 +260,7 @@ async function attachPlannedBurnKcalForCourseRows(userId, rows) {
 const list = asyncHandler(async (req, res) => {
   const userId = req.params.userId;
   if (String(userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
-  /** Safe DB hygiene: duplicate diet_log_sync per day+meal, fix wrong durationMinutes (no localStorage involved). */
+  /** Safe DB hygiene: duplicate diet_log_sync rows per date+meal, fix wrong durationMinutes (no localStorage involved). */
   try {
     const h = await runDietScheduleHygieneForUser(req.user.id);
     if (String(process.env.DEBUG_SCHEDULE_HYGIENE || "").trim() === "1" && (h.deletedRows > 0 || h.durationNormalized > 0)) {
@@ -492,9 +500,11 @@ const create = asyncHandler(async (req, res) => {
 
     const synced = await ScheduleItem.findOne({
       userId: uid,
-      linkedDietId: createdDiet._id,
+      date: dateKey,
       itemType: "diet",
       scheduleSource: DIET_LOG_SYNC_SOURCE,
+      meal: nextMealType,
+      linkedDietId: null,
     }).lean();
 
     const payload = synced || {
@@ -507,7 +517,7 @@ const create = asyncHandler(async (req, res) => {
       totalCalories: Number.isFinite(kcal) ? kcal : 0,
       title: resolvedTitle,
       scheduleSource: DIET_LOG_SYNC_SOURCE,
-      linkedDietId: String(createdDiet._id),
+      linkedDietId: null,
       durationMinutes: duration,
       note: note != null ? String(note) : "",
     };
@@ -798,26 +808,22 @@ const update = asyncHandler(async (req, res) => {
   row.overlapAccepted = false;
   await row.save();
 
-  if (isDietLogSyncRow && row.linkedDietId && mongoose.Types.ObjectId.isValid(String(row.linkedDietId))) {
-    const diet = await Diet.findOne({ _id: row.linkedDietId, userId: req.user.id });
-    if (diet) {
-      const patchDiet = {};
-      const nextMeal = String(row.meal || "").trim().toLowerCase();
-      if (nextMeal) patchDiet.mealType = nextMeal;
-
-      const nextTime = normalizeHHmm(row.time);
-      if (nextTime) patchDiet.recordedTimeLocal = nextTime;
-
-      const d = parseDateKey(row.date);
-      if (d) patchDiet.date = d;
-
-      const kcal = Number(row.totalCalories);
-      if (Number.isFinite(kcal) && kcal >= 0) patchDiet.calories = kcal;
-
-      if (Object.keys(patchDiet).length) {
-        Object.assign(diet, patchDiet);
-        await diet.save();
-      }
+  if (isDietLogSyncRow && isValidDateKey(dateKey)) {
+    const mealKey = String(row.meal || "").trim().toLowerCase();
+    await reconcileDietSchedulesForDate(req.user.id, dateKey);
+    let refreshed = await ScheduleItem.findById(qid);
+    if (!refreshed && mealKey) {
+      refreshed = await ScheduleItem.findOne({
+        userId: req.user.id,
+        date: dateKey,
+        itemType: "diet",
+        scheduleSource: DIET_LOG_SYNC_SOURCE,
+        meal: mealKey,
+        linkedDietId: null,
+      });
+    }
+    if (refreshed && String(refreshed.userId) === String(req.user.id)) {
+      return res.json(refreshed);
     }
   }
 
