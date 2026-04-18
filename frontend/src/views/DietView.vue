@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
+import VipPromptModal from "../components/common/VipPromptModal.vue";
 import api from "../services/api";
 import { useAuthStore } from "../stores/auth";
 import { useFavorites } from "../services/favorites";
@@ -71,13 +72,12 @@ const PLAN_CATEGORY_BLUEPRINT = {
   },
 };
 
-const PLAN_MEAL_DISTRIBUTION = {
-  hot: { breakfast: 0.25, lunch: 0.35, dinner: 0.3, snack: 0.1 },
-  fat_loss: { breakfast: 0.24, lunch: 0.34, dinner: 0.31, snack: 0.11 },
-  weight_loss: { breakfast: 0.24, lunch: 0.34, dinner: 0.31, snack: 0.11 },
-  muscle_gain: { breakfast: 0.26, lunch: 0.35, dinner: 0.29, snack: 0.1 },
-  high_protein: { breakfast: 0.25, lunch: 0.35, dinner: 0.3, snack: 0.1 },
-  balanced: { breakfast: 0.25, lunch: 0.35, dinner: 0.3, snack: 0.1 },
+/** Meal calorie shares from Daily Intake Target (same for all recipe plans + Record Mode). */
+const RECORD_MODE_MEAL_SHARES = {
+  breakfast: 0.25,
+  lunch: 0.35,
+  dinner: 0.25,
+  snack: 0.15,
 };
 
 function formatDateKey(date) {
@@ -336,6 +336,13 @@ function createEmptyOverview() {
 
 const overview = ref(createEmptyOverview());
 
+/** Same numeric source as Diet overview “Daily Intake Target” (BMR + activity from API). */
+const bmrDailyCalorieTarget = computed(() => {
+  const raw = overview.value?.target?.calories;
+  if (!Number.isFinite(Number(raw))) return 0;
+  return roundToInt(Math.max(0, Number(raw)));
+});
+
 function normalizeOverviewPayload(data) {
   const targetCalories = Math.max(0, roundToOne(data?.target?.calories));
   const targetProtein = Math.max(0, roundToOne(data?.target?.protein));
@@ -424,10 +431,10 @@ const defaultDynamicPlanType = computed(() => {
 });
 const defaultDynamicPlan = computed(() => ({
   id: "default_dynamic",
-  name: "Personalized Daily Plan",
+  name: "Daily Intake Target",
   type: defaultDynamicPlanType.value,
-  description: "Auto-generated from your current weight, target weight, and target days.",
-  dailyCalories: calculatePlanCalories(defaultDynamicPlanType.value),
+  description: "Uses the same daily calorie target as your Diet overview (BMR and activity).",
+  dailyCalories: bmrDailyCalorieTarget.value,
 }));
 const isVipUser = computed(() => auth.vipStatus);
 const selectedPlanFavoriteId = computed(() => (selectedPlan.value ? `diet-plan-${selectedPlan.value.id}` : ""));
@@ -496,7 +503,7 @@ const calorieStatus = computed(() => {
     return {
       key: "normal",
       color: "var(--c4)",
-      hint: "正在加载数据…",
+      hint: "Loading data...",
       extra: "",
     };
   }
@@ -507,7 +514,7 @@ const calorieStatus = computed(() => {
     return {
       key: "danger",
       color: "#be3b3b",
-      hint: `今日摄入已超过目标 ${formatCalories(exceeded)}，不建议再继续高热量饮食。`,
+      hint: `You're over today's target by ${formatCalories(exceeded)}. Go easy on high-calorie foods for the rest of the day.`,
       extra: `(+${formatCalories(exceeded)})`,
     };
   }
@@ -515,14 +522,14 @@ const calorieStatus = computed(() => {
     return {
       key: "warn",
       color: "#d69a1e",
-      hint: "已接近今日摄入上限，注意控制剩余进食量。",
+      hint: "You're close to today's calorie limit—watch what you eat for the rest of the day.",
       extra: "",
     };
   }
   return {
     key: "normal",
     color: "var(--c4)",
-    hint: "你当前摄入在目标范围内 👍",
+    hint: "You're on track for today's target 👍",
     extra: "",
   };
 });
@@ -534,19 +541,19 @@ const donutStyle = computed(() => ({
 const macroCards = computed(() => [
   {
     key: "protein",
-    label: "蛋白质",
+    label: "Protein",
     consumed: Number.isFinite(Number(overview.value.consumed?.protein)) ? roundToOne(overview.value.consumed?.protein) : null,
     target: Number.isFinite(Number(overview.value.target?.protein)) ? roundToOne(overview.value.target?.protein) : null,
   },
   {
     key: "carbs",
-    label: "碳水",
+    label: "Carbohydrates",
     consumed: Number.isFinite(Number(overview.value.consumed?.carbs)) ? roundToOne(overview.value.consumed?.carbs) : null,
     target: Number.isFinite(Number(overview.value.target?.carbs)) ? roundToOne(overview.value.target?.carbs) : null,
   },
   {
     key: "fat",
-    label: "脂肪",
+    label: "Fat",
     consumed: Number.isFinite(Number(overview.value.consumed?.fat)) ? roundToOne(overview.value.consumed?.fat) : null,
     target: Number.isFinite(Number(overview.value.target?.fat)) ? roundToOne(overview.value.target?.fat) : null,
   },
@@ -789,63 +796,24 @@ function estimateGoalDirection() {
   return "maintain";
 }
 
-function estimateGoalDays() {
-  const profileDays = Number(me.value?.targetDays);
-  if (Number.isInteger(profileDays) && profileDays > 0) {
-    return clamp(profileDays, 7, 3650);
-  }
-  const rawDate = me.value?.targetDate || me.value?.goalDate || "";
-  if (rawDate) {
-    const end = new Date(rawDate);
-    if (!Number.isNaN(end.getTime())) {
-      const diff = Math.ceil((end.getTime() - Date.now()) / 86400000);
-      return clamp(diff, 7, 365);
-    }
-  }
-  return 90;
-}
-
-function calculatePlanCalories(planType) {
-  const base = Math.max(1200, roundToOne(overview.value.target?.calories || 0));
-  const direction = estimateGoalDirection();
-  const days = estimateGoalDays();
-  const weightGap = Math.abs(toNumber(me.value?.weight) - toNumber(me.value?.targetWeight));
-  const dailyNeed = weightGap > 0 ? clamp((weightGap * 7700) / Math.max(days, 1), 0, 500) : 0;
-  let planAdjusted = base;
-
-  if (planType === "fat_loss" || planType === "weight_loss") {
-    planAdjusted -= direction === "loss" ? Math.max(120, dailyNeed * 0.7) : 140;
-  } else if (planType === "muscle_gain") {
-    planAdjusted += direction === "gain" ? Math.max(150, dailyNeed * 0.6) : 180;
-  } else if (planType === "high_protein") {
-    planAdjusted += direction === "gain" ? 120 : -30;
-  } else if (planType === "balanced") {
-    planAdjusted += 0;
-  } else {
-    planAdjusted += direction === "gain" ? 90 : direction === "loss" ? -70 : 0;
-  }
-
-  return clamp(roundToInt(planAdjusted), 1200, 3800);
-}
-
 const recommendedSourceMeta = computed(() => {
   if (appliedPlan.value) {
     return {
       source: "applied",
       name: appliedPlan.value.name,
-      tip: `${appliedPlan.value.name} is applied and is currently shown below.`,
+      tip: `${appliedPlan.value.name} is your active recipe source. Daily calories match your profile-based intake target.`,
     };
   }
   return {
     source: "default",
     name: defaultDynamicPlan.value.name,
-    tip: "Personalized daily recommendation based on your current weight, target weight, and target days.",
+    tip: "Based on your daily intake target (BMR and activity). Meals use a 25% / 35% / 25% / 15% split.",
   };
 });
 
 const planCards = computed(() =>
   PLAN_DEFINITIONS.map((plan, idx) => {
-    const dailyCalories = calculatePlanCalories(plan.type);
+    const dailyCalories = bmrDailyCalorieTarget.value;
     return {
       ...plan,
       isLocked: !isVipUser.value && idx >= LOCK_FREE_PLAN_COUNT,
@@ -935,10 +903,21 @@ function createMealRecommendation(mealType, targetCalories, planType, dateKey) {
 }
 
 function buildPlanDetails(planType, dateKey, targetTotalInput) {
-  const distribution = PLAN_MEAL_DISTRIBUTION[planType] || PLAN_MEAL_DISTRIBUTION.balanced;
-  const targetTotal = Math.max(1200, roundToInt(targetTotalInput ?? 0));
+  const targetTotal = Math.max(0, roundToInt(targetTotalInput ?? 0));
+  if (targetTotal <= 0) {
+    return {
+      targetTotal: 0,
+      meals: MEAL_TYPES.map((meal) => ({
+        mealType: meal.value,
+        label: meal.label,
+        targetCalories: 0,
+        items: [],
+      })),
+    };
+  }
   const mealRows = MEAL_TYPES.map((meal) => {
-    const mealTarget = roundToInt(targetTotal * (distribution[meal.value] || 0));
+    const share = RECORD_MODE_MEAL_SHARES[meal.value] ?? 0.25;
+    const mealTarget = roundToInt(targetTotal * share);
     const items = createMealRecommendation(meal.value, mealTarget, planType, dateKey);
     return { mealType: meal.value, label: meal.label, targetCalories: mealTarget, items };
   });
@@ -1042,11 +1021,6 @@ function handlePlanCardClick(plan) {
     return;
   }
   togglePlanCard(plan.id);
-}
-
-function goToVipPage() {
-  showVipUpgradeModal.value = false;
-  router.push("/vip");
 }
 
 function normalizeFocusPlanId(raw) {
@@ -1526,48 +1500,52 @@ watch(
         </div>
       </div>
 
-      <p class="muted">当前日期：{{ selectedDate }}</p>
+      <p class="muted">Current Date: {{ selectedDate }}</p>
 
       <div class="overview-grid">
         <article class="overview-card strong">
-          <span>每日摄入目标</span>
+          <span>Daily Intake Target</span>
           <strong>{{ isOverviewLoading ? "--" : formatCaloriesOrDash(overview.target.calories) }}</strong>
         </article>
         <article class="overview-card">
-          <span>已摄入</span>
+          <span>Consumed</span>
           <strong>{{ isOverviewLoading ? "--" : formatCaloriesOrDash(overview.consumed.calories) }}</strong>
         </article>
         <article class="overview-card">
-          <span>剩余可摄入</span>
+          <span>Remaining Intake</span>
           <strong :class="{ warn: Number.isFinite(Number(overview.remaining.calories)) && overview.remaining.calories < 0 }">
             {{ isOverviewLoading ? "--" : formatCaloriesOrDash(overview.remaining.calories) }}
           </strong>
         </article>
         <article class="overview-card">
-          <span>建议运动消耗</span>
+          <span>Recommended Burn</span>
           <strong>{{ isOverviewLoading ? "--" : formatCaloriesOrDash(overview.target.suggestedWorkoutBurn) }}</strong>
         </article>
       </div>
 
       <div class="chart-row">
         <article class="chart-card">
-          <h3>热量摄入进度</h3>
+          <h3>Calorie Intake Progress</h3>
           <div class="donut" :style="donutStyle">
             <div class="donut-inner">
               <strong>{{ isOverviewLoading || caloriePercent == null ? "--" : `${caloriePercent}%` }}</strong>
-              <span>已摄入占比</span>
+              <span>Intake Ratio</span>
             </div>
           </div>
           <p class="muted">
-            {{ isOverviewLoading ? "-- / -- 千卡" : `${formatCaloriesNumberOrDash(overview.consumed.calories)} / ${formatCaloriesNumberOrDash(overview.target.calories)} 千卡` }}
+            {{
+              isOverviewLoading
+                ? "-- / -- kcal"
+                : `${formatCaloriesNumberOrDash(overview.consumed.calories)} / ${formatCaloriesNumberOrDash(overview.target.calories)} kcal`
+            }}
             <span v-if="!isOverviewLoading && calorieStatus.extra"> {{ calorieStatus.extra }}</span>
           </p>
           <p class="calorie-hint" :data-status="isOverviewLoading ? 'loading' : calorieStatus.key">
-            {{ isOverviewLoading ? "正在加载数据…" : calorieStatus.hint }}
+            {{ isOverviewLoading ? "Loading data..." : calorieStatus.hint }}
           </p>
         </article>
         <article class="chart-card">
-          <h3>营养素摄入</h3>
+          <h3>Nutrient Intake</h3>
           <div v-for="card in macroCards" :key="card.key" class="macro-progress">
             <div class="macro-head">
               <span>{{ card.label }}</span>
@@ -1714,7 +1692,10 @@ watch(
       <section v-if="recordMode === 'recommended'" class="recommended-wrap">
         <p class="muted">{{ recommendedSourceMeta.tip }}</p>
         <p class="muted">
-          Current source: <strong>{{ recommendedSourceMeta.name }}</strong> · {{ formatCaloriesNumber(activeRecommendedPlanDetails.targetTotal) }} kcal/day
+          Daily intake based on your profile · <strong>{{ formatCaloriesNumber(activeRecommendedPlanDetails.targetTotal) }}</strong> kcal/day
+          <template v-if="recommendedSourceMeta.source === 'applied'">
+            · Recipes: <strong>{{ recommendedSourceMeta.name }}</strong>
+          </template>
         </p>
         <div class="recommended-board">
           <section v-for="meal in recommendedModeMeals" :key="meal.mealType" class="meal-board">
@@ -1844,12 +1825,7 @@ watch(
       </div>
     </div>
 
-    <div v-if="showVipUpgradeModal" class="modal-overlay" @click.self="showVipUpgradeModal = false">
-      <div class="modal-content">
-        <p class="vip-modal-title">🔒 VIP only</p>
-        <p class="upgrade-link" @click="goToVipPage">Upgrade to unlock premium recipes</p>
-      </div>
-    </div>
+    <VipPromptModal v-model="showVipUpgradeModal" />
   </main>
 </template>
 
@@ -2890,20 +2866,6 @@ watch(
 
 .retro-confirm-btn:hover {
   filter: brightness(1.03);
-}
-
-.vip-modal-title {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 700;
-  color: #28363d;
-}
-
-.upgrade-link {
-  margin: 8px 0 0;
-  text-decoration: underline;
-  cursor: pointer;
-  color: #3b82f6;
 }
 
 @media (max-width: 1100px) {

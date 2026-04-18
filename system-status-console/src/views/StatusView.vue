@@ -10,6 +10,9 @@ const error = ref("");
 const payload = ref(null);
 const refundActionLoadingId = ref("");
 const refundActionError = ref("");
+const refundRejectModalOpen = ref(false);
+const refundRejectUserId = ref("");
+const refundRejectNote = ref("");
 const forumRows = ref([]);
 const forumLoading = ref(false);
 const forumError = ref("");
@@ -66,7 +69,7 @@ const adoptionRows = computed(() => [
   { label: "Users who created a workout plan", value: n(featureAdoption.value.distinctUsersWithWorkoutPlan) },
   { label: "Users with workout daily check-in data", value: n(featureAdoption.value.distinctUsersWithWorkoutDaily) },
   { label: "Users with an active or completed course enrollment", value: n(featureAdoption.value.distinctUsersWithCourseEnrollment) },
-  { label: "Users who posted on the forum", value: n(featureAdoption.value.distinctUsersWithForumPost) },
+  { label: "Users with at least one visible forum post", value: n(featureAdoption.value.distinctUsersWithForumPost) },
   { label: "Users with at least one favorite", value: n(featureAdoption.value.distinctUsersWithFavorite) },
   { label: "Users with a health / BMI record", value: n(featureAdoption.value.distinctUsersWithHealthRecord) },
 ]);
@@ -152,12 +155,29 @@ async function approveRefund(userId) {
   }
 }
 
-async function rejectRefund(userId) {
+function openRefundRejectModal(userId) {
+  if (!userId || refundActionLoadingId.value) return;
+  refundRejectUserId.value = String(userId);
+  refundRejectNote.value = "";
+  refundRejectModalOpen.value = true;
+}
+
+function closeRefundRejectModal() {
+  refundRejectModalOpen.value = false;
+  refundRejectUserId.value = "";
+  refundRejectNote.value = "";
+}
+
+async function submitRefundReject() {
+  const userId = String(refundRejectUserId.value || "").trim();
   if (!userId || refundActionLoadingId.value) return;
   refundActionLoadingId.value = `reject:${userId}`;
   refundActionError.value = "";
   try {
-    await api.post(`/dashboard/refund-requests/${userId}/reject`);
+    await api.post(`/dashboard/refund-requests/${userId}/reject`, {
+      adminNote: String(refundRejectNote.value || "").trim(),
+    });
+    closeRefundRejectModal();
     await loadSystemStatus();
   } catch (err) {
     refundActionError.value = err?.response?.data?.message || "Failed to reject refund request.";
@@ -382,6 +402,7 @@ onMounted(async () => {
                   <th>Status</th>
                   <th>Reviewed at</th>
                   <th>Reviewed by</th>
+                  <th>Admin note</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -405,6 +426,7 @@ onMounted(async () => {
                   </td>
                   <td class="mono small">{{ formatDateTime(row.refundReviewedAt) }}</td>
                   <td class="mono small">{{ row.refundReviewedBy || "—" }}</td>
+                  <td>{{ row.refundAdminNote || "—" }}</td>
                   <td>
                     <div class="action-row">
                       <button
@@ -421,16 +443,16 @@ onMounted(async () => {
                         type="button"
                         class="btn-bad"
                         :disabled="Boolean(refundActionLoadingId)"
-                        @click="rejectRefund(row.userId)"
+                        @click="openRefundRejectModal(row.userId)"
                       >
-                        {{ refundActionLoadingId === `reject:${row.userId}` ? "Rejecting..." : "Reject" }}
+                        Reject…
                       </button>
                       <span v-if="row.refundStatus !== 'pending'" class="mono small">—</span>
                     </div>
                   </td>
                 </tr>
                 <tr v-if="!refundRows.length">
-                  <td colspan="11" class="empty">No refund requests found</td>
+                  <td colspan="12" class="empty">No refund requests found</td>
                 </tr>
               </tbody>
             </table>
@@ -526,13 +548,20 @@ onMounted(async () => {
         <section class="section two-col">
           <div class="card">
             <h2 class="section-title">Forum Overview</h2>
+            <p class="hint">
+              Visible metrics match the user Forum feed (<code>GET /forum/posts</code>). The moderation table lists the same
+              live posts (plus <code>removed</code> rows for review), excluding legacy seed titles no longer shown in the app.
+            </p>
             <ul class="rows">
-              <li><span>Distinct post authors</span><strong>{{ n(forumOverview.distinctAuthors) }}</strong></li>
-              <li><span>Total posts</span><strong>{{ n(forumOverview.postsTotal) }}</strong></li>
-              <li><span>Posts today</span><strong>{{ n(forumOverview.postsToday) }}</strong></li>
-              <li><span>Total likes</span><strong>{{ n(forumOverview.likesTotal) }}</strong></li>
-              <li><span>Total comments</span><strong>{{ n(forumOverview.commentsTotal) }}</strong></li>
-              <li><span>Interactions (likes + comments)</span><strong>{{ n(forumOverview.totalInteractions) }}</strong></li>
+              <li><span>Distinct post authors (visible posts)</span><strong>{{ n(forumOverview.distinctAuthors) }}</strong></li>
+              <li>
+                <span>Visible posts (user Forum feed)</span><strong>{{ n(forumOverview.postsVisible ?? forumOverview.postsTotal) }}</strong>
+              </li>
+              <li><span>Posts today (visible)</span><strong>{{ n(forumOverview.postsToday) }}</strong></li>
+              <li><span>Removed posts (moderation)</span><strong>{{ n(forumOverview.postsRemoved) }}</strong></li>
+              <li><span>Total likes (visible posts)</span><strong>{{ n(forumOverview.likesTotal) }}</strong></li>
+              <li><span>Total comments (visible posts)</span><strong>{{ n(forumOverview.commentsTotal) }}</strong></li>
+              <li><span>Interactions (likes + comments, visible)</span><strong>{{ n(forumOverview.totalInteractions) }}</strong></li>
             </ul>
           </div>
           <div class="card">
@@ -625,6 +654,25 @@ onMounted(async () => {
       </template>
     </section>
   </main>
+
+  <div v-if="refundRejectModalOpen" class="modal-backdrop" @click.self="closeRefundRejectModal">
+    <section class="modal-card" role="dialog" aria-modal="true" aria-label="Reject refund request">
+      <h3>Reject refund request</h3>
+      <p class="hint">Optional note for the user (shown on their VIP page).</p>
+      <textarea v-model="refundRejectNote" rows="4" placeholder="Reason for rejection (optional)…" />
+      <div class="action-row modal-actions">
+        <button type="button" class="btn-plain" @click="closeRefundRejectModal" :disabled="Boolean(refundActionLoadingId)">Cancel</button>
+        <button
+          type="button"
+          class="btn-bad"
+          :disabled="Boolean(refundActionLoadingId)"
+          @click="submitRefundReject"
+        >
+          {{ refundActionLoadingId && String(refundActionLoadingId).startsWith("reject:") ? "Rejecting..." : "Confirm reject" }}
+        </button>
+      </div>
+    </section>
+  </div>
 
   <div v-if="warningModalOpen" class="modal-backdrop" @click.self="closeWarningModal">
     <section class="modal-card" role="dialog" aria-modal="true" aria-label="Add warning">

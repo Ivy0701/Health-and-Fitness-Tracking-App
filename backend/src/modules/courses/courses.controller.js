@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const asyncHandler = require("../../utils/asyncHandler");
 const Course = require("../../models/Course");
 const EnrolledCourse = require("../../models/EnrolledCourse");
@@ -8,6 +9,7 @@ const Workout = require("../../models/Workout");
 const User = require("../../models/User");
 const { buildCourseExercises, summarizeCourseExercises } = require("../../utils/courseSession");
 const { applyMetBurnsToExercises } = require("../../utils/workoutCaloriesBurn");
+const courseSchedulePlacement = require("../../utils/courseSchedulePlacement");
 
 function defaultExercisesPreview({ title, category }) {
   const text = String(title || "").toLowerCase();
@@ -127,13 +129,52 @@ const detail = asyncHandler(async (req, res) => {
 });
 
 const listEnrolled = asyncHandler(async (req, res) => {
+  const today = toDateKey(new Date());
   const rows = await EnrolledCourse.find({
     user_id: req.user.id,
     status: { $in: ["active", "completed"] },
   })
     .populate("course_id")
-    .sort({ enrolled_at: -1 });
-  res.json(rows);
+    .sort({ enrolled_at: -1 })
+    .lean();
+
+  const courseIds = [...new Set(rows.map((r) => String(r?.course_id?._id || r?.course_id || "")).filter((id) => mongoose.isValidObjectId(id)))].map(
+    (id) => new mongoose.Types.ObjectId(id)
+  );
+  const firstByCourse = new Map();
+  if (courseIds.length) {
+    const sched = await ScheduleItem.find({
+      userId: req.user.id,
+      courseId: { $in: courseIds },
+      date: { $gte: today },
+      is_completed: { $ne: true },
+    })
+      .sort({ date: 1, time: 1 })
+      .lean();
+    for (const s of sched) {
+      const k = String(s.courseId || "");
+      if (k && !firstByCourse.has(k)) firstByCourse.set(k, s);
+    }
+  }
+
+  const out = rows.map((row) => {
+    const cid = String(row?.course_id?._id || row?.course_id || "");
+    const next = cid ? firstByCourse.get(cid) : null;
+    let next_schedule = null;
+    if (next && next.date && next.time) {
+      const dur = Math.max(1, Number(next.durationMinutes) || 30);
+      next_schedule = {
+        date: String(next.date).slice(0, 10),
+        startTime: String(next.time).slice(0, 5),
+        endTime: courseSchedulePlacement.endTimeHHmm(next.time, dur),
+        durationMinutes: dur,
+        scheduleItemId: String(next._id || ""),
+      };
+    }
+    return { ...row, next_schedule };
+  });
+
+  res.json(out);
 });
 
 const enroll = asyncHandler(async (req, res) => {
@@ -178,6 +219,210 @@ const enroll = asyncHandler(async (req, res) => {
     status: "active",
   });
   res.status(201).json(row);
+});
+
+/**
+ * Enroll (if needed) and create schedule rows with conflict resolution.
+ * Single outcome: success + optional reschedule info, or failure with no enrollment side-effects for new users.
+ */
+const enrollAndSchedule = asyncHandler(async (req, res) => {
+  const { course_id } = req.body;
+  if (!course_id) return res.status(400).json({ success: false, message: "course_id is required" });
+  const course = await Course.findById(course_id).lean();
+  if (!course) return res.status(404).json({ success: false, message: "Course not found" });
+  if (course.isPremium && !(await isVipUser(req.user.id))) {
+    return res.status(403).json({ success: false, message: "This course is for VIP members only." });
+  }
+
+  const today = toDateKey(new Date());
+  const durationDays = Math.max(1, Number(course.duration_days) || 7);
+  const endDateKey = courseSchedulePlacement.addDaysToDateKey(today, durationDays - 1);
+  const maxDayShift = Math.max(14, durationDays * 2);
+
+  const hasFutureIncomplete = async (cid) =>
+    ScheduleItem.exists({
+      userId: req.user.id,
+      courseId: cid,
+      date: { $gte: today },
+      is_completed: { $ne: true },
+    });
+
+  const existing = await EnrolledCourse.findOne({ user_id: req.user.id, course_id }).exec();
+
+  if (existing && existing.status === "active" && (await hasFutureIncomplete(course._id))) {
+    const sessions = await ScheduleItem.find({
+      userId: req.user.id,
+      courseId: course._id,
+      date: { $gte: today },
+      is_completed: { $ne: true },
+    })
+      .sort({ date: 1, time: 1 })
+      .lean();
+    const next = sessions[0];
+    let nextSession = null;
+    if (next?.date && next?.time) {
+      const dur = Math.max(1, Number(next.durationMinutes) || 30);
+      nextSession = {
+        date: String(next.date).slice(0, 10),
+        startTime: String(next.time).slice(0, 5),
+        endTime: courseSchedulePlacement.endTimeHHmm(next.time, dur),
+      };
+    }
+    return res.status(200).json({
+      success: true,
+      scheduled: true,
+      rescheduled: false,
+      alreadyScheduled: true,
+      message: "This course is already on your schedule.",
+      enrollment: existing.toObject ? existing.toObject() : existing,
+      sessions: sessions.map((s) => ({
+        date: String(s.date).slice(0, 10),
+        startTime: String(s.time).slice(0, 5),
+        endTime: courseSchedulePlacement.endTimeHHmm(s.time, Math.max(1, Number(s.durationMinutes) || 30)),
+        scheduleItemId: String(s._id),
+      })),
+      nextSession,
+    });
+  }
+
+  const sessionsTpl = courseSchedulePlacement.expandCourseSessionsInRange(course, today, endDateKey);
+  if (!sessionsTpl.length) {
+    return res.status(400).json({
+      success: false,
+      scheduled: false,
+      rescheduled: false,
+      message: "This course has no weekly time slots configured. It cannot be placed on your schedule.",
+    });
+  }
+
+  const lastTplDate = sessionsTpl[sessionsTpl.length - 1]?.date || today;
+  const rangeEnd = courseSchedulePlacement.addDaysToDateKey(lastTplDate, maxDayShift);
+  const existingAll = await ScheduleItem.find({
+    userId: req.user.id,
+    date: { $gte: today, $lte: rangeEnd },
+  }).lean();
+
+  const resolved = courseSchedulePlacement.resolveAllCourseSessions(sessionsTpl, existingAll, { maxDayShift });
+  if (!resolved.ok) {
+    return res.status(400).json({
+      success: false,
+      scheduled: false,
+      rescheduled: false,
+      message: "No available time slot was found for this course. Please adjust your schedule and try again.",
+      code: "no_slot",
+    });
+  }
+
+  let enrollment = existing;
+  const createdNewEnrollment = !existing;
+  try {
+    if (!existing) {
+      enrollment = await EnrolledCourse.create({
+        user_id: req.user.id,
+        course_id,
+        enrolled_at: new Date(),
+        start_date: today,
+        current_day: 1,
+        is_completed: false,
+        status: "active",
+      });
+    } else if (existing.status === "completed" || existing.status === "cancelled") {
+      existing.status = "active";
+      existing.is_completed = false;
+      existing.start_date = today;
+      existing.current_day = 1;
+      await existing.save();
+      await CourseDailyProgress.deleteMany({ user_id: req.user.id, enrolled_course_id: existing._id });
+      await ScheduleSkip.deleteMany({ userId: req.user.id, courseId: course_id });
+      enrollment = existing;
+    } else if (existing.status === "active") {
+      enrollment = existing;
+    } else {
+      return res.status(409).json({
+        success: false,
+        message: "Unable to update enrollment for this course.",
+      });
+    }
+
+    await ScheduleItem.deleteMany({
+      userId: req.user.id,
+      courseId: course._id,
+      date: { $gte: today },
+      is_completed: { $ne: true },
+    });
+
+    const docs = resolved.placements.map((p) => ({
+      userId: req.user.id,
+      itemType: "course",
+      category: String(course.category || "Course").trim() || "Course",
+      title: p.title,
+      subtitle: p.subtitle,
+      planId: null,
+      date: p.date,
+      time: p.time,
+      note: p.note != null ? String(p.note) : "",
+      courseId: course._id,
+      durationMinutes: Math.max(1, Number(p.durationMinutes) || 30),
+      overlapAccepted: false,
+      planName: "",
+      dietPlanId: "",
+      scheduleSource: "",
+      is_completed: false,
+      completed_at: null,
+    }));
+
+    await ScheduleItem.insertMany(docs);
+    await Promise.all(
+      docs.map((row) =>
+        ScheduleSkip.deleteMany({
+          userId: req.user.id,
+          date: row.date,
+          courseId: course._id,
+        })
+      )
+    );
+
+    const sorted = [...resolved.placements].sort((a, b) => String(a.date).localeCompare(String(b.date)) || String(a.time).localeCompare(String(b.time)));
+    const first = sorted[0];
+    const dur0 = Math.max(1, Number(first?.durationMinutes) || Number(course.duration) || 30);
+    const scheduledSession = first
+      ? {
+          date: first.date,
+          startTime: first.time,
+          endTime: courseSchedulePlacement.endTimeHHmm(first.time, dur0),
+        }
+      : null;
+
+    const payload = {
+      success: true,
+      scheduled: true,
+      rescheduled: Boolean(resolved.anyRescheduled),
+      alreadyScheduled: false,
+      message: resolved.anyRescheduled
+        ? "Course was automatically arranged to another available time slot."
+        : "Course added successfully.",
+      enrollment: enrollment.toObject ? enrollment.toObject() : enrollment,
+      moves: resolved.moves,
+      scheduledSession,
+      sessions: sorted.map((p) => ({
+        date: p.date,
+        startTime: p.time,
+        endTime: courseSchedulePlacement.endTimeHHmm(p.time, Math.max(1, Number(p.durationMinutes) || 30)),
+      })),
+      nextSession: scheduledSession,
+    };
+
+    return res.status(201).json(payload);
+  } catch (err) {
+    if (createdNewEnrollment && enrollment?._id) {
+      try {
+        await EnrolledCourse.deleteOne({ _id: enrollment._id, user_id: req.user.id });
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    throw err;
+  }
 });
 
 const drop = asyncHandler(async (req, res) => {
@@ -329,5 +574,5 @@ const updateProgress = asyncHandler(async (req, res) => {
   res.json(row);
 });
 
-module.exports = { list, create, detail, listEnrolled, enroll, drop, updateProgress };
+module.exports = { list, create, detail, listEnrolled, enroll, enrollAndSchedule, drop, updateProgress };
 

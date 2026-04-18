@@ -1,6 +1,8 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { getClientCaptchaValidation } from "@shared/clientCaptcha.js";
+import { useClientCaptcha } from "@shared/useClientCaptcha.js";
 import { listAdminTestAccounts, signInAdmin } from "../services/adminAuth";
 
 const route = useRoute();
@@ -9,7 +11,10 @@ const router = useRouter();
 const form = reactive({
   identifier: "",
   password: "",
+  verificationCode: "",
 });
+const errors = reactive({ verificationCode: "" });
+const { captchaCode, regenerate: generateCaptcha } = useClientCaptcha();
 const showPassword = ref(false);
 const submitting = ref(false);
 const error = ref("");
@@ -19,11 +24,28 @@ const testAccounts = computed(() => listAdminTestAccounts());
 function autofill(account) {
   form.identifier = account?.email || account?.username || "";
   form.password = account?.password || "";
+  form.verificationCode = "";
+  errors.verificationCode = "";
   error.value = "";
+}
+
+function validateCaptcha() {
+  errors.verificationCode = "";
+  const check = getClientCaptchaValidation(form.verificationCode, captchaCode.value);
+  if (!check.ok) {
+    errors.verificationCode = check.message;
+  }
+  if (check.shouldRegenerate) {
+    generateCaptcha();
+  }
+  return check.ok;
 }
 
 async function submitLogin() {
   if (submitting.value) return;
+  error.value = "";
+  if (!validateCaptcha()) return;
+
   const identifier = String(form.identifier || "").trim();
   const password = String(form.password || "");
   if (!identifier || !password) {
@@ -36,6 +58,7 @@ async function submitLogin() {
     const result = signInAdmin({ identifier, password });
     if (!result.ok) {
       error.value = result.message || "Sign in failed.";
+      generateCaptcha();
       return;
     }
     const redirect = String(route.query.redirect || "").trim();
@@ -78,6 +101,26 @@ async function submitLogin() {
             </button>
           </div>
         </label>
+
+        <div class="field captcha-field">
+          <span class="field-label" id="admin-verification-label">Verification Code</span>
+          <div class="captcha-row">
+            <input
+              id="adminVerificationCode"
+              v-model="form.verificationCode"
+              type="text"
+              placeholder="Enter code"
+              maxlength="4"
+              autocomplete="off"
+              aria-labelledby="admin-verification-label"
+            />
+            <button type="button" class="captcha-box" @click="generateCaptcha" title="Refresh code">
+              {{ captchaCode }}
+            </button>
+          </div>
+          <p class="helper">Click the code box to refresh.</p>
+          <p v-if="errors.verificationCode" class="field-error">{{ errors.verificationCode }}</p>
+        </div>
 
         <button class="sign-btn" type="submit" :disabled="submitting">
           {{ submitting ? "Signing in..." : "Sign In" }}
@@ -194,8 +237,59 @@ input:focus {
 
 .error-msg {
   margin: 12px 0 0;
-  color: #9b1c1c;
+  color: #b42318;
+  background: #fdecec;
+  border: 1px solid #f5c2c0;
+  border-radius: 8px;
+  padding: 8px;
   font-size: 0.85rem;
+}
+
+.captcha-field {
+  display: grid;
+  gap: 4px;
+}
+
+.field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #355f52;
+}
+
+.helper {
+  margin: 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.field-error {
+  margin: 0;
+  font-size: 12px;
+  color: #c0392b;
+}
+
+.captcha-row {
+  display: grid;
+  grid-template-columns: 1fr 112px;
+  gap: 10px;
+  align-items: center;
+}
+
+.captcha-row input {
+  height: 42px;
+  box-sizing: border-box;
+}
+
+.captcha-box {
+  border: 1px solid #c8dbd7;
+  border-radius: 10px;
+  background: #f4f8f7;
+  color: #2f4858;
+  height: 42px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  cursor: pointer;
+  font-size: 0.92rem;
 }
 
 .test-accounts {

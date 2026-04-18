@@ -1,3 +1,65 @@
+<script setup>
+/** Public landing: module cards link to login (same routes as post-auth navbar). */
+const landingModules = [
+  {
+    key: "dashboard",
+    theme: "dashboard",
+    icon: "📊",
+    title: "Dashboard",
+    desc: "Track your daily progress and key stats.",
+  },
+  {
+    key: "courses",
+    theme: "courses",
+    icon: "📚",
+    title: "Courses",
+    desc: "Browse and join structured training programs.",
+  },
+  {
+    key: "workout",
+    theme: "workout",
+    icon: "💪",
+    title: "Workout",
+    desc: "Log workouts and monitor performance.",
+  },
+  {
+    key: "diet",
+    theme: "diet",
+    icon: "🥗",
+    title: "Diet",
+    desc: "Manage calorie intake and nutrition.",
+  },
+  {
+    key: "schedule",
+    theme: "schedule",
+    icon: "📅",
+    title: "Schedule",
+    desc: "Plan and organize your fitness routine.",
+  },
+  {
+    key: "profile",
+    theme: "profile",
+    icon: "👤",
+    title: "Profile",
+    desc: "Manage your personal data and fitness goals.",
+  },
+  {
+    key: "favorites",
+    theme: "favorites",
+    icon: "⭐",
+    title: "Favorites",
+    desc: "Save and quickly access your preferred content.",
+  },
+  {
+    key: "forum",
+    theme: "forum",
+    icon: "💬",
+    title: "Forum",
+    desc: "Share experiences and interact with the community.",
+  },
+];
+</script>
+
 <template>
   <main class="page landing-page">
     <div class="landing-bg" aria-hidden="true">
@@ -25,34 +87,19 @@
 
       <section class="features-section">
         <div class="features-grid">
-          <article class="feature-card feature-card--dashboard">
+          <router-link
+            v-for="mod in landingModules"
+            :key="mod.key"
+            to="/login"
+            class="feature-card"
+            :class="`feature-card--${mod.theme}`"
+          >
             <div class="feature-head">
-              <span class="feature-icon-wrap" aria-hidden="true"><span class="feature-icon">📊</span></span>
-              <div class="feature-title">Dashboard overview</div>
+              <span class="feature-icon-wrap" aria-hidden="true"><span class="feature-icon">{{ mod.icon }}</span></span>
+              <div class="feature-title">{{ mod.title }}</div>
             </div>
-            <p class="feature-desc">Track your daily progress and key stats.</p>
-          </article>
-          <article class="feature-card feature-card--workout">
-            <div class="feature-head">
-              <span class="feature-icon-wrap" aria-hidden="true"><span class="feature-icon">💪</span></span>
-              <div class="feature-title">Workout records</div>
-            </div>
-            <p class="feature-desc">Log workouts and monitor performance.</p>
-          </article>
-          <article class="feature-card feature-card--diet">
-            <div class="feature-head">
-              <span class="feature-icon-wrap" aria-hidden="true"><span class="feature-icon">🥗</span></span>
-              <div class="feature-title">Diet tracking</div>
-            </div>
-            <p class="feature-desc">Manage calorie intake and nutrition.</p>
-          </article>
-          <article class="feature-card feature-card--schedule">
-            <div class="feature-head">
-              <span class="feature-icon-wrap" aria-hidden="true"><span class="feature-icon">🗓</span></span>
-              <div class="feature-title">Smart schedule</div>
-            </div>
-            <p class="feature-desc">Plan and organize your fitness routine.</p>
-          </article>
+            <p class="feature-desc">{{ mod.desc }}</p>
+          </router-link>
         </div>
       </section>
     </div>
@@ -127,7 +174,7 @@
   position: relative;
   z-index: 1;
   width: 100%;
-  max-width: 920px;
+  max-width: 1120px;
   margin: 0 auto;
   display: grid;
   gap: 22px;
@@ -291,6 +338,9 @@
 
 .feature-card {
   margin: 0;
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
   transition:
     transform 0.22s ease,
     box-shadow 0.22s ease,
@@ -317,12 +367,25 @@
     0 16px 36px rgba(52, 139, 147, 0.08);
 }
 
+.feature-card:focus-visible {
+  outline: 2px solid rgba(52, 139, 147, 0.65);
+  outline-offset: 2px;
+}
+
 .feature-card--dashboard {
   border-top: 3px solid rgba(139, 120, 198, 0.55);
 }
 .feature-card--dashboard .feature-icon-wrap {
   background: linear-gradient(145deg, rgba(232, 224, 255, 0.95), rgba(210, 196, 250, 0.45));
   border-color: rgba(180, 160, 230, 0.35);
+}
+
+.feature-card--courses {
+  border-top: 3px solid rgba(52, 120, 168, 0.6);
+}
+.feature-card--courses .feature-icon-wrap {
+  background: linear-gradient(145deg, rgba(220, 236, 255, 0.95), rgba(160, 200, 240, 0.45));
+  border-color: rgba(120, 170, 220, 0.4);
 }
 
 .feature-card--workout {
@@ -347,6 +410,30 @@
 .feature-card--schedule .feature-icon-wrap {
   background: linear-gradient(145deg, rgba(220, 244, 244, 0.95), rgba(160, 220, 218, 0.45));
   border-color: rgba(100, 190, 188, 0.4);
+}
+
+.feature-card--profile {
+  border-top: 3px solid rgba(100, 140, 160, 0.55);
+}
+.feature-card--profile .feature-icon-wrap {
+  background: linear-gradient(145deg, rgba(230, 240, 245, 0.95), rgba(180, 210, 220, 0.4));
+  border-color: rgba(120, 170, 190, 0.4);
+}
+
+.feature-card--favorites {
+  border-top: 3px solid rgba(210, 170, 80, 0.65);
+}
+.feature-card--favorites .feature-icon-wrap {
+  background: linear-gradient(145deg, rgba(255, 248, 220, 0.95), rgba(255, 220, 140, 0.45));
+  border-color: rgba(230, 190, 100, 0.45);
+}
+
+.feature-card--forum {
+  border-top: 3px solid rgba(90, 150, 140, 0.6);
+}
+.feature-card--forum .feature-icon-wrap {
+  background: linear-gradient(145deg, rgba(224, 248, 242, 0.95), rgba(140, 220, 200, 0.4));
+  border-color: rgba(72, 180, 160, 0.4);
 }
 
 .feature-head {

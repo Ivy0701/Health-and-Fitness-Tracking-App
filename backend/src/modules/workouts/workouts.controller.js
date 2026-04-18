@@ -7,6 +7,7 @@ const EnrolledCourse = require("../../models/EnrolledCourse");
 const CourseDailyProgress = require("../../models/CourseDailyProgress");
 const ScheduleItem = require("../../models/ScheduleItem");
 const scheduleTime = require("../../utils/scheduleTime");
+const courseSchedulePlacement = require("../../utils/courseSchedulePlacement");
 const ScheduleSkip = require("../../models/ScheduleSkip");
 const Workout = require("../../models/Workout");
 const { buildCourseExercises, summarizeCourseExercises } = require("../../utils/courseSession");
@@ -240,6 +241,8 @@ const getTodayPlan = asyncHandler(async (req, res) => {
     completed_at: item.completed_at || null,
   }));
 
+  const targetWeekdayMon0 = (targetDate.getDay() + 6) % 7;
+
   const rawCourseTasks = enrolledCourses
     .map((enrolled) => {
       const durationDays = Number(enrolled?.course_id?.duration_days) || 0;
@@ -255,7 +258,7 @@ const getTodayPlan = asyncHandler(async (req, res) => {
         duration_days: durationDays,
         duration_minutes: Number(enrolled.course_id?.duration || 30),
         time:
-          enrolled.course_id?.weeklySlots?.find((slot) => Number(slot?.weekday) === targetDate.getDay())?.startTime ||
+          enrolled.course_id?.weeklySlots?.find((slot) => Number(slot?.weekday) === targetWeekdayMon0)?.startTime ||
           "08:00",
         day,
       };
@@ -358,12 +361,16 @@ const getTodayPlan = asyncHandler(async (req, res) => {
     for (const doc of missingCourseDocs) {
       const dur = Math.max(1, Number(doc.durationMinutes) || 30);
       let timeStr = String(doc.time || "08:00").slice(0, 5);
-      const cand = { date, time: timeStr, durationMinutes: dur, itemType: "course", title: doc.title };
-      if (scheduleTime.hasScheduleConflict(cand, accC, null)) {
-        const slot = scheduleTime.findNextAvailableTimeSlot(date, dur, accC, { itemType: "course" });
-        if (!slot) continue;
-        timeStr = slot;
-      }
+      const planned = {
+        date,
+        time: timeStr,
+        durationMinutes: dur,
+        itemType: "course",
+        title: doc.title,
+      };
+      const placement = courseSchedulePlacement.resolveCourseSessionPlacement(planned, accC, { maxDayShift: 0 });
+      if (!placement || placement.date !== date) continue;
+      timeStr = placement.time;
       const row = { ...doc, time: timeStr, overlapAccepted: false };
       toInsertCourse.push(row);
       accC.push({ ...row, _id: new mongoose.Types.ObjectId() });
@@ -389,6 +396,9 @@ const getTodayPlan = asyncHandler(async (req, res) => {
     const rawExercises = Array.isArray(progress?.exercises) ? progress.exercises : [];
     const exercisesWithBurn = applyMetBurnsToExercises(rawExercises, courseCategory, user?.weight);
     const summary = summarizeCourseExercises(exercisesWithBurn);
+    const schedDur = Math.max(1, Number(linkedItem?.durationMinutes) || Number(item.duration_minutes) || 30);
+    const schedTime = linkedItem?.time ? String(linkedItem.time).slice(0, 5) : "";
+    const schedEnd = schedTime ? courseSchedulePlacement.endTimeHHmm(schedTime, schedDur) : "";
     return {
       schedule_item_id: linkedItem?._id || null,
       enrolled_course_id: item.enrolled_course_id,
@@ -399,6 +409,9 @@ const getTodayPlan = asyncHandler(async (req, res) => {
       day: item.day,
       duration_days: item.duration_days,
       duration_per_day: item.duration_minutes,
+      schedule_date: date,
+      schedule_start_time: schedTime || null,
+      schedule_end_time: schedEnd || null,
       exercises: exercisesWithBurn,
       status: progress?.status || (progress?.is_completed ? "completed" : "not_started"),
       total_exercises: summary.total_exercises,

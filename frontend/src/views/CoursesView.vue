@@ -2,11 +2,16 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
+import VipPromptModal from "../components/common/VipPromptModal.vue";
 import api from "../services/api";
 import { useAuthStore } from "../stores/auth";
 import { useFavorites } from "../services/favorites";
-import { dropCourseEnrollment as dropCourseEnrollmentApi, enrollCourse as enrollCourseApi, fetchCourses, fetchEnrolledCourses } from "../services/courses";
-import { expandCourseToPlannedItemsInRange } from "../utils/weekSchedule";
+import {
+  dropCourseEnrollment as dropCourseEnrollmentApi,
+  enrollCourseAndSchedule,
+  fetchCourses,
+  fetchEnrolledCourses,
+} from "../services/courses";
 
 const router = useRouter();
 const route = useRoute();
@@ -19,6 +24,9 @@ const state = ref({ error: "" });
 const removingPlanIds = ref(new Set());
 const planActionNotice = ref("");
 const activeModalCourseId = ref("");
+const showVipPromptModal = ref(false);
+/** Result dialog for auto-reschedule or hard failures (replaces misleading static conflict banner). */
+const scheduleOutcomeModal = ref(null);
 
 function dateKey(date = new Date()) {
   const y = date.getFullYear();
@@ -127,6 +135,11 @@ const activePlans = computed(() => {
       if (!title) return null;
       const startDate = String(row?.start_date || dateKey(new Date())).slice(0, 10);
       const currentDay = computeCourseDay(startDate, totalDays);
+      const ns = row?.next_schedule;
+      const nextSessionLine =
+        ns?.date && ns?.startTime
+          ? `Next session: ${ns.date} ${ns.startTime}${ns.endTime ? ` - ${ns.endTime}` : ""}`
+          : "";
       return {
         id: `course-${row._id || row.id}`,
         type: "course",
@@ -137,7 +150,8 @@ const activePlans = computed(() => {
         startDate,
         endDate: endDateByDuration(startDate, totalDays),
         courseId: String(row?.course_id?._id || row?.course_id || ""),
-        focusDate: row?.start_date || dateKey(new Date()),
+        focusDate: ns?.date || String(row?.start_date || dateKey(new Date())).slice(0, 10),
+        nextSessionLine,
         enrolledRow: row,
       };
     })
@@ -146,6 +160,32 @@ const activePlans = computed(() => {
 
 const activeCourseIds = computed(() => new Set(activePlans.value.map((row) => String(row.courseId || ""))));
 const activeModalCourse = computed(() => visibleCourses.value.find((course) => String(course.id) === String(activeModalCourseId.value)) || null);
+
+const activeModalEnrollment = computed(() => {
+  const id = String(activeModalCourseId.value || "");
+  if (!id) return null;
+  return (enrolledCourseRows.value || []).find(
+    (r) => String(r?.course_id?._id || r?.course_id || "") === id && r.status === "active"
+  );
+});
+
+const WEEKDAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function formatWeeklySuggested(course) {
+  const slots = course?.weeklySlots || [];
+  if (!Array.isArray(slots) || !slots.length) return "";
+  return slots
+    .map((s) => {
+      const d = WEEKDAY_SHORT[Number(s.weekday)] || "?";
+      const t = String(s.startTime || "").slice(0, 5);
+      return `${d} ${t}`;
+    })
+    .join(", ");
+}
+
+function closeScheduleOutcomeModal() {
+  scheduleOutcomeModal.value = null;
+}
 
 function difficultyStars(value) {
   const n = Math.max(1, Math.min(5, Number(value || 1)));
@@ -184,56 +224,63 @@ async function ensureCourseScheduled(row) {
   const today = dateKey(new Date());
   const exists = schedules.some((it) => String(it.courseId || "") === String(row.courseId) && String(it.date || "") >= today);
   if (exists) return;
-  const end = new Date(`${today}T00:00:00`);
-  end.setDate(end.getDate() + Math.max(1, Number(pickedCourse.durationDays || pickedCourse.duration_days || 7)) - 1);
-  const sessions = expandCourseToPlannedItemsInRange(pickedCourse, today, dateKey(end));
-  const items = sessions.map((s, idx) => ({
-    title: s.title,
-    itemType: "course",
-    subtitle: `Plan Day ${idx + 1}`,
-    date: s.date,
-    time: s.time,
-    note: s.note,
-    category: pickedCourse.category || "Course",
-    courseId: pickedCourse.id || pickedCourse._id,
-    durationMinutes: s.durationMinutes,
-    overlapAccepted: true,
-  }));
-  if (items.length) await api.post("/schedules/batch", { userId: me.id, items });
+  const { data } = await api.post("/courses/enroll-and-schedule", { course_id: row.courseId });
+  if (!data?.success && !data?.alreadyScheduled) {
+    throw new Error(data?.message || "Failed to sync course schedule.");
+  }
 }
 
 async function enrollPlan(course) {
   state.value.error = "";
   planActionNotice.value = "";
+  scheduleOutcomeModal.value = null;
   try {
     if (course?.isVipOnly && !auth.vipStatus) {
-      state.value.error = "This is a VIP course. Upgrade to add it to your plans.";
+      showVipPromptModal.value = true;
       return;
     }
-    await enrollCourseApi(course.id || course._id);
-    const today = dateKey(new Date());
-    const end = new Date(`${today}T00:00:00`);
-    end.setDate(end.getDate() + Math.max(1, Number(course.durationDays || course.duration_days || 7)) - 1);
-    const sessions = expandCourseToPlannedItemsInRange(course, today, dateKey(end));
-    const me = await api.get("/users/me").then((r) => r.data);
-    const items = sessions.map((s, idx) => ({
-      title: s.title,
-      itemType: "course",
-      subtitle: `Plan Day ${idx + 1}`,
-      date: s.date,
-      time: s.time,
-      note: s.note,
-      category: course.category || "Course",
-      courseId: course.id || course._id,
-      durationMinutes: s.durationMinutes,
-      overlapAccepted: true,
-    }));
-    if (items.length) await api.post("/schedules/batch", { userId: me.id, items });
+    const data = await enrollCourseAndSchedule(course.id || course._id);
+    if (!data?.success && !data?.alreadyScheduled) {
+      const msg = data?.message || "Failed to add course to My Plans.";
+      state.value.error = msg;
+      scheduleOutcomeModal.value = {
+        kind: "error",
+        title: "Could not schedule course",
+        body: msg,
+        detailLines: [],
+      };
+      return;
+    }
     await refreshEnrolled();
-    planActionNotice.value = `"${course.title}" added to My Plans.`;
+    if (data.alreadyScheduled) {
+      planActionNotice.value = `"${course.title}" is already on your schedule.`;
+    } else {
+      planActionNotice.value = `"${course.title}" added to My Plans.`;
+    }
+    if (data.rescheduled) {
+      const ns = data.nextSession || data.scheduledSession;
+      const detailLines = [];
+      if (ns?.date && ns?.startTime) {
+        detailLines.push(`New time: ${ns.date} ${ns.startTime}${ns.endTime ? ` - ${ns.endTime}` : ""}`);
+      }
+      scheduleOutcomeModal.value = {
+        kind: "rescheduled",
+        title: "Schedule Conflict Resolved",
+        body:
+          "This course overlaps with an existing schedule item. We have automatically arranged it to another available time slot.",
+        detailLines,
+      };
+    }
     activeModalCourseId.value = String(course.id || course._id || "");
   } catch (e) {
-    state.value.error = e?.response?.data?.message || "Failed to add course to My Plans.";
+    const msg = e?.response?.data?.message || e?.message || "Failed to add course to My Plans.";
+    state.value.error = msg;
+    scheduleOutcomeModal.value = {
+      kind: "error",
+      title: "Could not schedule course",
+      body: msg,
+      detailLines: [],
+    };
   }
 }
 
@@ -274,8 +321,12 @@ function isCourseActive(course) {
 }
 
 function openCourseModal(course) {
-  activeModalCourseId.value = String(course?.id || course?._id || "");
   state.value.error = "";
+  if (course?.isVipOnly && !auth.vipStatus) {
+    showVipPromptModal.value = true;
+    return;
+  }
+  activeModalCourseId.value = String(course?.id || course?._id || "");
 }
 
 function closeCourseModal() {
@@ -285,7 +336,8 @@ function closeCourseModal() {
 async function handleModalPrimaryAction(course) {
   if (!course) return;
   if (course.isVipOnly && !auth.vipStatus) {
-    router.push("/vip");
+    closeCourseModal();
+    showVipPromptModal.value = true;
     return;
   }
   if (isCourseActive(course)) {
@@ -301,6 +353,13 @@ async function focusCourseFromQuery() {
   if (!focusId) return;
   const target = visibleCourses.value.find((course) => String(course.id || course._id || "") === focusId);
   if (!target) return;
+  if (target.isVipOnly && !auth.vipStatus) {
+    showVipPromptModal.value = true;
+    await nextTick();
+    const el = document.querySelector(`[data-course-id="${String(target.id || target._id || "")}"]`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
   activeModalCourseId.value = String(target.id || target._id || "");
   await nextTick();
   const el = document.querySelector(`[data-course-id="${String(target.id || target._id || "")}"]`);
@@ -322,6 +381,7 @@ watch(
 
 <template>
   <AppNavbar />
+  <VipPromptModal v-model="showVipPromptModal" />
   <main class="page courses-page">
     <h2 class="title">Courses</h2>
     <p class="page-subtitle">Browse all available training programs and choose a plan that suits your goal.</p>
@@ -330,7 +390,7 @@ watch(
       <h3 class="section-title">My Active Plans</h3>
       <p class="section-subtitle">Your ongoing long-term plans.</p>
       <p v-if="planActionNotice" class="ok-msg">{{ planActionNotice }}</p>
-      <p v-if="state.error" class="error">{{ state.error }}</p>
+      <p v-if="state.error" class="error" role="alert">{{ state.error }}</p>
       <div v-if="activePlans.length" class="active-plans-grid compact-active-grid">
         <article v-for="row in activePlans" :key="row.id" class="active-plan-card">
           <div class="active-card-content">
@@ -339,6 +399,7 @@ watch(
             <span class="badge status-badge">{{ row.status }}</span>
             <p class="meta-line">Start: {{ row.startDate }}</p>
             <p class="meta-line">End: {{ row.endDate }}</p>
+            <p v-if="row.nextSessionLine" class="meta-line next-session-line">{{ row.nextSessionLine }}</p>
           </div>
           <div class="row-actions">
             <button type="button" class="btn-primary" @click="router.push('/workout')">Go to Workout</button>
@@ -390,7 +451,9 @@ watch(
 
     <section class="panel section-block">
       <h3 class="section-title">VIP Courses</h3>
-      <p class="section-subtitle">Columns by difficulty: 1★ easiest through 5★ hardest. Click a course to open details.</p>
+      <p class="section-subtitle">
+        Columns by difficulty: 1★ easiest through 5★ hardest. VIP members can open full details; other users see a short upgrade prompt.
+      </p>
       <div class="difficulty-board vip-board">
         <section v-for="col in vipColumns" :key="`vip-${col.difficulty}`" class="difficulty-column vip-column">
           <div class="difficulty-head">
@@ -434,8 +497,15 @@ watch(
         <div class="modal-stats">
           <p class="meta-line">Category: {{ activeModalCourse.category }}</p>
           <p class="meta-line">Difficulty: {{ difficultyStars(activeModalCourse.difficulty) }}</p>
-          <p class="meta-line">Duration: {{ activeModalCourse.durationDays }} days</p>
-          <p class="meta-line">Minutes/day: {{ activeModalCourse.minutesPerDay }} min</p>
+          <p class="meta-line">Plan length: {{ activeModalCourse.durationDays }} days</p>
+          <p class="meta-line">Default session duration: {{ activeModalCourse.minutesPerDay }} min</p>
+          <p v-if="formatWeeklySuggested(activeModalCourse)" class="meta-line">
+            Suggested time (from course): {{ formatWeeklySuggested(activeModalCourse) }}
+          </p>
+          <p v-if="isCourseActive(activeModalCourse) && activeModalEnrollment?.next_schedule" class="meta-line">
+            Your scheduled time: {{ activeModalEnrollment.next_schedule.date }} {{ activeModalEnrollment.next_schedule.startTime }} -
+            {{ activeModalEnrollment.next_schedule.endTime }}
+          </p>
           <p class="meta-line">Target: {{ activeModalCourse.targetUsers }}</p>
         </div>
         <section class="modal-preview">
@@ -449,15 +519,6 @@ watch(
             {{ isCourseFavorited(activeModalCourse) ? "Remove Favorite" : "Add to Favorites" }}
           </button>
           <button
-            v-if="activeModalCourse.isVipOnly && !auth.vipStatus"
-            type="button"
-            class="btn-primary"
-            @click="router.push('/vip')"
-          >
-            Upgrade to VIP
-          </button>
-          <button
-            v-else
             type="button"
             class="btn-primary"
             :disabled="removingPlanIds.has(`course-${activeModalCourse.id}`)"
@@ -465,7 +526,31 @@ watch(
           >
             {{ isCourseActive(activeModalCourse) ? "Remove from My Plans" : "Add to My Plans" }}
           </button>
-          <p v-if="activeModalCourse.isVipOnly && !auth.vipStatus" class="hint">VIP Only. You can preview details, but only VIP users can add this course.</p>
+        </div>
+      </article>
+    </div>
+
+    <div
+      v-if="scheduleOutcomeModal"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="schedule-outcome-title"
+      @click.self="closeScheduleOutcomeModal"
+    >
+      <article class="course-modal schedule-outcome-modal">
+        <div class="modal-head">
+          <div class="modal-main">
+            <h3 id="schedule-outcome-title">{{ scheduleOutcomeModal.title }}</h3>
+            <p class="section-subtitle modal-subtitle">{{ scheduleOutcomeModal.body }}</p>
+            <ul v-if="scheduleOutcomeModal.detailLines?.length" class="outcome-detail-list">
+              <li v-for="(line, i) in scheduleOutcomeModal.detailLines" :key="i">{{ line }}</li>
+            </ul>
+          </div>
+          <button type="button" class="modal-close" aria-label="Close" @click="closeScheduleOutcomeModal">×</button>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn-primary" @click="closeScheduleOutcomeModal">OK</button>
         </div>
       </article>
     </div>
@@ -604,6 +689,19 @@ watch(
   color: #486170;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+.next-session-line {
+  font-weight: 600;
+  color: #1f3b42;
+}
+.outcome-detail-list {
+  margin: 10px 0 0;
+  padding-left: 1.1rem;
+  color: #2f4858;
+  font-size: 14px;
+}
+.schedule-outcome-modal {
+  max-width: 420px;
 }
 .pill,
 .badge {

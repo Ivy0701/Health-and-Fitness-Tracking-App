@@ -1,6 +1,8 @@
 <script setup>
-import { onMounted, reactive, ref } from "vue";
+import { reactive } from "vue";
 import { useRouter } from "vue-router";
+import { getClientCaptchaValidation } from "@shared/clientCaptcha.js";
+import { useClientCaptcha } from "@shared/useClientCaptcha.js";
 import { useAuthStore } from "../stores/auth";
 
 const auth = useAuthStore();
@@ -8,24 +10,17 @@ const router = useRouter();
 const form = reactive({ email: "", password: "", verificationCode: "" });
 const state = reactive({ error: "" });
 const errors = reactive({ email: "", password: "", verificationCode: "" });
-const captchaCode = ref("");
+const { captchaCode, regenerate: generateCaptcha } = useClientCaptcha();
 
 const testAccounts = [
   { name: "Test User 1", email: "test1@example.com", password: "Test1234" },
   { name: "Test User 2", email: "test2@example.com", password: "Test5678" }
 ];
 
-function generateCaptcha() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  captchaCode.value = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-}
-
 function fillTestAccount(account) {
   form.email = account.email;
   form.password = account.password;
 }
-
-onMounted(generateCaptcha);
 
 function clearErrors() {
   errors.email = "";
@@ -38,7 +33,7 @@ function validateForm() {
   let ok = true;
   const email = String(form.email || "").trim();
   const password = String(form.password || "");
-  const code = String(form.verificationCode || "").trim().toUpperCase();
+  const captchaCheck = getClientCaptchaValidation(form.verificationCode, captchaCode.value);
 
   if (!email) {
     errors.email = "Email is required.";
@@ -56,15 +51,12 @@ function validateForm() {
     ok = false;
   }
 
-  if (!code) {
-    errors.verificationCode = "Verification code is required.";
-    ok = false;
-  } else if (code !== captchaCode.value) {
-    errors.verificationCode = "Incorrect verification code.";
+  if (!captchaCheck.ok) {
+    errors.verificationCode = captchaCheck.message;
     ok = false;
   }
 
-  if (!ok && code !== captchaCode.value) {
+  if (captchaCheck.shouldRegenerate) {
     generateCaptcha();
   }
   return ok;

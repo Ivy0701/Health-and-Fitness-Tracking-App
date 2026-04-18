@@ -2,6 +2,8 @@ const asyncHandler = require("../../utils/asyncHandler");
 const ForumPost = require("../../models/ForumPost");
 const User = require("../../models/User");
 const Notification = require("../../models/Notification");
+const { isLegacyDemoForumTitle } = require("../../utils/forumLegacyDemoTitles");
+const { forumPostsUserVisibleFilter } = require("../../utils/forumUserVisibleFilter");
 
 const LEGACY_TAG_TO_EN = {
   饮食: "diet",
@@ -71,7 +73,7 @@ async function createPostNotification({ receiverUserId, actorUserId, type, messa
 }
 
 const list = asyncHandler(async (req, res) => {
-  const rows = await ForumPost.find({ status: { $ne: "removed" } }).sort({ createdAt: -1 });
+  const rows = await ForumPost.find(forumPostsUserVisibleFilter()).sort({ createdAt: -1 });
   res.json(rows.map((row) => serializePost(row, req.user.id)));
 });
 
@@ -94,6 +96,7 @@ const detail = asyncHandler(async (req, res) => {
   const row = await ForumPost.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Post not found" });
   if (String(row.status || "normal") === "removed") return res.status(404).json({ message: "Post not found" });
+  if (isLegacyDemoForumTitle(row?.title)) return res.status(404).json({ message: "Post not found" });
   res.json(serializePost(row, req.user.id));
 });
 
@@ -101,6 +104,7 @@ const toggleLike = asyncHandler(async (req, res) => {
   const row = await ForumPost.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Post not found" });
   if (String(row.status || "normal") === "removed") return res.status(404).json({ message: "Post not found" });
+  if (isLegacyDemoForumTitle(row?.title)) return res.status(404).json({ message: "Post not found" });
 
   const userId = String(req.user.id);
   const likedBy = Array.isArray(row.likedBy) ? row.likedBy.map((id) => String(id)) : [];
@@ -135,6 +139,7 @@ const addComment = asyncHandler(async (req, res) => {
   const row = await ForumPost.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Post not found" });
   if (String(row.status || "normal") === "removed") return res.status(404).json({ message: "Post not found" });
+  if (isLegacyDemoForumTitle(row?.title)) return res.status(404).json({ message: "Post not found" });
 
   const user = await User.findById(req.user.id).select("username").lean();
   let parentComment = null;
@@ -181,6 +186,7 @@ const updateComment = asyncHandler(async (req, res) => {
   const row = await ForumPost.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Post not found" });
   if (String(row.status || "normal") === "removed") return res.status(404).json({ message: "Post not found" });
+  if (isLegacyDemoForumTitle(row?.title)) return res.status(404).json({ message: "Post not found" });
 
   const comment = row.comments.id(req.params.commentId);
   if (!comment) return res.status(404).json({ message: "Comment not found" });
@@ -198,6 +204,7 @@ const deleteComment = asyncHandler(async (req, res) => {
   const row = await ForumPost.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Post not found" });
   if (String(row.status || "normal") === "removed") return res.status(404).json({ message: "Post not found" });
+  if (isLegacyDemoForumTitle(row?.title)) return res.status(404).json({ message: "Post not found" });
 
   const comment = row.comments.id(req.params.commentId);
   if (!comment) return res.status(404).json({ message: "Comment not found" });
@@ -220,6 +227,7 @@ const deleteComment = asyncHandler(async (req, res) => {
 const remove = asyncHandler(async (req, res) => {
   const row = await ForumPost.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Post not found" });
+  if (isLegacyDemoForumTitle(row?.title)) return res.status(404).json({ message: "Post not found" });
   if (String(row.userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
   await row.deleteOne();
   res.json({ success: true });

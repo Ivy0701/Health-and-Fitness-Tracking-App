@@ -13,6 +13,7 @@ const EnrolledCourse = require("../../models/EnrolledCourse");
 const Favorite = require("../../models/Favorite");
 const Course = require("../../models/Course");
 const { calculateWorkoutCaloriesBurned, resolveWeightKg } = require("../../utils/workoutCaloriesBurn");
+const { forumPostsUserVisibleFilter, forumPostsModerationListFilter } = require("../../utils/forumUserVisibleFilter");
 const REFUND_STATUSES = ["pending", "approved", "rejected"];
 const ACTIVE_VIP_PLANS = ["monthly", "yearly"];
 
@@ -30,6 +31,7 @@ function toRefundRow(user) {
     refundRequestedAt: user?.refundRequestedAt || null,
     refundReviewedAt: user?.refundReviewedAt || null,
     refundReviewedBy: user?.refundReviewedBy || "",
+    refundAdminNote: user?.refundAdminNote || "",
     isVip: Boolean(user?.vip_status || user?.isVip),
   };
 }
@@ -307,6 +309,7 @@ const getSystemStatus = asyncHandler(async (req, res) => {
   const dayStart = new Date(now);
   dayStart.setHours(0, 0, 0, 0);
   const todayDateKey = toLocalDateKey(now);
+  const forumVisible = forumPostsUserVisibleFilter();
   const weekAgo = new Date(now);
   weekAgo.setDate(weekAgo.getDate() - 7);
   const monthAgo = new Date(now);
@@ -343,8 +346,8 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     courseEnrollmentsActiveCompletedRows,
     completedCourseDaysByCard,
     completedCourseExercises,
-    postsTotal,
-    postsToday,
+    postsVisibleCount,
+    postsTodayVisibleCount,
     likesTotalRows,
     commentsTotalRows,
     latestDiet,
@@ -469,10 +472,10 @@ const getSystemStatus = asyncHandler(async (req, res) => {
         },
       },
     ]),
-    ForumPost.countDocuments({ status: { $ne: "removed" } }),
-    ForumPost.countDocuments({ status: { $ne: "removed" }, createdAt: { $gte: dayStart } }),
+    ForumPost.countDocuments(forumVisible),
+    ForumPost.countDocuments({ ...forumVisible, createdAt: { $gte: dayStart } }),
     ForumPost.aggregate([
-      { $match: { status: { $ne: "removed" } } },
+      { $match: forumVisible },
       {
         $group: {
           _id: null,
@@ -481,7 +484,7 @@ const getSystemStatus = asyncHandler(async (req, res) => {
       },
     ]),
     ForumPost.aggregate([
-      { $match: { status: { $ne: "removed" } } },
+      { $match: forumVisible },
       {
         $unwind: { path: "$comments", preserveNullAndEmptyArrays: false },
       },
@@ -494,9 +497,9 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     WorkoutPlan.findOne().sort({ created_at: -1 }).select("created_at").lean(),
     WorkoutDailyStatus.findOne().sort({ updatedAt: -1, createdAt: -1 }).select("updatedAt createdAt").lean(),
     CourseDailyProgress.findOne().sort({ updatedAt: -1, createdAt: -1 }).select("updatedAt createdAt").lean(),
-    ForumPost.findOne({ status: { $ne: "removed" } }).sort({ createdAt: -1, updatedAt: -1 }).select("createdAt updatedAt").lean(),
+    ForumPost.findOne(forumVisible).sort({ createdAt: -1, updatedAt: -1 }).select("createdAt updatedAt").lean(),
     ForumPost.aggregate([
-      { $match: { status: { $ne: "removed" } } },
+      { $match: forumVisible },
       { $unwind: { path: "$comments", preserveNullAndEmptyArrays: false } },
       { $sort: { "comments.createdAt": -1 } },
       { $limit: 1 },
@@ -582,7 +585,7 @@ const getSystemStatus = asyncHandler(async (req, res) => {
       },
     ]),
     Favorite.countDocuments(),
-    ForumPost.distinct("userId", { status: { $ne: "removed" } }),
+    ForumPost.distinct("userId", forumVisible),
     Workout.distinct("userId"),
     Diet.distinct("userId"),
     ScheduleItem.distinct("userId", VALID_SCHEDULE_FILTER),
@@ -703,6 +706,8 @@ const getSystemStatus = asyncHandler(async (req, res) => {
   const likesTotal = likesTotalRows[0]?.total || 0;
   const commentsTotal = commentsTotalRows[0]?.total || 0;
   const communityInteractions = likesTotal + commentsTotal;
+
+  const postsRemovedCount = await ForumPost.countDocuments({ status: "removed" });
   const completedWorkoutTasks = Number(completedWorkoutDailyTasks || 0) + Number(completedManualWorkoutScheduleTasks || 0);
   const completedCourseExercisesTotal = Number(completedCourseExercises?.[0]?.completed || 0);
   const totalCourseExercisesTotal = Number(completedCourseExercises?.[0]?.total || 0);
@@ -778,7 +783,9 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     .lean();
   const refundUsers = await User.find({ refundStatus: { $in: REFUND_STATUSES } })
     .sort({ refundRequestedAt: -1, updatedAt: -1 })
-    .select("username email vip_status isVip vipPlan vipSince vipEndAt refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy")
+    .select(
+      "username email vip_status isVip vipPlan vipSince vipEndAt refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy refundAdminNote"
+    )
     .lean();
   const refundRows = (refundUsers || []).map((row) => toRefundRow(row));
   const pendingCount = refundRows.filter((x) => x.refundStatus === "pending").length;
@@ -854,8 +861,12 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     },
     workoutStatusBreakdown,
     forum: {
-      postsToday,
-      postsTotal,
+      /** Same filter as `GET /forum/posts` (visible in the app, excludes removed + legacy demo titles). */
+      postsVisible: postsVisibleCount,
+      postsToday: postsTodayVisibleCount,
+      postsRemoved: postsRemovedCount,
+      /** @deprecated Same as postsVisible; kept for older admin clients. */
+      postsTotal: postsVisibleCount,
       likesTotal,
       commentsTotal,
       totalInteractions: communityInteractions,
@@ -863,8 +874,10 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     },
     // Backward-compatible alias for older clients.
     community: {
-      postsToday,
-      postsTotal,
+      postsToday: postsTodayVisibleCount,
+      postsTotal: postsVisibleCount,
+      postsVisible: postsVisibleCount,
+      postsRemoved: postsRemovedCount,
       likesTotal,
       commentsTotal,
       totalInteractions: communityInteractions,
@@ -884,7 +897,9 @@ const getSystemStatus = asyncHandler(async (req, res) => {
 const listRefundRequests = asyncHandler(async (_req, res) => {
   const users = await User.find({ refundStatus: { $in: REFUND_STATUSES } })
     .sort({ refundRequestedAt: -1, updatedAt: -1 })
-    .select("username email vip_status isVip vipPlan vipSince vipEndAt refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy")
+    .select(
+      "username email vip_status isVip vipPlan vipSince vipEndAt refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy refundAdminNote"
+    )
     .lean();
   const rows = (users || []).map((row) => toRefundRow(row));
   const pendingCount = rows.filter((x) => x.refundStatus === "pending").length;
@@ -907,6 +922,7 @@ const approveRefundRequest = asyncHandler(async (req, res) => {
   if (user.refundStatus !== "pending") return res.status(400).json({ message: "Only pending requests can be approved." });
 
   const reviewer = String(req.body?.reviewedBy || req.user?.email || req.user?.id || "system-status-console").trim();
+  const adminNote = String(req.body?.adminNote || req.body?.refundAdminNote || "").trim().slice(0, 1000);
   const updated = await User.findByIdAndUpdate(
     userId,
     {
@@ -919,11 +935,14 @@ const approveRefundRequest = asyncHandler(async (req, res) => {
         refundStatus: "approved",
         refundReviewedAt: new Date(),
         refundReviewedBy: reviewer,
+        refundAdminNote: adminNote,
       },
     },
     { new: true }
   )
-    .select("username email vip_status isVip vipPlan vipSince vipEndAt refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy")
+    .select(
+      "username email vip_status isVip vipPlan vipSince vipEndAt refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy refundAdminNote"
+    )
     .lean();
 
   res.json(toRefundRow(updated));
@@ -938,6 +957,7 @@ const rejectRefundRequest = asyncHandler(async (req, res) => {
   if (user.refundStatus !== "pending") return res.status(400).json({ message: "Only pending requests can be rejected." });
 
   const reviewer = String(req.body?.reviewedBy || req.user?.email || req.user?.id || "system-status-console").trim();
+  const adminNote = String(req.body?.adminNote || req.body?.rejectionReason || "").trim().slice(0, 1000);
   const updated = await User.findByIdAndUpdate(
     userId,
     {
@@ -945,11 +965,14 @@ const rejectRefundRequest = asyncHandler(async (req, res) => {
         refundStatus: "rejected",
         refundReviewedAt: new Date(),
         refundReviewedBy: reviewer,
+        refundAdminNote: adminNote,
       },
     },
     { new: true }
   )
-    .select("username email vip_status isVip vipPlan vipSince vipEndAt refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy")
+    .select(
+      "username email vip_status isVip vipPlan vipSince vipEndAt refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy refundAdminNote"
+    )
     .lean();
 
   res.json(toRefundRow(updated));
@@ -957,7 +980,7 @@ const rejectRefundRequest = asyncHandler(async (req, res) => {
 
 const listForumModerationPosts = asyncHandler(async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 60, 1), 200);
-  const rows = await ForumPost.find()
+  const rows = await ForumPost.find(forumPostsModerationListFilter())
     .sort({ createdAt: -1, updatedAt: -1 })
     .limit(limit)
     .select("title content authorName tags likedBy comments status warningMessage moderatedAt moderatedBy createdAt")

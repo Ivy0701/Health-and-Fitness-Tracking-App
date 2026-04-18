@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, nextTick } from "vue";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
 import { useAuthStore } from "../stores/auth";
@@ -30,7 +30,13 @@ const refundForm = reactive({
   reason: "",
   note: "",
 });
+/** Shown after successful refund request submit (not persisted). */
+const refundSubmitBanner = ref(false);
+/** One-time modal after admin approves/rejects (dismiss stores fingerprint in localStorage). */
+const refundResultModal = ref(null);
 let paymentSuccessTimer = null;
+let refundPollTimer = null;
+let refundSubmitBannerTimer = null;
 
 const featureRows = [
   { name: "Premium course access", free: "Locked", vip: "Full access" },
@@ -80,7 +86,9 @@ const refundWindowDays = computed(() => {
 });
 const isWithinRefundWindow = computed(() => isVipActive.value && refundWindowDays.value != null && refundWindowDays.value <= 7);
 const hasPendingRefundRequest = computed(() => refundStatus.value === "pending");
-const canRequestRefund = computed(() => isWithinRefundWindow.value && refundStatus.value === "none");
+const canRequestRefund = computed(
+  () => isWithinRefundWindow.value && isVipActive.value && (refundStatus.value === "none" || refundStatus.value === "rejected")
+);
 const canCancelSubscription = computed(() => isVipActive.value && !isWithinRefundWindow.value && !hasPendingRefundRequest.value);
 
 const daysLeft = computed(() => {
@@ -104,12 +112,64 @@ const recommendedPlan = computed(() => {
   return status.value?.vipPlan === "yearly" ? "yearly" : "monthly";
 });
 
-async function load() {
-  loading.value = true;
-  me.value = await api.get("/users/me").then((r) => r.data);
+function refundResultFingerprint(s) {
+  if (!s) return "";
+  const rs = String(s.refundStatus || "none");
+  if (rs !== "approved" && rs !== "rejected") return "";
+  const rev = s.refundReviewedAt ? new Date(s.refundReviewedAt).toISOString() : "";
+  return `${rs}|${rev}|${String(s.refundAdminNote || "").trim()}`;
+}
+
+function considerRefundResultModal() {
+  const uid = String(me.value?.id || "").trim();
+  if (!uid || !status.value) return;
+  const fp = refundResultFingerprint(status.value);
+  if (!fp) return;
+  const key = `vip_refund_result_seen_${uid}`;
+  if (localStorage.getItem(key) === fp) return;
+  const rs = String(status.value.refundStatus || "");
+  if (rs === "approved") {
+    refundResultModal.value = {
+      kind: "approved",
+      title: "Refund request approved",
+      body: "Your refund request has been approved successfully. Your VIP access has been ended as part of this decision.",
+      adminNote: String(status.value.refundAdminNote || "").trim(),
+    };
+  } else if (rs === "rejected") {
+    refundResultModal.value = {
+      kind: "rejected",
+      title: "Refund request rejected",
+      body: "Your refund request has been rejected by the administrator.",
+      adminNote: String(status.value.refundAdminNote || "").trim(),
+    };
+  }
+}
+
+function closeRefundResultModal() {
+  const uid = String(me.value?.id || "").trim();
+  if (uid && status.value) {
+    const fp = refundResultFingerprint(status.value);
+    if (fp) localStorage.setItem(`vip_refund_result_seen_${uid}`, fp);
+  }
+  refundResultModal.value = null;
+}
+
+async function refreshVipStatusOnly() {
+  if (!me.value?.id) return;
   status.value = await api.get(`/vip/status/${me.value.id}`).then((r) => r.data);
   auth.setVipStatus(status.value?.vip_status ?? status.value?.isVip);
-  loading.value = false;
+  await nextTick();
+  considerRefundResultModal();
+}
+
+async function load() {
+  loading.value = true;
+  try {
+    me.value = await api.get("/users/me").then((r) => r.data);
+    await refreshVipStatusOnly();
+  } finally {
+    loading.value = false;
+  }
 }
 
 function openPaymentModal(plan) {
@@ -225,6 +285,11 @@ async function submitRefundRequest() {
   if (!me.value?.id) return;
   refundSubmitting.value = true;
   refundError.value = "";
+  refundSubmitBanner.value = false;
+  if (refundSubmitBannerTimer) {
+    window.clearTimeout(refundSubmitBannerTimer);
+    refundSubmitBannerTimer = null;
+  }
   try {
     status.value = await api
       .post("/vip/refund-request", {
@@ -235,6 +300,11 @@ async function submitRefundRequest() {
       .then((r) => r.data);
     auth.setVipStatus(status.value?.vip_status ?? status.value?.isVip);
     closeRefundRequestModal(true);
+    refundSubmitBanner.value = true;
+    refundSubmitBannerTimer = window.setTimeout(() => {
+      refundSubmitBanner.value = false;
+      refundSubmitBannerTimer = null;
+    }, 12000);
   } catch (error) {
     refundError.value = error?.response?.data?.message || "Failed to submit refund request.";
   } finally {
@@ -242,7 +312,19 @@ async function submitRefundRequest() {
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  load();
+  refundPollTimer = window.setInterval(() => {
+    if (me.value?.id && String(status.value?.refundStatus || "") === "pending") {
+      refreshVipStatusOnly().catch(() => null);
+    }
+  }, 45000);
+});
+
+onBeforeUnmount(() => {
+  if (refundPollTimer) window.clearInterval(refundPollTimer);
+  if (refundSubmitBannerTimer) window.clearTimeout(refundSubmitBannerTimer);
+});
 </script>
 
 <template>
@@ -260,10 +342,40 @@ onMounted(load);
         <p>VIP Since: <strong>{{ vipSinceLabel }}</strong></p>
         <p>Subscription Ends: <strong>{{ vipEndLabel }}</strong></p>
         <p class="hint">{{ statusHint }}</p>
-        <p v-if="refundStatus === 'pending'" class="refund-status pending">Refund Status: Pending Review</p>
-        <p v-if="refundStatus === 'pending'" class="hint">Your refund request is awaiting admin approval.</p>
-        <p v-if="refundStatus === 'approved'" class="refund-status approved">Refund Approved</p>
-        <p v-if="refundStatus === 'rejected'" class="refund-status rejected">Refund Rejected</p>
+
+        <div v-if="refundSubmitBanner" class="refund-banner" role="status">
+          Refund request submitted. Waiting for admin review.
+        </div>
+
+        <div v-if="refundStatus !== 'none'" class="refund-panel panel-lite">
+          <p class="refund-panel-label">Refund status</p>
+          <p v-if="refundStatus === 'pending'" class="refund-status pending">Pending</p>
+          <p v-if="refundStatus === 'pending'" class="hint refund-panel-hint">
+            Your refund request has been submitted and is awaiting admin review.
+          </p>
+          <p v-if="refundStatus === 'approved'" class="refund-status approved">Approved</p>
+          <p v-if="refundStatus === 'approved'" class="hint refund-panel-hint">
+            Refund approved. Your VIP access has been removed. If you have billing questions, contact support.
+          </p>
+          <p v-if="refundStatus === 'approved' && status?.refundReviewedAt" class="muted small-line">
+            Reviewed: {{ formatDate(status.refundReviewedAt) }}
+          </p>
+          <p v-if="refundStatus === 'approved' && status?.refundAdminNote" class="admin-note">
+            <strong>Admin note:</strong> {{ status.refundAdminNote }}
+          </p>
+          <p v-if="refundStatus === 'rejected'" class="refund-status rejected">Rejected</p>
+          <p v-if="refundStatus === 'rejected'" class="hint refund-panel-hint">Your refund request has been rejected.</p>
+          <p v-if="refundStatus === 'rejected' && status?.refundReviewedAt" class="muted small-line">
+            Reviewed: {{ formatDate(status.refundReviewedAt) }}
+          </p>
+          <p v-if="refundStatus === 'rejected' && status?.refundAdminNote" class="admin-note">
+            <strong>Admin note:</strong> {{ status.refundAdminNote }}
+          </p>
+          <p v-if="refundStatus === 'rejected' && !canRequestRefund && isVipActive" class="hint refund-panel-hint">
+            Previous request was rejected. You are outside the 7-day refund window, so a new refund request is not available.
+          </p>
+        </div>
+
         <p v-if="paymentSuccess" class="success-tip">{{ paymentSuccess }}</p>
       </template>
 
@@ -306,11 +418,13 @@ onMounted(load);
         </ul>
       </section>
 
-      <div v-if="canRequestRefund" class="cancel-box">
-        <button class="cancel-btn" @click="openRefundRequestModal">Request Refund</button>
+      <div v-if="canRequestRefund" class="cancel-box refund-actions">
+        <button class="cancel-btn" type="button" @click="openRefundRequestModal">
+          {{ refundStatus === "rejected" ? "Request Refund Again" : "Request Refund" }}
+        </button>
       </div>
-      <div v-if="hasPendingRefundRequest" class="cancel-box">
-        <button class="cancel-btn" type="button" disabled>Pending Review</button>
+      <div v-if="hasPendingRefundRequest" class="cancel-box refund-actions">
+        <button class="cancel-btn cancel-btn--disabled" type="button" disabled aria-disabled="true">Pending Review</button>
       </div>
       <div v-if="canCancelSubscription" class="cancel-box">
         <button class="cancel-btn" @click="openMembershipActionModal">Cancel Subscription</button>
@@ -392,6 +506,19 @@ onMounted(load);
           <button type="button" :disabled="actionSubmitting" @click="confirmMembershipAction">
             {{ actionSubmitting ? "Updating..." : "Confirm Cancel" }}
           </button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="refundResultModal" class="modal-overlay" @click.self="closeRefundResultModal">
+      <section class="modal-card refund-result-card" role="dialog" aria-modal="true" aria-labelledby="refund-result-title">
+        <h3 id="refund-result-title">{{ refundResultModal.title }}</h3>
+        <p class="muted">{{ refundResultModal.body }}</p>
+        <p v-if="refundResultModal.adminNote" class="admin-note-block">
+          <strong>Additional note:</strong> {{ refundResultModal.adminNote }}
+        </p>
+        <div class="modal-actions">
+          <button type="button" @click="closeRefundResultModal">OK</button>
         </div>
       </section>
     </div>
@@ -502,6 +629,58 @@ onMounted(load);
 }
 .refund-status.rejected {
   color: #8f2d2d;
+}
+.refund-panel {
+  margin-top: 12px;
+}
+.refund-panel-label {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #486170;
+}
+.refund-panel-hint {
+  margin-top: 6px;
+}
+.small-line {
+  margin: 6px 0 0;
+  font-size: 13px;
+}
+.admin-note {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #2f4858;
+  line-height: 1.45;
+}
+.admin-note-block {
+  margin: 10px 0 0;
+  padding: 10px;
+  border-radius: 10px;
+  background: #f7f8fb;
+  border: 1px solid #e2e8f0;
+  font-size: 13px;
+  color: #2f4858;
+  line-height: 1.45;
+}
+.refund-banner {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #c8e0da;
+  background: #eef8f4;
+  color: #1f5c4a;
+  font-weight: 600;
+  font-size: 14px;
+}
+.refund-actions {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.cancel-btn--disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
 }
 .text-ok { color: #117a52; }
 .text-muted { color: #486170; }

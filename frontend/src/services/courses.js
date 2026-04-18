@@ -40,6 +40,12 @@ export async function enrollCourse(courseId) {
   return data;
 }
 
+/** Enroll + place schedule rows with server-side conflict resolution (single outcome). */
+export async function enrollCourseAndSchedule(courseId) {
+  const { data } = await api.post("/courses/enroll-and-schedule", { course_id: courseId });
+  return data;
+}
+
 export async function fetchEnrolledCourses() {
   const { data } = await api.get("/courses/enrolled");
   return data;

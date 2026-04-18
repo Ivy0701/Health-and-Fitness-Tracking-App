@@ -413,7 +413,15 @@ function estimateBurnKcal(input) {
 }
 
 function isCompletedTask(task) {
-  return task?.is_completed === true || task?.completed === true || String(task?.status || "").toLowerCase() === "completed";
+  if (task?.is_completed === true || task?.completed === true) return true;
+  const s = String(task?.status || task?.task_status || "").toLowerCase();
+  return s === "completed";
+}
+
+function workoutTaskRemainingSeconds(task) {
+  const raw = task?.remaining_seconds ?? task?.remainingSeconds;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 function isCourseExerciseCompleted(exercise) {
@@ -690,8 +698,11 @@ function startWorkoutTask(task) {
     taskId,
     date: selectedDate.value,
   });
-  const remainingFromSaved =
-    saved && saved.status === "in_progress" && saved.remainingTime > 0 ? saved.remainingTime : Number(task.remaining_seconds || 0);
+  const fromSaved =
+    saved && ["in_progress", "paused"].includes(String(saved.status || "")) && saved.remainingTime > 0
+      ? saved.remainingTime
+      : 0;
+  const remainingFromSaved = fromSaved > 0 ? fromSaved : workoutTaskRemainingSeconds(task);
   router.push({
     path: "/workout/session",
     query: {
@@ -707,7 +718,8 @@ function startWorkoutTask(task) {
   });
 }
 
-function taskRuntimeState(task) {
+/** Saved browser session for this task/date (paused or in-progress timer), excluding completed / empty. */
+function getWorkoutTaskActiveSavedSession(task) {
   const planId = task?.workout_plan_id || task?.id || task?._id;
   const scheduleItemId = task?.schedule_item_id || "";
   const taskId = buildWorkoutSessionTaskId({
@@ -720,8 +732,35 @@ function taskRuntimeState(task) {
     taskId,
     date: selectedDate.value,
   });
-  if (!saved || saved.status !== "in_progress" || saved.remainingTime <= 0) return null;
+  if (!saved) return null;
+  if (String(saved.status) === "completed") return null;
+  if (saved.remainingTime <= 0) return null;
+  const st = String(saved.status || "");
+  if (!["in_progress", "paused"].includes(st)) return null;
   return saved;
+}
+
+/**
+ * For today's plain workout row: drive list button + status line (localStorage first, then API task_status).
+ */
+function workoutSessionUiState(task) {
+  if (!isTodaySelectedDate.value) return "idle";
+  if (isCompletedTask(task)) return "completed";
+
+  const saved = getWorkoutTaskActiveSavedSession(task);
+  if (saved) {
+    const st = String(saved.status || "");
+    if (st === "paused") return "paused";
+    if (st === "in_progress" && saved.isPaused) return "paused";
+    if (st === "in_progress") return "running";
+  }
+
+  const apiTs = String(task?.task_status || task?.status || "").toLowerCase();
+  const rem = workoutTaskRemainingSeconds(task);
+  if (apiTs === "paused" && rem > 0) return "paused";
+  if (apiTs === "in_progress" && rem > 0) return "running";
+
+  return "not_started";
 }
 
 /** Plan-backed tasks have `workout_plan_id`; do not label them Manual just because they have a linked schedule row. */
@@ -792,15 +831,18 @@ async function handleDeleteWorkoutFromDay(task) {
 function workoutActionLabel(task) {
   if (isFutureSelectedDate.value) return "Scheduled";
   if (isPastSelectedDate.value) return isCompletedTask(task) ? "Completed" : "Missed";
-  if (taskRuntimeState(task)) return "Continue Timer";
+  const ui = workoutSessionUiState(task);
+  if (ui === "paused") return "Resume";
+  if (ui === "running") return "Continue Timer";
   return "Start";
 }
 
 function workoutRuntimeStatusLabel(task) {
   if (!isTodaySelectedDate.value || isCompletedTask(task)) return "";
-  const saved = taskRuntimeState(task);
-  if (!saved) return "";
-  return "In Progress";
+  const ui = workoutSessionUiState(task);
+  if (ui === "paused") return "Paused";
+  if (ui === "running") return "In Progress";
+  return "";
 }
 
 function showCannotAddPastDateAlert() {
@@ -1048,6 +1090,9 @@ async function handleDateChange(dateKey) {
               <div class="today-text">
                 <strong>{{ task.title }}</strong>
                 <span>- Day {{ task.day }}/{{ task.duration_days }}</span>
+                <span v-if="task.schedule_start_time" class="task-source course-scheduled-time">
+                  {{ task.schedule_date }} {{ task.schedule_start_time }} - {{ task.schedule_end_time }}
+                </span>
                 <span class="task-source">Course</span>
               </div>
               <div class="task-action">

@@ -7,7 +7,6 @@ import api from "../services/api";
 import { useFavorites } from "../services/favorites";
 import { formatRelativeTime } from "../utils/formatRelativeTime";
 import { useForumCenterStore } from "../stores/forumCenter";
-import { buildForumMockPosts } from "../mocks/forumMockPosts";
 
 const route = useRoute();
 const form = reactive({ title: "", content: "" });
@@ -23,6 +22,8 @@ const focusedPostId = ref("");
 const notificationsOpen = ref(false);
 const createModalOpen = ref(false);
 const saveNotice = ref("");
+const feedError = ref("");
+const postsLoading = ref(true);
 let focusTimer = null;
 
 const forumCenter = useForumCenterStore();
@@ -123,7 +124,7 @@ function isCurrentUserPost(p) {
 }
 
 const visiblePosts = computed(() => {
-  let rows = [...posts.value];
+  let rows = [...posts.value].filter((p) => String(p?.status || "normal").toLowerCase() !== "removed");
   const q = searchQuery.value.trim().toLowerCase();
 
   if (activeFilter.value === "mine") {
@@ -169,8 +170,15 @@ const filteredPosts = computed(() => {
 const emptyFeedMessage = computed(() => {
   if (activeFilter.value === "mine") return "You haven't posted anything yet.";
   if (activeFilter.value === "favorites") return "No saved posts yet.";
-  return "No relevant content found.";
+  if (searchQuery.value.trim()) return "No posts match your search.";
+  if (activeFilter.value === "diet") return "No Diet-tagged posts yet.";
+  if (activeFilter.value === "train") return "No Training-tagged posts yet.";
+  return "No posts match this filter.";
 });
+
+const isDatabaseEmpty = computed(
+  () => !postsLoading.value && !feedError.value && (Array.isArray(posts.value) ? posts.value.length : 0) === 0
+);
 
 const unreadNotificationsCount = computed(() => forumCenter.unreadCount);
 const trimmedTitle = computed(() => String(form.title || "").trim());
@@ -266,18 +274,23 @@ function initializePostState(postRows) {
 }
 
 async function load() {
-  const [user, forumPosts] = await Promise.all([
-    api.get("/users/me").then((r) => r.data),
-    api.get("/forum/posts").then((r) => r.data),
-  ]);
-  forumCenter.setCurrentUser(user);
-  const realPosts = Array.isArray(forumPosts) ? forumPosts : [];
-  const minDisplayCount = 20;
-  const mockPosts = buildForumMockPosts();
-  const remaining = Math.max(0, minDisplayCount - realPosts.length);
-  const mergedPosts = initializePostState([...realPosts, ...mockPosts.slice(0, remaining)]);
-  forumCenter.syncPosts(mergedPosts);
-  syncSavedPostIdsFromFavorites();
+  postsLoading.value = true;
+  feedError.value = "";
+  try {
+    const [user, forumPosts] = await Promise.all([
+      api.get("/users/me").then((r) => r.data),
+      api.get("/forum/posts").then((r) => r.data),
+    ]);
+    forumCenter.setCurrentUser(user);
+    const realPosts = Array.isArray(forumPosts) ? forumPosts : [];
+    forumCenter.syncPosts(initializePostState(realPosts));
+    syncSavedPostIdsFromFavorites();
+  } catch (e) {
+    forumCenter.syncPosts([]);
+    feedError.value = e?.response?.data?.message || e?.message || "Failed to load forum posts.";
+  } finally {
+    postsLoading.value = false;
+  }
 }
 
 async function fetchNotifications() {
@@ -646,7 +659,20 @@ watch(me, (u) => {
     <p v-if="saveNotice" class="save-notice">{{ saveNotice }}</p>
 
     <section class="post-list">
-      <template v-if="filteredPosts.length">
+      <p v-if="postsLoading" class="forum-loading panel">Loading posts…</p>
+      <div v-else-if="feedError" class="forum-feed-error panel" role="alert">
+        <p>{{ feedError }}</p>
+        <button type="button" class="retry-btn" @click="load">Retry</button>
+      </div>
+      <article v-else-if="isDatabaseEmpty" class="post-card empty-post-card empty-post-card--hero" aria-live="polite">
+        <div class="empty-icon" aria-hidden="true">💬</div>
+        <h3 class="empty-state-title">No posts yet</h3>
+        <p class="empty-state-body">
+          There are no real forum posts yet. Create the first post to start the discussion.
+        </p>
+        <button type="button" class="empty-create-btn" @click="openCreateModal">Create post</button>
+      </article>
+      <template v-else-if="filteredPosts.length">
         <article
           v-for="p in filteredPosts"
           :key="p._id"
@@ -768,6 +794,7 @@ watch(me, (u) => {
       <article v-else class="post-card empty-post-card" aria-live="polite">
         <div class="empty-icon" aria-hidden="true">{{ activeFilter === "mine" ? "📝" : "🔎" }}</div>
         <p class="empty-title">{{ emptyFeedMessage }}</p>
+        <button type="button" class="empty-create-btn empty-create-btn--ghost" @click="openCreateModal">Create post</button>
       </article>
     </section>
 
@@ -1227,6 +1254,73 @@ watch(me, (u) => {
   color: #6b7280;
   font-size: 0.95rem;
   font-weight: 500;
+}
+
+.forum-loading {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 18px 16px;
+  text-align: center;
+  color: #486170;
+  font-size: 0.95rem;
+}
+
+.forum-feed-error {
+  grid-column: 1 / -1;
+  padding: 18px 16px;
+  text-align: center;
+  color: #a55858;
+  border-color: #f0c7c7;
+}
+
+.forum-feed-error .retry-btn {
+  margin-top: 12px;
+  padding: 8px 16px;
+  border-radius: 10px;
+  border: 1px solid #d3e1df;
+  background: #eef3f2;
+  color: #2f4858;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.empty-post-card--hero {
+  padding: 32px 22px 28px;
+}
+
+.empty-state-title {
+  margin: 0 0 8px;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--c6, #1f3b42);
+}
+
+.empty-state-body {
+  margin: 0 auto 18px;
+  max-width: 420px;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: #486170;
+}
+
+.empty-create-btn {
+  padding: 10px 20px;
+  border-radius: 10px;
+  border: none;
+  background: linear-gradient(135deg, var(--c5), var(--c6));
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.9rem;
+  cursor: pointer;
+  box-shadow: 0 8px 16px rgb(47 72 88 / 0.18);
+}
+
+.empty-create-btn--ghost {
+  margin-top: 12px;
+  background: #eef3f2;
+  color: #2f4858;
+  border: 1px solid #d3e1df;
+  box-shadow: none;
 }
 
 .post-card {

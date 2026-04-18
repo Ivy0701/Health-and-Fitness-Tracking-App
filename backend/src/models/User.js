@@ -56,6 +56,8 @@ const userSchema = new mongoose.Schema(
     refundRequestedAt: { type: Date, default: null },
     refundReviewedAt: { type: Date, default: null },
     refundReviewedBy: { type: String, trim: true, maxlength: 120, default: "" },
+    /** Admin-only note shown to user when a refund request is rejected (or optional message on approve). */
+    refundAdminNote: { type: String, trim: true, maxlength: 1000, default: "" },
     bodyFat: { type: Number, min: 0, max: 80 },
     bloodPressure: { type: String, trim: true, maxlength: 20 },
     sleepHours: { type: Number, min: 0, max: 24 },

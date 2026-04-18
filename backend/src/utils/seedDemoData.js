@@ -1,5 +1,4 @@
 const Course = require("../models/Course");
-const ForumPost = require("../models/ForumPost");
 const User = require("../models/User");
 const Workout = require("../models/Workout");
 const Diet = require("../models/Diet");
@@ -446,11 +445,10 @@ async function seedDemoData() {
 
   const anyUser = await User.findOne().select("_id username").lean();
   if (anyUser) {
-    const [workoutCount, dietCount, scheduleCount, forumCount] = await Promise.all([
+    const [workoutCount, dietCount, scheduleCount] = await Promise.all([
       Workout.countDocuments({ userId: anyUser._id }),
       Diet.countDocuments({ userId: anyUser._id }),
       ScheduleItem.countDocuments({ userId: anyUser._id }),
-      ForumPost.countDocuments({ userId: anyUser._id }),
     ]);
 
     if (workoutCount === 0) {
@@ -485,28 +483,7 @@ async function seedDemoData() {
         },
       ]);
     }
-    if (forumCount === 0) {
-      await ForumPost.insertMany([
-        {
-          userId: anyUser._id,
-          authorName: anyUser.username,
-          title: "Best post-workout meals?",
-          content: "What meals do you usually eat after evening training?",
-          tags: ["diet"],
-          likeCount: 12,
-          commentCount: 5,
-        },
-        {
-          userId: anyUser._id,
-          authorName: anyUser.username,
-          title: "How to stay consistent?",
-          content: "Share your routine tips for keeping healthy habits during busy weeks.",
-          tags: ["training", "notes"],
-          likeCount: 28,
-          commentCount: 9,
-        },
-      ]);
-    }
+    // Forum: do not seed demo posts — real posts only (see forumLegacyDemoTitles for legacy title filtering).
   }
 }
 

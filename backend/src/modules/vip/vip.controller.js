@@ -26,6 +26,7 @@ function toVipResponse(user) {
     refundRequestedAt: user?.refundRequestedAt || null,
     refundReviewedAt: user?.refundReviewedAt || null,
     refundReviewedBy: user?.refundReviewedBy || "",
+    refundAdminNote: user?.refundAdminNote || "",
   };
 }
 
@@ -38,7 +39,9 @@ const status = asyncHandler(async (req, res) => {
   const userId = req.params.userId;
   if (String(userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
   const user = await User.findById(userId)
-    .select("vip_status isVip vipSince vipEndAt vipPlan refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy")
+    .select(
+      "vip_status isVip vipSince vipEndAt vipPlan refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy refundAdminNote"
+    )
     .lean();
   if (!user) return res.status(404).json({ message: "User not found" });
   res.json(toVipResponse(user));
@@ -83,10 +86,13 @@ const upgrade = asyncHandler(async (req, res) => {
         refundRequestedAt: null,
         refundReviewedAt: null,
         refundReviewedBy: "",
+        refundAdminNote: "",
       },
     },
     { new: true }
-  ).select("vip_status isVip vipSince vipEndAt vipPlan refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy");
+  ).select(
+    "vip_status isVip vipSince vipEndAt vipPlan refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy refundAdminNote"
+  );
 
   res.json(toVipResponse(user.toObject()));
 });
@@ -99,7 +105,9 @@ const cancel = asyncHandler(async (req, res) => {
     uid,
     { $set: { isVip: false, vip_status: false, vipSince: null, vipEndAt: null, vipPlan: "none" } },
     { new: true }
-  ).select("vip_status isVip vipSince vipEndAt vipPlan refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy");
+  ).select(
+    "vip_status isVip vipSince vipEndAt vipPlan refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy refundAdminNote"
+  );
   res.json(toVipResponse(user.toObject()));
 });
 
@@ -112,7 +120,9 @@ const submitRefundRequest = asyncHandler(async (req, res) => {
   if (!refundReason) return res.status(400).json({ message: "Reason for refund is required." });
 
   const user = await User.findById(uid)
-    .select("vip_status isVip vipSince vipEndAt vipPlan refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy")
+    .select(
+      "vip_status isVip vipSince vipEndAt vipPlan refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy refundAdminNote"
+    )
     .lean();
   if (!user) return res.status(404).json({ message: "User not found" });
   const isVip = Boolean(user?.vip_status ?? user?.isVip);
@@ -129,6 +139,12 @@ const submitRefundRequest = asyncHandler(async (req, res) => {
   if (user.refundStatus === "pending") {
     return res.status(400).json({ message: "You already have a pending refund request." });
   }
+  if (user.refundStatus === "approved") {
+    return res.status(400).json({ message: "Your previous refund request was already approved." });
+  }
+  if (user.refundStatus !== "none" && user.refundStatus !== "rejected") {
+    return res.status(400).json({ message: "You cannot submit a refund request in the current state." });
+  }
 
   const updated = await User.findByIdAndUpdate(
     uid,
@@ -140,10 +156,13 @@ const submitRefundRequest = asyncHandler(async (req, res) => {
         refundRequestedAt: new Date(),
         refundReviewedAt: null,
         refundReviewedBy: "",
+        refundAdminNote: "",
       },
     },
     { new: true }
-  ).select("vip_status isVip vipSince vipEndAt vipPlan refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy");
+  ).select(
+    "vip_status isVip vipSince vipEndAt vipPlan refundStatus refundReason refundNote refundRequestedAt refundReviewedAt refundReviewedBy refundAdminNote"
+  );
 
   res.json(toVipResponse(updated.toObject()));
 });
