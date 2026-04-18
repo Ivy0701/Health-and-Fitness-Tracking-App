@@ -34,6 +34,32 @@ function toRefundRow(user) {
   };
 }
 
+function normalizeForumStatus(value) {
+  const key = String(value || "normal").trim().toLowerCase();
+  if (key === "warned" || key === "removed") return key;
+  return "normal";
+}
+
+function toForumModerationRow(row) {
+  const status = normalizeForumStatus(row?.status);
+  return {
+    id: String(row?._id || ""),
+    title: String(row?.title || "").trim(),
+    content: String(row?.content || "").trim(),
+    authorName: String(row?.authorName || "").trim(),
+    tags: Array.isArray(row?.tags) ? row.tags.map((tag) => String(tag || "").trim()).filter(Boolean) : [],
+    likeCount: Array.isArray(row?.likedBy) ? row.likedBy.length : Number(row?.likeCount || 0),
+    commentCount: Array.isArray(row?.comments)
+      ? row.comments.filter((c) => c && String(c.content || "").trim()).length
+      : Number(row?.commentCount || 0),
+    status,
+    warningMessage: String(row?.warningMessage || "").trim(),
+    moderatedAt: row?.moderatedAt || null,
+    moderatedBy: String(row?.moderatedBy || "").trim(),
+    createdAt: row?.createdAt || null,
+  };
+}
+
 const safeIsoDate = (value) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
@@ -443,9 +469,10 @@ const getSystemStatus = asyncHandler(async (req, res) => {
         },
       },
     ]),
-    ForumPost.countDocuments(),
-    ForumPost.countDocuments({ createdAt: { $gte: dayStart } }),
+    ForumPost.countDocuments({ status: { $ne: "removed" } }),
+    ForumPost.countDocuments({ status: { $ne: "removed" }, createdAt: { $gte: dayStart } }),
     ForumPost.aggregate([
+      { $match: { status: { $ne: "removed" } } },
       {
         $group: {
           _id: null,
@@ -454,6 +481,7 @@ const getSystemStatus = asyncHandler(async (req, res) => {
       },
     ]),
     ForumPost.aggregate([
+      { $match: { status: { $ne: "removed" } } },
       {
         $unwind: { path: "$comments", preserveNullAndEmptyArrays: false },
       },
@@ -466,8 +494,9 @@ const getSystemStatus = asyncHandler(async (req, res) => {
     WorkoutPlan.findOne().sort({ created_at: -1 }).select("created_at").lean(),
     WorkoutDailyStatus.findOne().sort({ updatedAt: -1, createdAt: -1 }).select("updatedAt createdAt").lean(),
     CourseDailyProgress.findOne().sort({ updatedAt: -1, createdAt: -1 }).select("updatedAt createdAt").lean(),
-    ForumPost.findOne().sort({ createdAt: -1, updatedAt: -1 }).select("createdAt updatedAt").lean(),
+    ForumPost.findOne({ status: { $ne: "removed" } }).sort({ createdAt: -1, updatedAt: -1 }).select("createdAt updatedAt").lean(),
     ForumPost.aggregate([
+      { $match: { status: { $ne: "removed" } } },
       { $unwind: { path: "$comments", preserveNullAndEmptyArrays: false } },
       { $sort: { "comments.createdAt": -1 } },
       { $limit: 1 },
@@ -553,7 +582,7 @@ const getSystemStatus = asyncHandler(async (req, res) => {
       },
     ]),
     Favorite.countDocuments(),
-    ForumPost.distinct("userId"),
+    ForumPost.distinct("userId", { status: { $ne: "removed" } }),
     Workout.distinct("userId"),
     Diet.distinct("userId"),
     ScheduleItem.distinct("userId", VALID_SCHEDULE_FILTER),
@@ -824,6 +853,15 @@ const getSystemStatus = asyncHandler(async (req, res) => {
       totalCaloriesConsumed: consumedCaloriesTotal,
     },
     workoutStatusBreakdown,
+    forum: {
+      postsToday,
+      postsTotal,
+      likesTotal,
+      commentsTotal,
+      totalInteractions: communityInteractions,
+      distinctAuthors: distinctForumAuthors.length,
+    },
+    // Backward-compatible alias for older clients.
     community: {
       postsToday,
       postsTotal,
@@ -917,4 +955,68 @@ const rejectRefundRequest = asyncHandler(async (req, res) => {
   res.json(toRefundRow(updated));
 });
 
-module.exports = { getDashboard, getSystemStatus, listRefundRequests, approveRefundRequest, rejectRefundRequest };
+const listForumModerationPosts = asyncHandler(async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 60, 1), 200);
+  const rows = await ForumPost.find()
+    .sort({ createdAt: -1, updatedAt: -1 })
+    .limit(limit)
+    .select("title content authorName tags likedBy comments status warningMessage moderatedAt moderatedBy createdAt")
+    .lean();
+  res.json(rows.map((row) => toForumModerationRow(row)));
+});
+
+const addForumWarning = asyncHandler(async (req, res) => {
+  const postId = String(req.params.postId || "").trim();
+  if (!mongoose.Types.ObjectId.isValid(postId)) return res.status(400).json({ message: "Invalid post id." });
+  const warningMessage = String(req.body?.warningMessage || "").trim();
+  if (!warningMessage) return res.status(400).json({ message: "warningMessage is required." });
+
+  const moderator = String(req.body?.moderatedBy || req.user?.email || req.user?.id || "system-status-console").trim();
+  const row = await ForumPost.findById(postId);
+  if (!row) return res.status(404).json({ message: "Post not found." });
+  row.status = "warned";
+  row.warningMessage = warningMessage.slice(0, 500);
+  row.moderatedAt = new Date();
+  row.moderatedBy = moderator;
+  await row.save();
+  res.json(toForumModerationRow(row));
+});
+
+const removeForumWarning = asyncHandler(async (req, res) => {
+  const postId = String(req.params.postId || "").trim();
+  if (!mongoose.Types.ObjectId.isValid(postId)) return res.status(400).json({ message: "Invalid post id." });
+  const moderator = String(req.body?.moderatedBy || req.user?.email || req.user?.id || "system-status-console").trim();
+  const row = await ForumPost.findById(postId);
+  if (!row) return res.status(404).json({ message: "Post not found." });
+  row.status = "normal";
+  row.warningMessage = "";
+  row.moderatedAt = new Date();
+  row.moderatedBy = moderator;
+  await row.save();
+  res.json(toForumModerationRow(row));
+});
+
+const removeForumPost = asyncHandler(async (req, res) => {
+  const postId = String(req.params.postId || "").trim();
+  if (!mongoose.Types.ObjectId.isValid(postId)) return res.status(400).json({ message: "Invalid post id." });
+  const moderator = String(req.body?.moderatedBy || req.user?.email || req.user?.id || "system-status-console").trim();
+  const row = await ForumPost.findById(postId);
+  if (!row) return res.status(404).json({ message: "Post not found." });
+  row.status = "removed";
+  row.moderatedAt = new Date();
+  row.moderatedBy = moderator;
+  await row.save();
+  res.json({ success: true, postId });
+});
+
+module.exports = {
+  getDashboard,
+  getSystemStatus,
+  listRefundRequests,
+  approveRefundRequest,
+  rejectRefundRequest,
+  listForumModerationPosts,
+  addForumWarning,
+  removeForumWarning,
+  removeForumPost,
+};

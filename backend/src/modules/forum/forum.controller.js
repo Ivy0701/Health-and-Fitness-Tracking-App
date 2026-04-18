@@ -11,18 +11,24 @@ const LEGACY_TAG_TO_EN = {
   心得: "notes",
   综合: "general",
 };
-const ALLOWED_TAGS = new Set(["diet", "training", "fat_loss", "recovery", "notes", "general"]);
 
 function toEnglishTag(t) {
   const s = String(t || "").trim();
   return LEGACY_TAG_TO_EN[s] || s;
 }
 
+function sanitizeTagSlug(tag) {
+  return String(tag || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
+}
+
 function normalizeTags(raw) {
   if (!Array.isArray(raw)) return [];
-  const next = [
-    ...new Set(raw.map((t) => toEnglishTag(t)).filter((t) => ALLOWED_TAGS.has(t))),
-  ];
+  const next = [...new Set(raw.map((t) => sanitizeTagSlug(toEnglishTag(t))).filter(Boolean))];
   return next;
 }
 
@@ -41,6 +47,10 @@ function serializePost(row, userId) {
   return {
     ...obj,
     tags: tagsForResponse(obj.tags),
+    status: ["normal", "warned", "removed"].includes(String(obj.status || "")) ? String(obj.status) : "normal",
+    warningMessage: String(obj.warningMessage || "").trim(),
+    moderatedAt: obj.moderatedAt || null,
+    moderatedBy: String(obj.moderatedBy || "").trim(),
     likeCount: likedBy.length,
     commentCount: normalizedComments.length,
     likedByMe: likedBy.some((id) => String(id) === String(userId)),
@@ -61,7 +71,7 @@ async function createPostNotification({ receiverUserId, actorUserId, type, messa
 }
 
 const list = asyncHandler(async (req, res) => {
-  const rows = await ForumPost.find().sort({ createdAt: -1 });
+  const rows = await ForumPost.find({ status: { $ne: "removed" } }).sort({ createdAt: -1 });
   res.json(rows.map((row) => serializePost(row, req.user.id)));
 });
 
@@ -83,12 +93,14 @@ const create = asyncHandler(async (req, res) => {
 const detail = asyncHandler(async (req, res) => {
   const row = await ForumPost.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Post not found" });
+  if (String(row.status || "normal") === "removed") return res.status(404).json({ message: "Post not found" });
   res.json(serializePost(row, req.user.id));
 });
 
 const toggleLike = asyncHandler(async (req, res) => {
   const row = await ForumPost.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Post not found" });
+  if (String(row.status || "normal") === "removed") return res.status(404).json({ message: "Post not found" });
 
   const userId = String(req.user.id);
   const likedBy = Array.isArray(row.likedBy) ? row.likedBy.map((id) => String(id)) : [];
@@ -122,6 +134,7 @@ const addComment = asyncHandler(async (req, res) => {
 
   const row = await ForumPost.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Post not found" });
+  if (String(row.status || "normal") === "removed") return res.status(404).json({ message: "Post not found" });
 
   const user = await User.findById(req.user.id).select("username").lean();
   let parentComment = null;
@@ -167,6 +180,7 @@ const updateComment = asyncHandler(async (req, res) => {
 
   const row = await ForumPost.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Post not found" });
+  if (String(row.status || "normal") === "removed") return res.status(404).json({ message: "Post not found" });
 
   const comment = row.comments.id(req.params.commentId);
   if (!comment) return res.status(404).json({ message: "Comment not found" });
@@ -183,6 +197,7 @@ const updateComment = asyncHandler(async (req, res) => {
 const deleteComment = asyncHandler(async (req, res) => {
   const row = await ForumPost.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Post not found" });
+  if (String(row.status || "normal") === "removed") return res.status(404).json({ message: "Post not found" });
 
   const comment = row.comments.id(req.params.commentId);
   if (!comment) return res.status(404).json({ message: "Comment not found" });

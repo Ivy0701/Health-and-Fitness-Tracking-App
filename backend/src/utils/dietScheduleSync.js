@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Diet = require("../models/Diet");
 const ScheduleItem = require("../models/ScheduleItem");
 const scheduleTime = require("./scheduleTime");
@@ -5,7 +6,7 @@ const scheduleTime = require("./scheduleTime");
 const DIET_LOG_SOURCE = "diet_log_sync";
 const MEAL_TYPES = new Set(["breakfast", "lunch", "dinner", "snack"]);
 
-/** Fixed default start times for diet_log_sync meal blocks (not derived from record timestamps). */
+/** Fixed default start times when a diet record has no recordedTimeLocal yet. */
 const MEAL_DEFAULT_TIME = {
   breakfast: "08:00",
   lunch: "12:30",
@@ -43,114 +44,150 @@ function formatTotalKcalLabel(sum) {
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
-function dietRowsChronological(a, b) {
-  const ta = new Date(a.recordedAt || a.createdAt || 0).getTime();
-  const tb = new Date(b.recordedAt || b.createdAt || 0).getTime();
-  if (ta !== tb) return ta - tb;
-  return String(a._id).localeCompare(String(b._id));
+function normalizeHHmm(raw) {
+  const s = String(raw ?? "").trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return "";
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (!Number.isFinite(h) || !Number.isFinite(min) || h < 0 || h > 23 || min < 0 || min > 59) return "";
+  return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+}
+
+function toObjectId(userId) {
+  const s = String(userId || "").trim();
+  if (!mongoose.Types.ObjectId.isValid(s)) return null;
+  return new mongoose.Types.ObjectId(s);
+}
+
+function dietTitleFromRow(d) {
+  const name = String(d?.foodName || "Diet").trim() || "Diet";
+  const kcal = Number(d?.calories);
+  const k = Number.isFinite(kcal) ? kcal : 0;
+  return `${name} · ${formatTotalKcalLabel(k)} kcal`;
 }
 
 /**
- * Placement time for a **new** diet meal block only: meal-type default, then meal-window / conflict helpers.
- * Does not use Diet record wall-clock times.
+ * One ScheduleItem per Diet document (linkedDietId), scheduleSource=diet_log_sync.
+ * Removes orphan diet_log_sync rows for the calendar day (no matching Diet).
  */
-function resolveNewDietMealBlockTime({ dateKeyStr, mealKey, durationMinutes, dayRows }) {
-  const baseTime = MEAL_DEFAULT_TIME[mealKey] || "12:00";
-  const candidate = {
-    date: dateKeyStr,
-    time: baseTime,
-    durationMinutes,
-    itemType: "diet",
-    title: "Diet",
-    meal: mealKey,
-  };
-  if (!scheduleTime.hasScheduleConflict(candidate, dayRows, null)) {
-    return baseTime;
+async function reconcileDietSchedulesForDate(userId, dateKey) {
+  const uid = toObjectId(userId);
+  const dateKeyStr = String(dateKey || "").trim();
+  if (!uid || !isValidDateKey(dateKeyStr)) return;
+
+  const diets = await Diet.find({ userId: uid, date: dayRangeFromDateKey(dateKeyStr) }).lean();
+  const dietIds = diets.map((d) => d._id).filter(Boolean);
+
+  for (const d of diets) {
+    await upsertDietLogScheduleRow(uid, d, dateKeyStr);
   }
-  const slot = scheduleTime.findSlotForDietMeal(dateKeyStr, dayRows, mealKey, durationMinutes, null);
-  return slot || baseTime;
-}
 
-/**
- * One ScheduleItem per user + calendar date + mealType, backed by real Diet rows only.
- * On updates, `time` is not overwritten so user-edited schedule times persist across record syncs.
- */
-async function syncDietLogScheduleForMeal(userId, dateKey, mealType) {
-  const m = String(mealType || "").toLowerCase();
-  if (!MEAL_TYPES.has(m) || !isValidDateKey(dateKey)) return;
-
-  const dateKeyStr = String(dateKey).trim();
-
-  const rows = (await Diet.find({ userId, mealType: m, date: dayRangeFromDateKey(dateKeyStr) }).lean()).sort(dietRowsChronological);
-
-  const filter = {
-    userId,
+  const filterOrphans = {
+    userId: uid,
     date: dateKeyStr,
     itemType: "diet",
     scheduleSource: DIET_LOG_SOURCE,
-    meal: m,
   };
 
-  if (!rows.length) {
-    await ScheduleItem.deleteMany(filter);
+  if (!dietIds.length) {
+    await ScheduleItem.deleteMany(filterOrphans);
     return;
   }
 
-  const totalCals = rows.reduce((acc, r) => {
-    const c = Number(r.calories);
-    return acc + (Number.isFinite(c) ? c : 0);
-  }, 0);
+  await ScheduleItem.deleteMany({
+    ...filterOrphans,
+    $or: [{ linkedDietId: null }, { linkedDietId: { $nin: dietIds } }],
+  });
+}
 
-  const earliest = rows[0];
-  const mealLabel = formatMealTypeTitleCase(m);
-  const title = `${mealLabel} · ${formatTotalKcalLabel(totalCals)} kcal`;
+async function upsertDietLogScheduleRow(userId, diet, dateKeyStr) {
+  const meal = String(diet.mealType || "").toLowerCase();
+  if (!MEAL_TYPES.has(meal)) return;
+
   const durationMinutes = 15;
+  const timeFromDiet = normalizeHHmm(diet.recordedTimeLocal);
+  const baseTime = timeFromDiet || MEAL_DEFAULT_TIME[meal] || "12:00";
 
-  const existing = await ScheduleItem.find(filter).sort({ createdAt: 1 }).lean();
-  const keepId = existing[0]?._id;
-  if (existing.length > 1) {
-    const extras = existing.slice(1).map((x) => x._id);
-    await ScheduleItem.deleteMany({ _id: { $in: extras } });
-  }
+  const filter = {
+    userId,
+    linkedDietId: diet._id,
+    scheduleSource: DIET_LOG_SOURCE,
+  };
 
+  let existing = await ScheduleItem.findOne(filter).lean();
   const dayRows = await ScheduleItem.find({ userId, date: dateKeyStr }).lean();
 
+  let chosenTime = baseTime;
+  if (!existing) {
+    const candidate = {
+      date: dateKeyStr,
+      time: baseTime,
+      durationMinutes,
+      itemType: "diet",
+      title: "Diet",
+      meal,
+    };
+    if (scheduleTime.hasScheduleConflict(candidate, dayRows, null)) {
+      const slot = scheduleTime.findSlotForDietMeal(dateKeyStr, dayRows, meal, durationMinutes, null);
+      chosenTime = slot || baseTime;
+    }
+  } else {
+    chosenTime = baseTime;
+    const candidate = {
+      date: dateKeyStr,
+      time: chosenTime,
+      durationMinutes,
+      itemType: "diet",
+      title: "Diet",
+      meal,
+    };
+    if (scheduleTime.hasScheduleConflict(candidate, dayRows, String(existing._id))) {
+      const slot = scheduleTime.findSlotForDietMeal(dateKeyStr, dayRows, meal, durationMinutes, String(existing._id));
+      chosenTime = slot || chosenTime;
+    }
+  }
+
   const patch = {
+    userId,
     date: dateKeyStr,
-    title,
-    subtitle: "",
-    meal: m,
+    time: String(chosenTime).slice(0, 5),
+    title: dietTitleFromRow(diet),
+    subtitle: formatMealTypeTitleCase(meal),
+    meal,
     itemType: "diet",
     scheduleSource: DIET_LOG_SOURCE,
-    totalCalories: totalCals,
+    totalCalories: Math.max(0, Number(diet.calories) || 0),
     durationMinutes,
     note: "",
     category: "",
-    planName: "",
-    dietPlanId: "",
+    planName: String(diet.planName || "").trim(),
+    dietPlanId: String(diet.dietPlanId || "").trim(),
     planId: null,
     courseId: null,
-    linkedDietId: earliest._id,
+    linkedDietId: diet._id,
     overlapAccepted: false,
   };
 
-  if (!keepId) {
-    patch.time = resolveNewDietMealBlockTime({
-      dateKeyStr,
-      mealKey: m,
-      durationMinutes,
-      dayRows,
-    });
+  if (existing) {
+    await ScheduleItem.updateOne({ _id: existing._id, userId }, { $set: patch });
+    await Diet.updateOne({ _id: diet._id, userId }, { $set: { scheduleItemId: existing._id } });
+    return;
   }
 
-  if (keepId) {
-    await ScheduleItem.updateOne({ _id: keepId, userId }, { $set: patch });
-  } else {
-    await ScheduleItem.create({ userId, ...patch });
-  }
+  const created = await ScheduleItem.create(patch);
+  await Diet.updateOne({ _id: diet._id, userId }, { $set: { scheduleItemId: created._id } });
+}
+
+/**
+ * @deprecated Prefer reconcileDietSchedulesForDate — kept for backward-compatible imports.
+ */
+async function syncDietLogScheduleForMeal(userId, dateKey) {
+  await reconcileDietSchedulesForDate(userId, dateKey);
 }
 
 module.exports = {
+  reconcileDietSchedulesForDate,
   syncDietLogScheduleForMeal,
   formatDateKeyFromDate,
   dayRangeFromDateKey,

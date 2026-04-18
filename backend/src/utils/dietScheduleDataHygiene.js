@@ -11,9 +11,8 @@ function toObjectId(userId) {
 }
 
 /**
- * Same calendar day + same meal (case-insensitive) should have at most one diet_log_sync row.
- * Default: keeps the oldest by createdAt (then _id). If `keepScheduleItemId` is set and appears in
- * the group, that document is kept (safe for PUT while editing a non-oldest duplicate).
+ * One schedule row per linked Diet record for diet_log_sync.
+ * Dedupe key is linkedDietId (strict); legacy rows without linkedDietId are ignored here.
  * @returns {{ duplicateGroups: number, deletedRows: number }}
  */
 async function dedupeDietLogSyncForUser(userId, options = {}) {
@@ -27,15 +26,14 @@ async function dedupeDietLogSyncForUser(userId, options = {}) {
     itemType: "diet",
     scheduleSource: DIET_LOG_SYNC_SOURCE,
   })
-    .select("_id userId date meal createdAt")
+    .select("_id userId linkedDietId createdAt")
     .lean();
 
   const groups = new Map();
   for (const r of rows) {
-    const d = String(r?.date || "").trim();
-    const m = String(r?.meal || "").toLowerCase();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || !m) continue;
-    const key = `${d}::${m}`;
+    const linkedId = String(r?.linkedDietId || "").trim();
+    if (!linkedId) continue;
+    const key = linkedId;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(r);
   }
@@ -66,7 +64,7 @@ async function dedupeDietLogSyncForUser(userId, options = {}) {
           // eslint-disable-next-line no-console
           console.warn(
             "[dedupeDietLogSync] skip group: keepScheduleItemId not in duplicate group",
-            JSON.stringify({ keepIdStr, groupIds: group.map((g) => String(g._id)), dateMeal: group[0]?.date })
+            JSON.stringify({ keepIdStr, groupIds: group.map((g) => String(g._id)), linkedDietId: String(group[0]?.linkedDietId || "") })
           );
         }
         continue;

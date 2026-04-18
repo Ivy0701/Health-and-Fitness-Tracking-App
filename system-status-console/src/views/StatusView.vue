@@ -10,6 +10,16 @@ const error = ref("");
 const payload = ref(null);
 const refundActionLoadingId = ref("");
 const refundActionError = ref("");
+const forumRows = ref([]);
+const forumLoading = ref(false);
+const forumError = ref("");
+const forumActionLoadingId = ref("");
+const forumNotice = ref("");
+const warningModalOpen = ref(false);
+const warningTargetPost = ref(null);
+const warningMessageInput = ref("");
+const viewPostModalOpen = ref(false);
+const viewPostTarget = ref(null);
 
 function n(v) {
   const x = Number(v);
@@ -23,12 +33,17 @@ const catalog = computed(() => payload.value?.catalog || {});
 const courseEnrollments = computed(() => payload.value?.courseEnrollments || {});
 const featureAdoption = computed(() => payload.value?.featureAdoption || {});
 const featureUsage = computed(() => payload.value?.featureUsage || {});
-const community = computed(() => payload.value?.community || {});
+const forumOverview = computed(() => payload.value?.forum || payload.value?.community || {});
 const systemRuntime = computed(() => payload.value?.systemRuntime || {});
 const workoutStatusBreakdown = computed(() => payload.value?.workoutStatusBreakdown || {});
 const usersPreview12 = computed(() => users.value.preview12 || []);
 const refundRows = computed(() => refundRequests.value.rows || []);
 const adminSession = computed(() => getAdminSession());
+const warningTemplates = [
+  "This post may contain inaccurate information. Please read with caution.",
+  "This nutrition advice is not verified.",
+  "This fitness suggestion should be interpreted with caution.",
+];
 
 function formatDateTime(value) {
   if (!value) return "—";
@@ -110,6 +125,19 @@ async function loadSystemStatus() {
   }
 }
 
+async function loadForumModeration() {
+  forumLoading.value = true;
+  forumError.value = "";
+  try {
+    const res = await api.get("/dashboard/forum-moderation");
+    forumRows.value = Array.isArray(res.data) ? res.data : [];
+  } catch (err) {
+    forumError.value = err?.response?.data?.message || "Failed to load forum moderation data.";
+  } finally {
+    forumLoading.value = false;
+  }
+}
+
 async function approveRefund(userId) {
   if (!userId || refundActionLoadingId.value) return;
   refundActionLoadingId.value = `approve:${userId}`;
@@ -143,7 +171,83 @@ function logout() {
   router.replace("/login");
 }
 
-onMounted(loadSystemStatus);
+function openViewPost(row) {
+  viewPostTarget.value = row || null;
+  viewPostModalOpen.value = true;
+}
+
+function closeViewPost() {
+  viewPostModalOpen.value = false;
+  viewPostTarget.value = null;
+}
+
+function openWarningModal(row) {
+  warningTargetPost.value = row || null;
+  warningMessageInput.value = row?.warningMessage || warningTemplates[0];
+  warningModalOpen.value = true;
+}
+
+function closeWarningModal() {
+  warningModalOpen.value = false;
+  warningTargetPost.value = null;
+  warningMessageInput.value = "";
+}
+
+async function submitWarning() {
+  const postId = String(warningTargetPost.value?.id || "").trim();
+  const warningMessage = String(warningMessageInput.value || "").trim();
+  if (!postId || !warningMessage || forumActionLoadingId.value) return;
+  forumActionLoadingId.value = `warn:${postId}`;
+  forumNotice.value = "";
+  try {
+    await api.post(`/dashboard/forum-moderation/${postId}/warn`, { warningMessage });
+    closeWarningModal();
+    await Promise.all([loadForumModeration(), loadSystemStatus()]);
+    forumNotice.value = "Warning added successfully.";
+  } catch (err) {
+    forumError.value = err?.response?.data?.message || "Failed to add warning.";
+  } finally {
+    forumActionLoadingId.value = "";
+  }
+}
+
+async function removeWarning(row) {
+  const postId = String(row?.id || "").trim();
+  if (!postId || forumActionLoadingId.value) return;
+  forumActionLoadingId.value = `unwarn:${postId}`;
+  forumNotice.value = "";
+  try {
+    await api.post(`/dashboard/forum-moderation/${postId}/remove-warning`);
+    await Promise.all([loadForumModeration(), loadSystemStatus()]);
+    forumNotice.value = "Warning removed.";
+  } catch (err) {
+    forumError.value = err?.response?.data?.message || "Failed to remove warning.";
+  } finally {
+    forumActionLoadingId.value = "";
+  }
+}
+
+async function deletePost(row) {
+  const postId = String(row?.id || "").trim();
+  if (!postId || forumActionLoadingId.value) return;
+  const ok = window.confirm("Are you sure you want to delete this post?");
+  if (!ok) return;
+  forumActionLoadingId.value = `delete:${postId}`;
+  forumNotice.value = "";
+  try {
+    await api.delete(`/dashboard/forum-moderation/${postId}`);
+    await Promise.all([loadForumModeration(), loadSystemStatus()]);
+    forumNotice.value = "Post deleted.";
+  } catch (err) {
+    forumError.value = err?.response?.data?.message || "Failed to delete post.";
+  } finally {
+    forumActionLoadingId.value = "";
+  }
+}
+
+onMounted(async () => {
+  await Promise.all([loadSystemStatus(), loadForumModeration()]);
+});
 </script>
 
 <template>
@@ -158,7 +262,7 @@ onMounted(loadSystemStatus);
     <section class="shell">
       <header class="hero">
         <h1>Platform operations dashboard</h1>
-        <p>User growth, VIP conversion, feature adoption, course enrollments, community engagement, and system health</p>
+        <p>User growth, VIP conversion, feature adoption, course enrollments, forum engagement, and system health</p>
       </header>
 
       <div v-if="loading" class="state-block">Loading…</div>
@@ -421,14 +525,14 @@ onMounted(loadSystemStatus);
 
         <section class="section two-col">
           <div class="card">
-            <h2 class="section-title">Community</h2>
+            <h2 class="section-title">Forum Overview</h2>
             <ul class="rows">
-              <li><span>Distinct post authors</span><strong>{{ n(community.distinctAuthors) }}</strong></li>
-              <li><span>Total posts</span><strong>{{ n(community.postsTotal) }}</strong></li>
-              <li><span>Posts today</span><strong>{{ n(community.postsToday) }}</strong></li>
-              <li><span>Total likes</span><strong>{{ n(community.likesTotal) }}</strong></li>
-              <li><span>Total comments</span><strong>{{ n(community.commentsTotal) }}</strong></li>
-              <li><span>Interactions (likes + comments)</span><strong>{{ n(community.totalInteractions) }}</strong></li>
+              <li><span>Distinct post authors</span><strong>{{ n(forumOverview.distinctAuthors) }}</strong></li>
+              <li><span>Total posts</span><strong>{{ n(forumOverview.postsTotal) }}</strong></li>
+              <li><span>Posts today</span><strong>{{ n(forumOverview.postsToday) }}</strong></li>
+              <li><span>Total likes</span><strong>{{ n(forumOverview.likesTotal) }}</strong></li>
+              <li><span>Total comments</span><strong>{{ n(forumOverview.commentsTotal) }}</strong></li>
+              <li><span>Interactions (likes + comments)</span><strong>{{ n(forumOverview.totalInteractions) }}</strong></li>
             </ul>
           </div>
           <div class="card">
@@ -443,9 +547,123 @@ onMounted(loadSystemStatus);
             </ul>
           </div>
         </section>
+
+        <section class="section">
+          <h2 class="section-title">Forum Moderation</h2>
+          <p class="hint">Review recent posts, add warnings, remove warnings, or delete posts.</p>
+          <p v-if="forumNotice" class="state-block">{{ forumNotice }}</p>
+          <p v-if="forumError" class="state-block error">{{ forumError }}</p>
+          <div v-if="forumLoading" class="state-block">Loading forum posts…</div>
+          <div v-else class="table-wrap forum-table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Post title</th>
+                  <th>Author</th>
+                  <th>Created at</th>
+                  <th>Tags</th>
+                  <th>Likes</th>
+                  <th>Comments</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in forumRows" :key="row.id">
+                  <td>{{ row.title || "Untitled" }}</td>
+                  <td>{{ row.authorName || "—" }}</td>
+                  <td class="mono small">{{ formatDateTime(row.createdAt) }}</td>
+                  <td>
+                    <span v-if="row.tags?.length">{{ row.tags.join(", ") }}</span>
+                    <span v-else>—</span>
+                  </td>
+                  <td>{{ n(row.likeCount) }}</td>
+                  <td>{{ n(row.commentCount) }}</td>
+                  <td>
+                    <span class="badge" :class="{ 'badge-pending': row.status === 'warned', 'badge-bad': row.status === 'removed' }">
+                      {{ row.status || "normal" }}
+                    </span>
+                  </td>
+                  <td>
+                    <div class="action-row action-row-wrap">
+                      <button type="button" class="btn-view" @click="openViewPost(row)">View</button>
+                      <button
+                        type="button"
+                        class="btn-ok"
+                        :disabled="Boolean(forumActionLoadingId) || row.status === 'removed'"
+                        @click="openWarningModal(row)"
+                      >
+                        Add Warning
+                      </button>
+                      <button
+                        v-if="row.status === 'warned'"
+                        type="button"
+                        class="btn-plain"
+                        :disabled="Boolean(forumActionLoadingId)"
+                        @click="removeWarning(row)"
+                      >
+                        Remove Warning
+                      </button>
+                      <button
+                        type="button"
+                        class="btn-bad"
+                        :disabled="Boolean(forumActionLoadingId) || row.status === 'removed'"
+                        @click="deletePost(row)"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+                <tr v-if="!forumRows.length">
+                  <td colspan="8" class="empty">No forum posts found</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </template>
     </section>
   </main>
+
+  <div v-if="warningModalOpen" class="modal-backdrop" @click.self="closeWarningModal">
+    <section class="modal-card" role="dialog" aria-modal="true" aria-label="Add warning">
+      <h3>Add Warning</h3>
+      <p class="hint">Choose a template or edit your own message.</p>
+      <div class="template-row">
+        <button
+          v-for="tpl in warningTemplates"
+          :key="tpl"
+          type="button"
+          class="btn-plain"
+          @click="warningMessageInput = tpl"
+        >
+          {{ tpl }}
+        </button>
+      </div>
+      <textarea v-model="warningMessageInput" rows="4" placeholder="Enter warning message..." />
+      <div class="action-row modal-actions">
+        <button type="button" class="btn-plain" @click="closeWarningModal">Cancel</button>
+        <button type="button" class="btn-ok" :disabled="!warningMessageInput.trim() || Boolean(forumActionLoadingId)" @click="submitWarning">
+          Save Warning
+        </button>
+      </div>
+    </section>
+  </div>
+
+  <div v-if="viewPostModalOpen" class="modal-backdrop" @click.self="closeViewPost">
+    <section class="modal-card" role="dialog" aria-modal="true" aria-label="View post">
+      <h3>{{ viewPostTarget?.title || "Post" }}</h3>
+      <p class="mono small">Author: {{ viewPostTarget?.authorName || "—" }} · {{ formatDateTime(viewPostTarget?.createdAt) }}</p>
+      <p v-if="viewPostTarget?.status === 'warned' && viewPostTarget?.warningMessage" class="warn-text">
+        Warning: {{ viewPostTarget.warningMessage }}
+      </p>
+      <p class="post-body">{{ viewPostTarget?.content || "No content." }}</p>
+      <div class="action-row modal-actions">
+        <button type="button" class="btn-plain" @click="closeViewPost">Close</button>
+      </div>
+    </section>
+  </div>
 </template>
 
 <style scoped>
@@ -689,6 +907,18 @@ onMounted(loadSystemStatus);
   border: 1px solid #ccebd5;
 }
 
+.forum-table-wrap {
+  max-height: 420px;
+  overflow-y: auto;
+  overflow-x: auto;
+}
+
+.forum-table-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
 .data-table {
   width: 100%;
   border-collapse: collapse;
@@ -776,6 +1006,12 @@ onMounted(loadSystemStatus);
   gap: 6px;
 }
 
+.action-row-wrap {
+  flex-wrap: wrap;
+}
+
+.btn-view,
+.btn-plain,
 .btn-ok,
 .btn-bad {
   border-radius: 8px;
@@ -783,6 +1019,17 @@ onMounted(loadSystemStatus);
   padding: 4px 8px;
   font-size: 0.76rem;
   cursor: pointer;
+}
+
+.btn-view {
+  background: #eef5ff;
+  color: #1c4d8f;
+  border-color: #cfe0fb;
+}
+
+.btn-plain {
+  background: #f4f7f6;
+  color: #355f52;
 }
 
 .btn-ok {
@@ -797,9 +1044,67 @@ onMounted(loadSystemStatus);
 }
 
 .btn-ok:disabled,
-.btn-bad:disabled {
+.btn-bad:disabled,
+.btn-view:disabled,
+.btn-plain:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(15, 36, 41, 0.38);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+
+.modal-card {
+  width: min(640px, 100%);
+  background: #fff;
+  border-radius: 14px;
+  border: 1px solid #d8eae2;
+  box-shadow: 0 14px 30px rgba(15, 36, 41, 0.24);
+  padding: 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.template-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.modal-card textarea {
+  width: 100%;
+  border: 1px solid #c8dbd7;
+  border-radius: 10px;
+  padding: 10px;
+  font: inherit;
+}
+
+.modal-actions {
+  justify-content: flex-end;
+}
+
+.warn-text {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #f3d8a0;
+  background: #fff8e6;
+  color: #8a5a00;
+  font-size: 0.82rem;
+}
+
+.post-body {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.45;
+  color: #29443b;
 }
 
 @media (max-width: 768px) {

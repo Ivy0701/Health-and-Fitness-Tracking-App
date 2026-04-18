@@ -8,6 +8,7 @@ import { useFavorites } from "../services/favorites";
 import { formatRelativeTime } from "../utils/formatRelativeTime";
 import { useForumCenterStore } from "../stores/forumCenter";
 import { buildForumMockPosts } from "../mocks/forumMockPosts";
+import { FORUM_TAG_OPTIONS_FROM_DIET } from "../constants/dietPlans";
 
 const route = useRoute();
 const form = reactive({ title: "", content: "" });
@@ -28,24 +29,11 @@ let focusTimer = null;
 const forumCenter = useForumCenterStore();
 const { currentUser: me, posts, notifications, savedPostIds } = storeToRefs(forumCenter);
 
-/** Tag keys stored in API (English slugs). */
-const TAG_OPTIONS = [
-  { value: "diet", label: "Diet" },
-  { value: "training", label: "Training" },
-  { value: "fat_loss", label: "Fat loss" },
-  { value: "recovery", label: "Recovery" },
-  { value: "notes", label: "Notes" },
-];
+/** Tag options are derived from Diet recipe metadata. */
+const TAG_OPTIONS = FORUM_TAG_OPTIONS_FROM_DIET;
 const selectedTags = ref([]);
 
-const TAG_LABEL_MAP = {
-  diet: "Diet",
-  training: "Training",
-  fat_loss: "Fat loss",
-  recovery: "Recovery",
-  notes: "Notes",
-  general: "General",
-};
+const TAG_LABEL_MAP = TAG_OPTIONS.reduce((map, item) => ({ ...map, [item.value]: item.label }), { general: "General" });
 
 /** Content filters only — “My Posts” lives in the header next to notifications. */
 const FILTER_CHIPS = [
@@ -81,19 +69,18 @@ function displayNickname(name) {
 }
 
 function tagLabel(tag) {
-  return TAG_LABEL_MAP[tag] || tag;
+  const known = TAG_LABEL_MAP[tag];
+  if (known) return known;
+  return String(tag || "")
+    .split("_")
+    .filter(Boolean)
+    .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
+    .join(" ");
 }
 
 function tagClass(tag) {
-  const map = {
-    diet: "tag-diet",
-    training: "tag-train",
-    fat_loss: "tag-cut",
-    recovery: "tag-recover",
-    notes: "tag-note",
-    general: "tag-general",
-  };
-  return map[tag] || "tag-general";
+  if (tag === "general") return "tag-general";
+  return "tag-recipe";
 }
 
 function displayTags(p) {
@@ -671,6 +658,9 @@ watch(me, (u) => {
           </div>
 
           <h3 class="post-title">{{ p.title }}</h3>
+          <p v-if="p.status === 'warned' && p.warningMessage" class="post-warning">
+            ⚠ Warning: {{ p.warningMessage }}
+          </p>
           <div class="tag-row">
             <span v-for="t in displayTags(p)" :key="t" class="post-tag" :class="tagClass(t)">#{{ tagLabel(t) }}</span>
           </div>
@@ -1436,6 +1426,11 @@ watch(me, (u) => {
   color: #455a64;
 }
 
+.tag-recipe {
+  background: #e8f5f1;
+  color: #205a53;
+}
+
 .post-content {
   margin: 0 0 14px;
   line-height: 1.55;
@@ -1447,6 +1442,17 @@ watch(me, (u) => {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
   overflow: hidden;
+}
+
+.post-warning {
+  margin: -2px 0 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #f3d8a0;
+  background: #fff8e6;
+  color: #8a5a00;
+  font-size: 0.82rem;
+  line-height: 1.4;
 }
 
 .post-stats {

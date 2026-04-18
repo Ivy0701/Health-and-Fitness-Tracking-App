@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const asyncHandler = require("../../utils/asyncHandler");
 const scheduleTime = require("../../utils/scheduleTime");
 const ScheduleItem = require("../../models/ScheduleItem");
+const Diet = require("../../models/Diet");
 const ScheduleSkip = require("../../models/ScheduleSkip");
 const Course = require("../../models/Course");
 const User = require("../../models/User");
@@ -12,6 +13,7 @@ const CourseDailyProgress = require("../../models/CourseDailyProgress");
 const { buildCourseExercises, summarizeCourseExercises } = require("../../utils/courseSession");
 const { applyMetBurnsToExercises } = require("../../utils/workoutCaloriesBurn");
 const { runDietScheduleHygieneForUser } = require("../../utils/dietScheduleDataHygiene");
+const { reconcileDietSchedulesForDate } = require("../../utils/dietScheduleSync");
 
 async function isVipUser(userId) {
   const u = await User.findById(userId).select("vip_status isVip").lean();
@@ -47,6 +49,23 @@ function isPlanBackedItem(row) {
 
 const DIET_PLAN_APPLY_SOURCE = "diet_plan_apply";
 const DIET_LOG_SYNC_SOURCE = "diet_log_sync";
+
+function normalizeHHmm(raw) {
+  const s = String(raw ?? "").trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return "";
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (!Number.isFinite(h) || !Number.isFinite(min) || h < 0 || h > 23 || min < 0 || min > 59) return "";
+  return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+}
+
+function parseDateKey(dateKey) {
+  const s = String(dateKey || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const d = new Date(`${s}T00:00:00`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
 
 function isDietPlanApplyRow(row, dietPlanId) {
   const pid = String(dietPlanId || "").trim();
@@ -90,6 +109,19 @@ async function repairDietOverlapsForUser(userId, dayRows) {
 }
 
 async function removeSingleItemAndLinkedState({ row, userId }) {
+  const isDietLogSyncRow =
+    String(row?.itemType || "").toLowerCase() === "diet" &&
+    String(row?.scheduleSource || "").trim() === DIET_LOG_SYNC_SOURCE;
+
+  if (isDietLogSyncRow) {
+    const linkedDietId = String(row?.linkedDietId || "").trim();
+    if (mongoose.Types.ObjectId.isValid(linkedDietId)) {
+      await Diet.deleteOne({ _id: linkedDietId, userId });
+    }
+    await row.deleteOne();
+    return;
+  }
+
   await row.deleteOne();
 
   if (row.planId) {
@@ -434,6 +466,57 @@ const create = asyncHandler(async (req, res) => {
     });
   }
 
+  if (nType === "diet") {
+    const nextMealType = mealKey || "lunch";
+    const createdDiet = await Diet.create({
+      userId: uid,
+      foodName: resolvedTitle,
+      amount: 1,
+      amountInGrams: 1,
+      unit: "g",
+      calories: Number.isFinite(kcal) ? kcal : 0,
+      protein: 0,
+      carbs: 0,
+      fat: 0,
+      mealType: nextMealType,
+      date: new Date(`${dateKey}T00:00:00`),
+      note: note != null ? String(note) : "",
+      sourceType: bodyScheduleSource === DIET_PLAN_APPLY_SOURCE ? "recommended" : "manual",
+      dietPlanId: bodyDietPlanId != null ? String(bodyDietPlanId).trim() : "",
+      planName: planName != null ? String(planName).trim() : "",
+      recordedTimeLocal: normalizeHHmm(resolvedTime) || resolvedTime,
+      recordedAt: new Date(),
+    });
+
+    await reconcileDietSchedulesForDate(uid, dateKey);
+
+    const synced = await ScheduleItem.findOne({
+      userId: uid,
+      linkedDietId: createdDiet._id,
+      itemType: "diet",
+      scheduleSource: DIET_LOG_SYNC_SOURCE,
+    }).lean();
+
+    const payload = synced || {
+      _id: String(createdDiet._id),
+      userId: uid,
+      itemType: "diet",
+      date: dateKey,
+      time: resolvedTime,
+      meal: nextMealType,
+      totalCalories: Number.isFinite(kcal) ? kcal : 0,
+      title: resolvedTitle,
+      scheduleSource: DIET_LOG_SYNC_SOURCE,
+      linkedDietId: String(createdDiet._id),
+      durationMinutes: duration,
+      note: note != null ? String(note) : "",
+    };
+    if (!hadExplicitTime) {
+      payload.scheduleNotice = `No time selected. Scheduled automatically at ${resolvedTime}.`;
+    }
+    return res.status(201).json(payload);
+  }
+
   const row = await ScheduleItem.create({
     userId: uid,
     itemType: nType,
@@ -600,19 +683,6 @@ const update = asyncHandler(async (req, res) => {
   let resolvedTime = String(row.time || "").trim().slice(0, 5);
   const rowIdStr = String(row._id);
 
-  if (isDietLogSyncRow) {
-    const mealKey = String(row.meal || "").toLowerCase();
-    const siblingDupes = await ScheduleItem.find({
-      userId: req.user.id,
-      date: dateKey,
-      itemType: "diet",
-      scheduleSource: DIET_LOG_SYNC_SOURCE,
-      _id: { $ne: qid },
-    }).lean();
-    const dupIds = siblingDupes.filter((d) => String(d.meal || "").toLowerCase() === mealKey).map((d) => d._id);
-    if (dupIds.length) await ScheduleItem.deleteMany({ _id: { $in: dupIds }, userId: req.user.id });
-  }
-
   let existing = await ScheduleItem.find({ userId: req.user.id, date: dateKey, _id: { $ne: qid } }).lean();
   existing = (existing || []).filter((e) => String(e?._id || "") !== rowIdStr);
 
@@ -727,6 +797,30 @@ const update = asyncHandler(async (req, res) => {
   row.durationMinutes = merged.durationMinutes;
   row.overlapAccepted = false;
   await row.save();
+
+  if (isDietLogSyncRow && row.linkedDietId && mongoose.Types.ObjectId.isValid(String(row.linkedDietId))) {
+    const diet = await Diet.findOne({ _id: row.linkedDietId, userId: req.user.id });
+    if (diet) {
+      const patchDiet = {};
+      const nextMeal = String(row.meal || "").trim().toLowerCase();
+      if (nextMeal) patchDiet.mealType = nextMeal;
+
+      const nextTime = normalizeHHmm(row.time);
+      if (nextTime) patchDiet.recordedTimeLocal = nextTime;
+
+      const d = parseDateKey(row.date);
+      if (d) patchDiet.date = d;
+
+      const kcal = Number(row.totalCalories);
+      if (Number.isFinite(kcal) && kcal >= 0) patchDiet.calories = kcal;
+
+      if (Object.keys(patchDiet).length) {
+        Object.assign(diet, patchDiet);
+        await diet.save();
+      }
+    }
+  }
+
   res.json(row);
 });
 

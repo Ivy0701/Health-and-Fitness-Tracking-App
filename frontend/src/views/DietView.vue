@@ -6,6 +6,7 @@ import api from "../services/api";
 import { useAuthStore } from "../stores/auth";
 import { useFavorites } from "../services/favorites";
 import { getTodayLocalDate } from "../utils/dateLocal";
+import { PLAN_DEFINITIONS } from "../constants/dietPlans";
 
 const MEAL_TYPES = [
   { value: "breakfast", label: "Breakfast" },
@@ -14,20 +15,6 @@ const MEAL_TYPES = [
   { value: "snack", label: "Snack" },
 ];
 
-const PLAN_DEFINITIONS = [
-  { id: "hot", name: "Hot Meal Plans", type: "hot", description: "Popular daily meals with balanced macros." },
-  { id: "fat_loss", name: "Fat Loss Plan", type: "fat_loss", description: "Lower-calorie, high-protein and vegetable-focused meals." },
-  { id: "weight_loss", name: "Weight Loss Plan", type: "weight_loss", description: "Controlled calories with practical meal portions." },
-  { id: "muscle_gain", name: "Muscle Gain Plan", type: "muscle_gain", description: "Higher calories and more protein/carb support for training." },
-  { id: "high_protein", name: "High Protein Plan", type: "high_protein", description: "Raise protein intake while keeping calories manageable." },
-  { id: "balanced", name: "Balanced Plan", type: "balanced", description: "Even macro structure for long-term consistency." },
-  { id: "keto", name: "Keto Plan", type: "fat_loss", description: "Very low-carb meals with moderate protein and healthy fats." },
-  { id: "vegetarian", name: "Vegetarian Plan", type: "balanced", description: "Plant-forward meal combinations with balanced daily macros." },
-  { id: "low_sugar", name: "Low Sugar Plan", type: "weight_loss", description: "Reduce added sugar while keeping stable energy through the day." },
-  { id: "low_fat", name: "Low Fat Plan", type: "weight_loss", description: "Lower-fat food picks with controlled portions and lighter cooking." },
-  { id: "athlete", name: "Athlete Plan", type: "muscle_gain", description: "Higher fuel support for training volume and recovery demands." },
-  { id: "clean_eating", name: "Clean Eating Plan", type: "high_protein", description: "Whole-food focused plan with practical prep and clean ingredients." },
-];
 const LOCK_FREE_PLAN_COUNT = 4;
 
 const PLAN_CATEGORY_BLUEPRINT = {
@@ -175,6 +162,60 @@ function mealIcon(mealType) {
   return "🍎";
 }
 
+function detectFoodCategoryByName(foodName) {
+  const name = String(foodName || "").trim().toLowerCase();
+  if (!name) return "";
+  if (/(rice|oat|bread|noodle|pasta|cereal|grain|quinoa|potato)/.test(name)) return "grain";
+  if (/(chicken|beef|pork|meat|turkey|fish|salmon|shrimp|tuna|lamb)/.test(name)) return "meat";
+  if (/(egg|omelet)/.test(name)) return "egg";
+  if (/(broccoli|spinach|lettuce|cabbage|carrot|tomato|pepper|cucumber|vegetable)/.test(name)) return "vegetable";
+  if (/(apple|banana|orange|berry|grape|fruit|mango|pear|kiwi|pineapple)/.test(name)) return "fruit";
+  if (/(milk|cheese|yogurt|dairy|cream)/.test(name)) return "dairy";
+  if (/(cookie|biscuit|cake|chocolate|chip|snack|cracker)/.test(name)) return "snack";
+  return "";
+}
+
+function getFoodEmoji(food) {
+  const foodId = String(food?.foodId || food?.id || "").trim().toLowerCase();
+  const foodName = String(food?.foodName || food?.name || "").trim().toLowerCase();
+  const signature = `${foodId} ${foodName}`;
+  if (/(greek_yogurt|yogurt|yoghurt)/.test(signature)) return "🥣";
+  if (/(oats|oatmeal)/.test(signature)) return "🥣";
+  if (/(brown_rice|rice)/.test(signature)) return "🍚";
+  if (/(whole_wheat_bread|bread|toast)/.test(signature)) return "🍞";
+  if (/(sweet_potato|potato)/.test(signature)) return "🍠";
+  if (/(quinoa)/.test(signature)) return "🌾";
+  if (/(chicken_breast|chicken)/.test(signature)) return "🍗";
+  if (/(salmon)/.test(signature)) return "🐟";
+  if (/(tofu)/.test(signature)) return "🫘";
+  if (/(egg|omelet)/.test(signature)) return "🥚";
+  if (/(broccoli)/.test(signature)) return "🥦";
+  if (/(spinach)/.test(signature)) return "🥬";
+  if (/(carrot)/.test(signature)) return "🥕";
+  if (/(tomato)/.test(signature)) return "🍅";
+  if (/(banana)/.test(signature)) return "🍌";
+  if (/(apple)/.test(signature)) return "🍎";
+  if (/(berries|berry)/.test(signature)) return "🍓";
+  if (/(avocado)/.test(signature)) return "🥑";
+  if (/(almonds|almond)/.test(signature)) return "🌰";
+  if (/(peanut_butter|peanut butter)/.test(signature)) return "🥜";
+  if (/(milk|cheese|yogurt|yoghurt|dairy|cream)/.test(foodName)) return "🥛";
+  if (/(egg|omelet)/.test(foodName)) return "🥚";
+
+  const explicitCategory = String(food?.category || "").trim().toLowerCase();
+  const category = explicitCategory || detectFoodCategoryByName(foodName);
+
+  if (category === "grain" || category === "carb") return "🍚";
+  if (category === "meat") return "🍗";
+  if (category === "egg") return "🥚";
+  if (category === "vegetable" || category === "veggie") return "🥦";
+  if (category === "fruit") return "🍎";
+  if (category === "dairy") return "🥛";
+  if (category === "protein") return "🍽️";
+  if (category === "snack") return "🍪";
+  return "🍽️";
+}
+
 const todayKey = getTodayLocalDate();
 const selectedDate = ref(todayKey);
 const DATE_WINDOW_DAYS = 9;
@@ -182,6 +223,7 @@ const DATE_SHIFT_DAYS = 7;
 const dateWindowStart = ref(shiftDateKey(todayKey, -Math.floor(DATE_WINDOW_DAYS / 2)));
 const me = ref(null);
 const loading = ref(false);
+const isOverviewLoading = ref(true);
 const searchingFoods = ref(false);
 const submitting = ref(false);
 const records = ref([]);
@@ -215,11 +257,15 @@ let suppressFoodSearchOnce = false;
 let loadRequestSeq = 0;
 let focusPlanTimer = null;
 
-const overview = ref({
-  target: { calories: 2000, suggestedWorkoutBurn: 160, protein: 120, carbs: 220, fat: 65 },
-  consumed: { calories: 0, protein: 0, carbs: 0, fat: 0 },
-  remaining: { calories: 2000, protein: 120, carbs: 220, fat: 65 },
-});
+function createEmptyOverview() {
+  return {
+    target: { calories: null, suggestedWorkoutBurn: null, protein: null, carbs: null, fat: null },
+    consumed: { calories: null, protein: null, carbs: null, fat: null },
+    remaining: { calories: null, protein: null, carbs: null, fat: null },
+  };
+}
+
+const overview = ref(createEmptyOverview());
 
 function normalizeOverviewPayload(data) {
   const targetCalories = Math.max(0, roundToOne(data?.target?.calories));
@@ -295,7 +341,6 @@ const form = reactive({
 const foodQuery = ref("");
 const isEditing = computed(() => Boolean(editingId.value));
 const selectedPlan = computed(() => PLAN_DEFINITIONS.find((x) => x.id === selectedPlanId.value) || null);
-const planForRecommendation = computed(() => selectedPlan.value || PLAN_DEFINITIONS[0]);
 const appliedPlan = computed(() => PLAN_DEFINITIONS.find((x) => x.id === appliedPlanId.value) || null);
 /** Selected plan card is the same as the applied recommendation source (not related to Schedule). */
 const isAppliedPlanForSelectedCard = computed(
@@ -313,6 +358,7 @@ const defaultDynamicPlan = computed(() => ({
   name: "Personalized Daily Plan",
   type: defaultDynamicPlanType.value,
   description: "Auto-generated from your current weight, target weight, and target days.",
+  dailyCalories: calculatePlanCalories(defaultDynamicPlanType.value),
 }));
 const isVipUser = computed(() => auth.vipStatus);
 const selectedPlanFavoriteId = computed(() => (selectedPlan.value ? `diet-plan-${selectedPlan.value.id}` : ""));
@@ -357,15 +403,34 @@ function persistAppliedPlanToStorage() {
   }
 }
 
+const hasOverviewData = computed(() => Number.isFinite(Number(overview.value.target?.calories)));
+
+function formatCaloriesOrDash(value) {
+  return Number.isFinite(Number(value)) ? formatCalories(value) : "--";
+}
+
+function formatCaloriesNumberOrDash(value) {
+  return Number.isFinite(Number(value)) ? formatCaloriesNumber(value) : "--";
+}
+
 const calorieRatio = computed(() => {
+  if (!hasOverviewData.value) return null;
   const target = Math.max(1, toNumber(overview.value.target?.calories, 1));
   const consumed = toNumber(overview.value.consumed?.calories);
   return consumed / target;
 });
-const caloriePercent = computed(() => roundToOne(calorieRatio.value * 100));
-const donutFillPercent = computed(() => clamp(caloriePercent.value, 0, 100));
+const caloriePercent = computed(() => (calorieRatio.value == null ? null : roundToOne(calorieRatio.value * 100)));
+const donutFillPercent = computed(() => (caloriePercent.value == null ? 0 : clamp(caloriePercent.value, 0, 100)));
 
 const calorieStatus = computed(() => {
+  if (!hasOverviewData.value) {
+    return {
+      key: "normal",
+      color: "var(--c4)",
+      hint: "Loading overview...",
+      extra: "",
+    };
+  }
   const consumed = toNumber(overview.value.consumed?.calories);
   const target = Math.max(1, toNumber(overview.value.target?.calories, 1));
   const exceeded = Math.max(0, roundToInt(consumed - target));
@@ -398,12 +463,28 @@ const donutStyle = computed(() => ({
 }));
 
 const macroCards = computed(() => [
-  { key: "protein", label: "Protein", consumed: roundToOne(overview.value.consumed?.protein), target: roundToOne(overview.value.target?.protein) },
-  { key: "carbs", label: "Carbs", consumed: roundToOne(overview.value.consumed?.carbs), target: roundToOne(overview.value.target?.carbs) },
-  { key: "fat", label: "Fat", consumed: roundToOne(overview.value.consumed?.fat), target: roundToOne(overview.value.target?.fat) },
+  {
+    key: "protein",
+    label: "Protein",
+    consumed: Number.isFinite(Number(overview.value.consumed?.protein)) ? roundToOne(overview.value.consumed?.protein) : null,
+    target: Number.isFinite(Number(overview.value.target?.protein)) ? roundToOne(overview.value.target?.protein) : null,
+  },
+  {
+    key: "carbs",
+    label: "Carbs",
+    consumed: Number.isFinite(Number(overview.value.consumed?.carbs)) ? roundToOne(overview.value.consumed?.carbs) : null,
+    target: Number.isFinite(Number(overview.value.target?.carbs)) ? roundToOne(overview.value.target?.carbs) : null,
+  },
+  {
+    key: "fat",
+    label: "Fat",
+    consumed: Number.isFinite(Number(overview.value.consumed?.fat)) ? roundToOne(overview.value.consumed?.fat) : null,
+    target: Number.isFinite(Number(overview.value.target?.fat)) ? roundToOne(overview.value.target?.fat) : null,
+  },
 ]);
 
 function macroPct(card) {
+  if (!Number.isFinite(Number(card?.target))) return 0;
   const target = Math.max(1, toNumber(card.target, 1));
   return Math.min(roundToOne((toNumber(card.consumed) / target) * 100), 100);
 }
@@ -439,6 +520,7 @@ function resetManualForm() {
 
 function validateManualForm() {
   if (!form.foodName.trim()) return "Food name cannot be empty.";
+  if (!/^\d{1,2}:\d{2}$/.test(String(form.recordedTimeLocal || "").trim())) return "Please select a valid time (HH:mm).";
   if (!Number.isFinite(Number(form.amountInGrams)) || Number(form.amountInGrams) <= 0) return "Amount (g) must be positive.";
   if (!Number.isFinite(Number(form.calories)) || Number(form.calories) < 0) return "Calories must be a non-negative number.";
   if (!Number.isFinite(Number(form.protein)) || Number(form.protein) < 0) return "Protein must be a non-negative number.";
@@ -509,6 +591,7 @@ async function loadForDate() {
   const dateKey = selectedDate.value;
   const requestId = ++loadRequestSeq;
   loading.value = true;
+  isOverviewLoading.value = true;
   pageError.value = "";
   console.debug("[Diet][LoadForDate] start", {
     requestId,
@@ -551,13 +634,17 @@ async function loadForDate() {
   } catch (error) {
     if (requestId !== loadRequestSeq) return;
     pageError.value = error?.response?.data?.message || "Failed to load diet data.";
+    overview.value = createEmptyOverview();
     console.debug("[Diet][LoadForDate] failed", {
       requestId,
       selectedDate: selectedDate.value,
       message: pageError.value,
     });
   } finally {
-    if (requestId === loadRequestSeq) loading.value = false;
+    if (requestId === loadRequestSeq) {
+      loading.value = false;
+      isOverviewLoading.value = false;
+    }
   }
 }
 
@@ -672,9 +759,6 @@ function calculatePlanCalories(planType) {
   return clamp(roundToInt(planAdjusted), 1200, 3800);
 }
 
-const adjustedPlanCalories = computed(() => calculatePlanCalories(planForRecommendation.value.type));
-const defaultDynamicCalories = computed(() => calculatePlanCalories(defaultDynamicPlanType.value));
-
 const recommendedSourceMeta = computed(() => {
   if (appliedPlan.value) {
     return {
@@ -692,14 +776,11 @@ const recommendedSourceMeta = computed(() => {
 
 const planCards = computed(() =>
   PLAN_DEFINITIONS.map((plan, idx) => {
-    let suggestion = adjustedPlanCalories.value;
-    if (plan.type === "muscle_gain") suggestion += 120;
-    if (plan.type === "fat_loss" || plan.type === "weight_loss") suggestion -= 120;
-    if (plan.type === "high_protein") suggestion += 40;
+    const dailyCalories = calculatePlanCalories(plan.type);
     return {
       ...plan,
       isLocked: !isVipUser.value && idx >= LOCK_FREE_PLAN_COUNT,
-      suggestedCalories: clamp(roundToInt(suggestion), 1200, 4000),
+      dailyCalories,
       goalTag:
         plan.type === "muscle_gain"
           ? "Muscle Gain"
@@ -711,6 +792,17 @@ const planCards = computed(() =>
     };
   })
 );
+const selectedPlanCard = computed(() => planCards.value.find((x) => x.id === selectedPlanId.value) || null);
+const appliedPlanCard = computed(() => planCards.value.find((x) => x.id === appliedPlanId.value) || null);
+const selectedPlanMeta = computed(() => {
+  const base = selectedPlanCard.value || selectedPlan.value;
+  if (!base) return { suitableFor: [], notSuitableFor: [], recipeTags: [] };
+  return {
+    suitableFor: Array.isArray(base.suitableFor) ? base.suitableFor.filter(Boolean) : [],
+    notSuitableFor: Array.isArray(base.notSuitableFor) ? base.notSuitableFor.filter(Boolean) : [],
+    recipeTags: Array.isArray(base.recipeTags) ? base.recipeTags.filter(Boolean) : [],
+  };
+});
 
 function pickFood(mealType, category, seed, usedIds) {
   const inMeal = foodLibraryRows.value.filter((x) => (x.mealTypes || []).includes(mealType));
@@ -740,6 +832,7 @@ function createMealRecommendation(mealType, targetCalories, planType, dateKey) {
         mealType,
         foodId: food.id,
         foodName: food.name,
+        category: String(food.category || "").toLowerCase(),
         caloriesPer100g: toNumber(food.caloriesPer100g),
         proteinPer100g: toNumber(food.proteinPer100g),
         carbsPer100g: toNumber(food.carbsPer100g),
@@ -774,7 +867,7 @@ function createMealRecommendation(mealType, targetCalories, planType, dateKey) {
 
 function buildPlanDetails(planType, dateKey, targetTotalInput) {
   const distribution = PLAN_MEAL_DISTRIBUTION[planType] || PLAN_MEAL_DISTRIBUTION.balanced;
-  const targetTotal = Math.max(1200, roundToInt(targetTotalInput ?? calculatePlanCalories(planType)));
+  const targetTotal = Math.max(1200, roundToInt(targetTotalInput ?? 0));
   const mealRows = MEAL_TYPES.map((meal) => {
     const mealTarget = roundToInt(targetTotal * (distribution[meal.value] || 0));
     const items = createMealRecommendation(meal.value, mealTarget, planType, dateKey);
@@ -784,21 +877,21 @@ function buildPlanDetails(planType, dateKey, targetTotalInput) {
 }
 
 const selectedPlanDetails = computed(() => {
-  if (!selectedPlan.value) return { targetTotal: 0, meals: [] };
-  return buildPlanDetails(selectedPlan.value.type, selectedDate.value, adjustedPlanCalories.value);
+  if (!selectedPlanCard.value) return { targetTotal: 0, meals: [] };
+  return buildPlanDetails(selectedPlanCard.value.type, selectedDate.value, selectedPlanCard.value.dailyCalories);
 });
 
 const appliedPlanDetails = computed(() => {
-  if (!appliedPlan.value) return { targetTotal: 0, meals: [] };
-  return buildPlanDetails(appliedPlan.value.type, selectedDate.value, calculatePlanCalories(appliedPlan.value.type));
+  if (!appliedPlanCard.value) return { targetTotal: 0, meals: [] };
+  return buildPlanDetails(appliedPlanCard.value.type, selectedDate.value, appliedPlanCard.value.dailyCalories);
 });
 
 const defaultDynamicPlanDetails = computed(() =>
-  buildPlanDetails(defaultDynamicPlanType.value, selectedDate.value, defaultDynamicCalories.value)
+  buildPlanDetails(defaultDynamicPlanType.value, selectedDate.value, defaultDynamicPlan.value.dailyCalories)
 );
 
 const activeRecommendedPlan = computed(() => {
-  if (appliedPlan.value) return appliedPlan.value;
+  if (appliedPlanCard.value) return appliedPlanCard.value;
   return defaultDynamicPlan.value;
 });
 
@@ -823,8 +916,8 @@ function mealAllocatedCalories(meal) {
   return roundToOne((meal?.items || []).reduce((sum, item) => sum + toNumber(item.estimatedCalories), 0));
 }
 
-function mealProgressPct(meal) {
-  const target = Math.max(1, toNumber(meal?.targetCalories, 1));
+function mealProgressPct(meal, dailyTarget) {
+  const target = Math.max(1, toNumber(dailyTarget, 1));
   return clamp(roundToOne((mealAllocatedCalories(meal) / target) * 100), 0, 100);
 }
 
@@ -914,7 +1007,7 @@ async function toggleSelectedPlanFavorite() {
       itemId: selectedPlanFavoriteId.value,
       title: selectedPlan.value.name,
       planType: selectedPlan.value.type,
-      targetCalories: adjustedPlanCalories.value,
+      targetCalories: selectedPlanCard.value?.dailyCalories || 0,
       description: selectedPlan.value.description,
       metadata: { planType: selectedPlan.value.type },
       sourceType: "diet_plan",
@@ -1137,7 +1230,7 @@ watch(
     <section class="diet-header">
       <div class="hero-title-row">
         <h2 class="title">🥗 Diet</h2>
-        <button type="button" class="ghost-btn overview-toggle-btn" @click="toggleFoodOverview">Food Nutrition Overview</button>
+        <button type="button" class="overview-toggle-btn" @click="toggleFoodOverview">Food Nutrition Overview</button>
       </div>
     </section>
 
@@ -1224,19 +1317,21 @@ watch(
       <div class="overview-grid">
         <article class="overview-card strong">
           <span>Daily calorie target</span>
-          <strong>{{ formatCalories(overview.target.calories) }}</strong>
+          <strong>{{ isOverviewLoading ? "--" : formatCaloriesOrDash(overview.target.calories) }}</strong>
         </article>
         <article class="overview-card">
           <span>Consumed</span>
-          <strong>{{ formatCalories(overview.consumed.calories) }}</strong>
+          <strong>{{ isOverviewLoading ? "--" : formatCaloriesOrDash(overview.consumed.calories) }}</strong>
         </article>
         <article class="overview-card">
           <span>Remaining</span>
-          <strong :class="{ warn: overview.remaining.calories < 0 }">{{ formatCalories(overview.remaining.calories) }}</strong>
+          <strong :class="{ warn: Number.isFinite(Number(overview.remaining.calories)) && overview.remaining.calories < 0 }">
+            {{ isOverviewLoading ? "--" : formatCaloriesOrDash(overview.remaining.calories) }}
+          </strong>
         </article>
         <article class="overview-card">
           <span>Suggested workout burn</span>
-          <strong>{{ formatCalories(overview.target.suggestedWorkoutBurn) }}</strong>
+          <strong>{{ isOverviewLoading ? "--" : formatCaloriesOrDash(overview.target.suggestedWorkoutBurn) }}</strong>
         </article>
       </div>
 
@@ -1245,22 +1340,24 @@ watch(
           <h3>Calorie Progress</h3>
           <div class="donut" :style="donutStyle">
             <div class="donut-inner">
-              <strong>{{ caloriePercent }}%</strong>
+              <strong>{{ isOverviewLoading || caloriePercent == null ? "--" : `${caloriePercent}%` }}</strong>
               <span>consumed</span>
             </div>
           </div>
           <p class="muted">
-            {{ formatCaloriesNumber(overview.consumed.calories) }} / {{ formatCaloriesNumber(overview.target.calories) }} kcal
-            <span v-if="calorieStatus.extra"> {{ calorieStatus.extra }}</span>
+            {{ isOverviewLoading ? "-- / -- kcal" : `${formatCaloriesNumberOrDash(overview.consumed.calories)} / ${formatCaloriesNumberOrDash(overview.target.calories)} kcal` }}
+            <span v-if="!isOverviewLoading && calorieStatus.extra"> {{ calorieStatus.extra }}</span>
           </p>
-          <p class="calorie-hint" :data-status="calorieStatus.key">{{ calorieStatus.hint }}</p>
+          <p class="calorie-hint" :data-status="calorieStatus.key">{{ isOverviewLoading ? "--" : calorieStatus.hint }}</p>
         </article>
         <article class="chart-card">
           <h3>Macro Progress</h3>
           <div v-for="card in macroCards" :key="card.key" class="macro-progress">
             <div class="macro-head">
               <span>{{ card.label }}</span>
-              <span>{{ card.consumed }} / {{ card.target }} g</span>
+              <span>
+                {{ isOverviewLoading ? "-- / -- g" : `${card.consumed ?? "--"} / ${card.target ?? "--"} g` }}
+              </span>
             </div>
             <div class="bar-track">
               <div class="bar-fill" :style="{ width: macroPct(card) + '%' }" />
@@ -1289,7 +1386,7 @@ watch(
             </div>
             <div class="plan-content" :class="{ blurred: plan.isLocked }">
               <p>{{ plan.description }}</p>
-              <strong class="plan-kcal">{{ formatCaloriesNumber(plan.suggestedCalories) }} <small>kcal/day</small></strong>
+              <strong class="plan-kcal">{{ formatCaloriesNumber(plan.dailyCalories) }} <small>kcal/day</small></strong>
             </div>
             <div v-if="plan.isLocked" class="plan-lock-overlay">
               <span class="lock-icon">🔒 VIP Only</span>
@@ -1302,7 +1399,7 @@ watch(
       <article v-if="selectedPlan" class="selected-plan">
         <div class="selected-head">
           <div>
-            <h4>{{ selectedPlan.name }} · {{ formatCaloriesNumber(adjustedPlanCalories) }} kcal target</h4>
+            <h4>{{ selectedPlan.name }} · {{ formatCaloriesNumber(selectedPlanCard?.dailyCalories || 0) }} kcal target</h4>
             <p class="muted">Nutrition-focused daily recommendation split by meal.</p>
             <p v-if="isAppliedPlanForSelectedCard" class="muted small-hint">
               This plan is your active recommendation source for {{ selectedDate }}. Use Add to Records on each food to log
@@ -1325,6 +1422,29 @@ watch(
             </button>
           </div>
         </div>
+        <div class="plan-meta-grid">
+          <section class="plan-meta-block">
+            <h5>Suitable for</h5>
+            <div class="plan-meta-tags">
+              <span v-for="tag in selectedPlanMeta.suitableFor" :key="`fit-${tag}`" class="plan-meta-tag suitable">{{ tag }}</span>
+              <span v-if="!selectedPlanMeta.suitableFor.length" class="plan-meta-empty">No specific guidance</span>
+            </div>
+          </section>
+          <section class="plan-meta-block">
+            <h5>Not suitable for</h5>
+            <div class="plan-meta-tags">
+              <span v-for="tag in selectedPlanMeta.notSuitableFor" :key="`avoid-${tag}`" class="plan-meta-tag avoid">{{ tag }}</span>
+              <span v-if="!selectedPlanMeta.notSuitableFor.length" class="plan-meta-empty">No specific restrictions</span>
+            </div>
+          </section>
+          <section class="plan-meta-block">
+            <h5>Recipe tags</h5>
+            <div class="plan-meta-tags">
+              <span v-for="tag in selectedPlanMeta.recipeTags" :key="`recipe-${tag}`" class="plan-meta-tag recipe">{{ tag }}</span>
+              <span v-if="!selectedPlanMeta.recipeTags.length" class="plan-meta-empty">No tags</span>
+            </div>
+          </section>
+        </div>
         <div class="plan-breakdown">
           <section v-for="meal in selectedPlanDetails.meals" :key="meal.mealType" class="meal-board">
             <div class="meal-board-head">
@@ -1333,15 +1453,21 @@ watch(
                 <h5>{{ meal.label }}</h5>
               </div>
               <span class="meal-target-tag">{{ formatCaloriesNumber(meal.targetCalories) }} kcal target</span>
-              <div class="meal-progress" :style="{ background: `conic-gradient(#4caf50 0% ${mealProgressPct(meal)}%, #e9f3ea ${mealProgressPct(meal)}% 100%)` }">
-                <span>{{ mealProgressPct(meal) }}%</span>
+              <div
+                class="meal-progress"
+                title="Share of daily intake"
+                :style="{
+                  background: `conic-gradient(#4caf50 0% ${mealProgressPct(meal, selectedPlanDetails.targetTotal)}%, #e9f3ea ${mealProgressPct(meal, selectedPlanDetails.targetTotal)}% 100%)`,
+                }"
+              >
+                <span>{{ mealProgressPct(meal, selectedPlanDetails.targetTotal) }}%</span>
               </div>
             </div>
             <p v-if="!meal.items.length" class="muted">No meal items for this section.</p>
             <div class="meal-food-list">
               <article v-for="item in meal.items" :key="item.recommendationId" class="meal-item">
                 <div class="meal-main-row">
-                  <span class="food-icon">🥬</span>
+                  <span class="food-icon">{{ getFoodEmoji(item) }}</span>
                   <strong class="food-name">{{ item.foodName }}</strong>
                   <span class="food-kcal">{{ formatCaloriesNumber(item.caloriesPer100g) }} kcal / 100g</span>
                 </div>
@@ -1411,6 +1537,10 @@ watch(
             <label>
               Date
               <input v-model="form.date" type="date" required />
+            </label>
+            <label>
+              Time
+              <input v-model="form.recordedTimeLocal" type="time" required />
             </label>
             <label>
               Meal type
@@ -1512,9 +1642,29 @@ watch(
 }
 
 .overview-toggle-btn {
-  padding: 7px 12px;
+  padding: 8px 14px;
   font-size: 12px;
   line-height: 1.2;
+  font-weight: 700;
+  color: #ffffff;
+  border: 1px solid #2f8f7d;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #49b89f, #2f8f7d);
+  box-shadow: 0 8px 16px rgba(47, 143, 125, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  transition: transform 0.14s ease, box-shadow 0.14s ease, filter 0.14s ease, border-color 0.14s ease;
+}
+
+.overview-toggle-btn:hover {
+  border-color: #267666;
+  transform: translateY(-1px);
+  box-shadow: 0 10px 18px rgba(38, 118, 102, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  filter: brightness(1.03);
+}
+
+.overview-toggle-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 4px 10px rgba(38, 118, 102, 0.24), inset 0 2px 4px rgba(18, 71, 60, 0.28);
+  filter: brightness(0.98);
 }
 
 .date-slider {
@@ -2101,6 +2251,58 @@ watch(
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
+}
+
+.plan-meta-grid {
+  margin-top: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.plan-meta-block h5 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 800;
+  color: #476270;
+}
+
+.plan-meta-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.plan-meta-tag {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.plan-meta-tag.suitable {
+  color: #23674f;
+  background: #e6f4ef;
+  border: 1px solid #b8e0d1;
+}
+
+.plan-meta-tag.avoid {
+  color: #8c3131;
+  background: #fff1f1;
+  border: 1px solid #f2c5c5;
+}
+
+.plan-meta-tag.recipe {
+  color: #355366;
+  background: #eef4f8;
+  border: 1px solid #d4e1ea;
+}
+
+.plan-meta-empty {
+  font-size: 11px;
+  color: #8a9ca6;
 }
 
 .selected-plan .meal-board {

@@ -200,6 +200,7 @@ function formatKcalOneDecimal(value) {
 async function loadDietMealDetailForModal(scheduleItem) {
   const uid = String(me.value?.id || "").trim();
   const meal = String(scheduleItem?.meal || "").toLowerCase();
+  const linkedDietId = String(scheduleItem?.linkedDietId || "").trim();
   const mealLabel =
     meal === "breakfast"
       ? "Breakfast"
@@ -216,7 +217,10 @@ async function loadDietMealDetailForModal(scheduleItem) {
       params: { date: scheduleItem.date, _ts: Date.now() },
       headers: { "Cache-Control": "no-cache" },
     });
-    const rows = (Array.isArray(data) ? data : []).filter((r) => String(r.mealType || "").toLowerCase() === meal);
+    const rows = (Array.isArray(data) ? data : []).filter((r) => {
+      if (linkedDietId) return String(r?._id || "") === linkedDietId;
+      return String(r.mealType || "").toLowerCase() === meal;
+    });
     rows.sort((a, b) => {
       const ta = new Date(a.recordedAt || a.createdAt || 0).getTime();
       const tb = new Date(b.recordedAt || b.createdAt || 0).getTime();
