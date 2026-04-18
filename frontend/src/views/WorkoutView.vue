@@ -1189,8 +1189,9 @@ async function handleDateChange(dateKey) {
             :class="{ focused: focusedPlanId === String(task.workout_plan_id || '') }"
             :data-plan-id="String(task.workout_plan_id || '')"
           >
-            <div class="plan-row-head">
-              <div class="plan-head-actions">
+            <header class="plan-row-head">
+              <h4 class="plan-card-title">{{ task.exercise_name }}</h4>
+              <div class="plan-head-actions" role="group" aria-label="Plan actions">
                 <button
                   v-if="resolvePlanForTask(task)"
                   type="button"
@@ -1212,12 +1213,13 @@ async function handleDateChange(dateKey) {
                   Delete
                 </button>
               </div>
+            </header>
+            <div class="plan-card-body">
+              <p>Category: {{ task.category }}</p>
+              <p>Days: {{ task.days }}</p>
+              <p>Duration / day: {{ task.duration_per_day }} min</p>
+              <p>Estimated burn: {{ formatKcal(estimateBurnKcal(task)) }}</p>
             </div>
-            <h4>{{ task.exercise_name }}</h4>
-            <p>Category: {{ task.category }}</p>
-            <p>Days: {{ task.days }}</p>
-            <p>Duration / day: {{ task.duration_per_day }} min</p>
-            <p>Estimated burn: {{ formatKcal(estimateBurnKcal(task)) }}</p>
           </article>
         </section>
       </article>
@@ -1512,15 +1514,57 @@ async function handleDateChange(dateKey) {
 
 .plan-row-head {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px 16px;
+  flex-wrap: nowrap;
+  padding-bottom: 12px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid #e3efec;
+}
+
+.plan-card-title {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--c6);
+  line-height: 1.3;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-card-body {
+  padding-top: 12px;
+  display: grid;
+  gap: 6px;
+}
+
+.plan-card-body p {
+  margin: 0;
+  color: #2f4858;
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 .plan-head-actions {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.plan-head-actions .tiny-fav-btn,
+.plan-head-actions .plan-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  box-sizing: border-box;
 }
 
 .plan-list-empty {

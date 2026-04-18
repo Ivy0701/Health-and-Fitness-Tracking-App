@@ -27,15 +27,23 @@ function minutesToHHmm(total) {
   return `${pad2(h)}:${pad2(mm)}`;
 }
 
+const DIET_LOG_SYNC_SOURCE = "diet_log_sync";
+
 function defaultDurationMinutes(itemType, row = {}) {
   const type = String(itemType || row.itemType || "manual").toLowerCase();
+  /** Meal blocks from Diet records are always 15m on the schedule; ignore corrupt DB durations. */
+  if (type === "diet" && String(row?.scheduleSource || "").trim() === DIET_LOG_SYNC_SOURCE) {
+    return 15;
+  }
   const fromRow = Number(row.durationMinutes);
   if (Number.isFinite(fromRow) && fromRow >= 1) {
     if (type === "workout" || type === "exercise") return Math.max(30, Math.min(120, fromRow));
     if (type === "course" || type === "course_session") return Math.max(1, fromRow);
     return fromRow;
   }
-  if (type === "diet") return 30;
+  if (type === "diet") {
+    return 30;
+  }
   if (type === "workout" || type === "exercise") return 45;
   if (type === "course" || type === "course_session") return 30;
   if (type === "reminder" || type === "personal" || type === "manual") return 30;
@@ -47,8 +55,9 @@ function normalizeScheduleItemTimeRange(row) {
   const timeRaw = String(row?.time || "").trim();
   const time = timeRaw.slice(0, 5);
   const start = parseTimeToMinutes(time);
-  const durationMinutes = defaultDurationMinutes(row?.itemType, row);
-  const end = Number.isFinite(start) ? start + Math.max(1, durationMinutes) : NaN;
+  const rawDur = defaultDurationMinutes(row?.itemType, row);
+  const durationMinutes = Math.max(1, Math.round(Number(rawDur) || 1));
+  const end = Number.isFinite(start) ? start + durationMinutes : NaN;
   return { date, time, start, end, durationMinutes };
 }
 
@@ -75,18 +84,54 @@ function isCountableBlock(row) {
   return Number.isFinite(parseTimeToMinutes(t));
 }
 
-function hasScheduleConflict(candidate, existingRows, excludeId) {
+/**
+ * Returns whether candidate overlaps any countable existing row (excluding excludeId).
+ * When conflict is true, `hit` identifies the first overlapping row and minute ranges for logs.
+ */
+function findScheduleConflictDetail(candidate, existingRows, excludeId) {
   const c = normalizeScheduleItemTimeRange(candidate);
-  if (!Number.isFinite(c.start) || !Number.isFinite(c.end)) return false;
   const exId = excludeId != null ? String(excludeId) : "";
+  if (!Number.isFinite(c.start) || !Number.isFinite(c.end)) {
+    return {
+      conflict: false,
+      candidateRange: { date: c.date, time: c.time, startMin: c.start, endMin: c.end, durationMinutes: c.durationMinutes },
+      hit: null,
+      invalidCandidate: true,
+    };
+  }
+  const candForOverlap = { ...candidate, date: c.date, time: c.time, durationMinutes: c.durationMinutes };
   for (const e of existingRows || []) {
-    if (exId && String(e?._id || "") === exId) continue;
+    const eid = String(e?._id || "");
+    if (exId && eid === exId) continue;
     if (!isCountableBlock(e)) continue;
-    if (itemsTimeOverlap({ ...candidate, date: c.date, time: c.time, durationMinutes: c.durationMinutes }, e)) {
-      return true;
+    if (itemsTimeOverlap(candForOverlap, e)) {
+      const nb = normalizeScheduleItemTimeRange(e);
+      return {
+        conflict: true,
+        candidateRange: { date: c.date, time: c.time, startMin: c.start, endMin: c.end, durationMinutes: c.durationMinutes },
+        hit: {
+          id: eid,
+          itemType: e?.itemType,
+          scheduleSource: String(e?.scheduleSource || ""),
+          title: e?.title,
+          date: String(e?.date || "").trim(),
+          time: String(e?.time || "").trim().slice(0, 5),
+          startMin: nb.start,
+          endMin: nb.end,
+          durationMinutes: nb.durationMinutes,
+        },
+      };
     }
   }
-  return false;
+  return {
+    conflict: false,
+    candidateRange: { date: c.date, time: c.time, startMin: c.start, endMin: c.end, durationMinutes: c.durationMinutes },
+    hit: null,
+  };
+}
+
+function hasScheduleConflict(candidate, existingRows, excludeId) {
+  return findScheduleConflictDetail(candidate, existingRows, excludeId).conflict;
 }
 
 function preferredWindowsForItem(itemType, mealType) {
@@ -175,7 +220,7 @@ function findNextAvailableTimeSlot(date, durationMinutes, existingRows, options 
   return null;
 }
 
-const SCHEDULE_CONFLICT_MESSAGE = "This time slot is already occupied by another scheduled item.";
+const SCHEDULE_CONFLICT_MESSAGE = "This time overlaps with another scheduled item.";
 
 const DIET_PLAN_MEAL_ORDER = ["breakfast", "lunch", "dinner", "snack"];
 
@@ -284,6 +329,7 @@ module.exports = {
   normalizeScheduleItemTimeRange,
   intervalsOverlap,
   itemsTimeOverlap,
+  findScheduleConflictDetail,
   hasScheduleConflict,
   findNextAvailableTimeSlot,
   findSlotForDietMeal,

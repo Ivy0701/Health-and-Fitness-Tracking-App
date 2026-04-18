@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
 import { getTodayLocalDate } from "../utils/dateLocal";
-import { isDietFoodLogScheduleRow } from "../utils/dietPlanSchedulePayload";
+import { isDietFoodLogScheduleRow, isDietMealPlanApplyRow } from "../utils/dietPlanSchedulePayload";
 import {
   WEEKDAY_LABELS,
   addDays,
@@ -12,8 +12,10 @@ import {
   clusterItemsForDay,
   clusterTimeRangeLabel,
   dateForWeekday,
+  effectiveDurationMinutes,
   findNextAvailableTimeSlot,
   getDefaultDurationMinutes,
+  itemEndMinutes,
   minutesToHHmm,
   mondayOfDate,
   parseTimeToMinutes,
@@ -27,6 +29,7 @@ import {
   timetableTotalMinutes,
   SCHEDULE_CONFLICT_MESSAGE,
 } from "../utils/weekSchedule";
+import { calculateWorkoutCaloriesBurned, resolveWeightKg } from "../utils/workoutCaloriesBurn";
 
 const me = ref(null);
 const items = ref([]);
@@ -88,7 +91,7 @@ const visibleItems = computed(() =>
     const type = String(item?.itemType || "").toLowerCase();
     const allowed = ["course", "course_session", "workout", "exercise", "reminder", "manual", "personal", "diet"];
     if (!allowed.includes(type) || !String(item?.title || "").trim() || !item?.date || !item?.time) return false;
-    if (isDietFoodLogScheduleRow(item)) return false;
+    if (isDietMealPlanApplyRow(item)) return false;
     return true;
   })
 );
@@ -171,6 +174,8 @@ const ttTailPx = TIMETABLE_BOTTOM_BUFFER_PX;
 
 const slotModalOpen = ref(false);
 const slotModalItems = ref([]);
+/** When modal opened for a diet_log_sync meal block: foods from Diet API for that meal/date. */
+const slotModalDietDetail = ref(null);
 const slotModalOverlayEl = ref(null);
 
 watch(slotModalOpen, async (open) => {
@@ -182,11 +187,65 @@ watch(slotModalOpen, async (open) => {
 function closeSlotModal() {
   slotModalOpen.value = false;
   slotModalItems.value = [];
+  slotModalDietDetail.value = null;
 }
 
-function openSlotModal(cluster) {
+/** One decimal for diet kcal totals / rows (avoids 591.4000000000001 display). */
+function formatKcalOneDecimal(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "0.0";
+  return (Math.round(n * 10) / 10).toFixed(1);
+}
+
+async function loadDietMealDetailForModal(scheduleItem) {
+  const uid = String(me.value?.id || "").trim();
+  const meal = String(scheduleItem?.meal || "").toLowerCase();
+  const mealLabel =
+    meal === "breakfast"
+      ? "Breakfast"
+      : meal === "lunch"
+        ? "Lunch"
+        : meal === "dinner"
+          ? "Dinner"
+          : meal === "snack"
+            ? "Snack"
+            : "Meal";
+  slotModalDietDetail.value = { loading: true, loaded: false, records: [], mealLabel, total: 0, date: scheduleItem.date, error: "" };
+  try {
+    const { data } = await api.get(`/diets/${uid}`, {
+      params: { date: scheduleItem.date, _ts: Date.now() },
+      headers: { "Cache-Control": "no-cache" },
+    });
+    const rows = (Array.isArray(data) ? data : []).filter((r) => String(r.mealType || "").toLowerCase() === meal);
+    rows.sort((a, b) => {
+      const ta = new Date(a.recordedAt || a.createdAt || 0).getTime();
+      const tb = new Date(b.recordedAt || b.createdAt || 0).getTime();
+      return ta - tb;
+    });
+    const total = rows.reduce((sum, r) => sum + (Number.isFinite(Number(r.calories)) ? Number(r.calories) : 0), 0);
+    slotModalDietDetail.value = { loading: false, loaded: true, records: rows, mealLabel, total, date: scheduleItem.date, error: "" };
+  } catch (e) {
+    slotModalDietDetail.value = {
+      loading: false,
+      loaded: true,
+      records: [],
+      mealLabel,
+      total: 0,
+      date: scheduleItem.date,
+      error: e?.response?.data?.message || "Could not load foods for this meal.",
+    };
+  }
+}
+
+async function openSlotModal(cluster) {
+  slotModalDietDetail.value = null;
+  formError.value = "";
   slotModalItems.value = sortClusterItemsForModal(cluster);
   slotModalOpen.value = true;
+  const primary = pickClusterPrimaryItem(cluster);
+  if (cluster.length === 1 && primary && isDietFoodLogScheduleRow(primary)) {
+    if (me.value?.id) await loadDietMealDetailForModal(primary);
+  }
 }
 
 function dietPlanGroupKey(it) {
@@ -216,6 +275,9 @@ function timelineBlockTitle(cluster) {
 }
 
 function timelineBlockSubline(cluster) {
+  if (cluster.length === 1 && isDietFoodLogScheduleRow(cluster[0])) {
+    return "";
+  }
   if (cluster.length <= 1) return "";
   if (clusterIsSamePlanDietGroup(cluster)) return `${cluster.length} meals`;
   return `+${cluster.length - 1} more`;
@@ -224,27 +286,141 @@ function timelineBlockSubline(cluster) {
 function timelineMetaLine(cluster) {
   if (cluster.length === 1) {
     const it = cluster[0];
+    if (isDietFoodLogScheduleRow(it)) {
+      const dur = Number(it.durationMinutes) > 0 ? Number(it.durationMinutes) : 15;
+      return `${it.time} · ${dur} min`;
+    }
     return `${it.time} - ${endTimeLabel(it)}`;
   }
   return clusterTimeRangeLabel(cluster);
 }
 
-function modalRowAction(item) {
+/** Estimated burn for plan/manual workout rows (same MET formula as Workout / Dashboard). */
+function scheduleWorkoutBurnKcal(item) {
   const t = String(item?.itemType || "").toLowerCase();
+  if (t !== "workout" && t !== "exercise") return null;
+  const dur = Number(item?.durationMinutes);
+  if (!Number.isFinite(dur) || dur <= 0) return null;
+  const k = calculateWorkoutCaloriesBurned({
+    durationMinutes: dur,
+    category: String(item?.category || ""),
+    title: String(item?.title || "").trim(),
+    weightKg: resolveWeightKg(me.value?.weight),
+  });
+  if (!Number.isFinite(k) || k <= 0) return null;
+  return Math.round(k);
+}
+
+/** Single-slot timeline kcal line (workout from MET; course from API plannedBurnKcal when > 0). */
+function timelineKcalLabel(cluster) {
+  if (!cluster || cluster.length !== 1) return "";
+  const it = cluster[0];
+  if (isDietFoodLogScheduleRow(it)) return "";
+  const t = String(it?.itemType || "").toLowerCase();
   if (t === "workout" || t === "exercise") {
-    return { label: "Start", kind: "workout" };
+    const k = scheduleWorkoutBurnKcal(it);
+    return k != null ? `${k} kcal` : "";
+  }
+  if (t === "course" || t === "course_session") {
+    const k = Number(it?.plannedBurnKcal);
+    if (Number.isFinite(k) && k > 0) return `${Math.round(k)} kcal`;
+    return "";
+  }
+  return "";
+}
+
+function itemTypeLower(it) {
+  return String(it?.itemType || "").toLowerCase();
+}
+
+function isWorkoutLikeItem(it) {
+  const t = itemTypeLower(it);
+  return t === "workout" || t === "exercise";
+}
+
+function isCourseLikeItem(it) {
+  const t = itemTypeLower(it);
+  return Boolean(it?.courseId) || t === "course" || t === "course_session";
+}
+
+/** Kcal string for modal / multi-row meta (aligned with timeline MET + API plannedBurn). */
+function scheduleItemKcalDisplay(it) {
+  if (isWorkoutLikeItem(it)) {
+    const k = scheduleWorkoutBurnKcal(it);
+    return k != null ? `${k} kcal` : "";
+  }
+  if (isCourseLikeItem(it)) {
+    const k = Number(it?.plannedBurnKcal);
+    if (Number.isFinite(k) && k > 0) return `${Math.round(k)} kcal`;
+    return "";
+  }
+  if (itemTypeLower(it) === "diet" && Number.isFinite(Number(it?.totalCalories)) && Number(it.totalCalories) > 0) {
+    return `${Number(it.totalCalories)} kcal`;
+  }
+  return "";
+}
+
+function modalDurationLine(it) {
+  const d = Number(it?.durationMinutes);
+  if (Number.isFinite(d) && d >= 1) return `${d} min`;
+  return "";
+}
+
+function modalStatusLine(it) {
+  if (it?.is_completed) return "Completed";
+  const dk = String(it?.date || "").trim();
+  const today = getTodayLocalDate();
+  if (dk > today) return "Scheduled";
+  if (dk < today) return "Missed";
+  return "Not started";
+}
+
+/** Course session exercise names from schedule list API (`courseExerciseNames` on row). */
+function courseModalExerciseList(it) {
+  if (!isCourseLikeItem(it)) return [];
+  const raw = it?.courseExerciseNames;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((x) => String(x || "").trim()).filter(Boolean);
+}
+
+function workoutSourceLine(it) {
+  if (!isWorkoutLikeItem(it)) return "";
+  if (it?.planId) return "Plan";
+  const st = String(it?.subtitle || "").trim();
+  if (/plan session/i.test(st)) return "Plan";
+  return "Manual";
+}
+
+function modalNoteLine(it) {
+  if (isDietFoodLogScheduleRow(it)) return "";
+  const n = String(it?.note || "").trim();
+  return n;
+}
+
+function singleModalHeadline(it) {
+  if (isDietFoodLogScheduleRow(it)) {
+    const ml = String(slotModalDietDetail.value?.mealLabel || "").trim();
+    if (ml) return ml;
+  }
+  return displayTitle(it);
+}
+
+function modalRowAction(item) {
+  const t = itemTypeLower(item);
+  if (t === "workout" || t === "exercise") {
+    return { label: "View in Workout", kind: "workout" };
   }
   const cid = String(item?.courseId || "").trim();
   if (cid || t === "course" || t === "course_session") {
-    return { label: "Go", kind: "course" };
+    return { label: "Go to Workout (course task)", kind: "course" };
   }
   if (item?.courseIsPremium) {
     return { label: "VIP", kind: "vip" };
   }
   if (t === "diet") {
-    return { label: "View", kind: "diet" };
+    return { label: "View in Diet", kind: "diet" };
   }
-  return { label: "Details", kind: "schedule" };
+  return { label: "View in schedule", kind: "schedule" };
 }
 
 function runModalAction(item, kind) {
@@ -480,8 +656,9 @@ watch(
 function sourceTag(item) {
   if (item.courseIsPremium) return "VIP";
   if (item.itemType === "course" || item.courseId) return "Course";
-  if (item.itemType === "workout") return "Workout";
+  if (item.itemType === "workout" || String(item?.itemType || "").toLowerCase() === "exercise") return "Workout";
   if (String(item?.itemType || "").toLowerCase() === "diet") return "Diet";
+  if (String(item?.itemType || "").toLowerCase() === "personal") return "Personal";
   return "Reminder";
 }
 
@@ -506,6 +683,10 @@ function pickItemName(item) {
 function displayTitle(item) {
   const lowType = String(item?.itemType || "").toLowerCase();
   if (lowType === "diet") {
+    if (isDietFoodLogScheduleRow(item)) {
+      const t = String(item?.title || "").trim();
+      return t || "Diet";
+    }
     const raw = String(pickItemName(item) || "").trim();
     if (raw && !/^diet$/i.test(raw)) return raw;
     const plan = String(item?.planName || "").trim();
@@ -579,10 +760,8 @@ function blockToneClass(item) {
 }
 
 function endTimeLabel(item) {
-  const startMinutes = parseTimeToMinutes(item?.time);
-  const duration = Number(item?.durationMinutes || 60);
-  if (!Number.isFinite(startMinutes)) return item?.time || "00:00";
-  const end = startMinutes + Math.max(1, duration);
+  const end = itemEndMinutes(item);
+  if (!Number.isFinite(end)) return item?.time || "00:00";
   const hh = String(Math.floor(end / 60) % 24).padStart(2, "0");
   const mm = String(end % 60).padStart(2, "0");
   return `${hh}:${mm}`;
@@ -755,6 +934,9 @@ async function applyFocusFromQuery() {
                       completed: clusterPrimary(cluster)?.is_completed,
                       focused: focusedScheduleId && String(clusterPrimary(cluster)?._id || '') === focusedScheduleId,
                       [blockToneClass(clusterPrimary(cluster))]: true,
+                      'diet-log-sync-block':
+                        cluster.length === 1 && isDietFoodLogScheduleRow(clusterPrimary(cluster)),
+                      'block-movement': Boolean(timelineKcalLabel(cluster)),
                     }"
                     :title="timelineBlockTitle(cluster)"
                     :data-schedule-id="String(clusterPrimary(cluster)?._id || '')"
@@ -770,7 +952,12 @@ async function applyFocusFromQuery() {
                     </span>
                     <span class="btitle">{{ timelineBlockTitle(cluster) }}</span>
                     <span v-if="timelineBlockSubline(cluster)" class="bsub">{{ timelineBlockSubline(cluster) }}</span>
-                    <span class="bmeta">{{ timelineMetaLine(cluster) }}</span>
+                    <div v-if="timelineKcalLabel(cluster)" class="bfoot">
+                      <span class="bkcal">{{ timelineKcalLabel(cluster) }}</span>
+                      <span class="bfoot-sep" aria-hidden="true">·</span>
+                      <span class="bmeta bmeta--inline">{{ timelineMetaLine(cluster) }}</span>
+                    </div>
+                    <span v-else class="bmeta">{{ timelineMetaLine(cluster) }}</span>
                     <span v-if="cluster.length > 1" class="bmeta-hint">Open for all items</span>
                   </div>
                 </div>
@@ -802,28 +989,143 @@ async function applyFocusFromQuery() {
             </div>
             <button type="button" class="slot-modal-close" aria-label="Close" @click="closeSlotModal">×</button>
           </div>
-          <ul class="slot-modal-list">
-            <li v-for="it in slotModalItems" :key="String(it._id)" class="slot-modal-row">
-              <div class="slot-modal-row-text">
-                <span class="item-tag">{{ sourceTag(it) }}</span>
-                <strong class="slot-row-time">{{ it.time }} – {{ endTimeLabel(it) }}</strong>
-                <p class="slot-row-title">{{ displayTitle(it) }}</p>
-                <p v-if="it.subtitle" class="muted slot-row-sub">{{ it.subtitle }}</p>
+          <template v-if="slotModalItems.length === 1 && slotModalItems[0]">
+            <div class="slot-modal-core" :class="{ 'slot-modal-core--diet-log': isDietFoodLogScheduleRow(slotModalItems[0]) }">
+              <div class="slot-modal-core-tags">
+                <span class="item-tag item-tag--lg">{{ sourceTag(slotModalItems[0]) }}</span>
+                <span v-if="slotModalItems[0].is_completed && !isDietFoodLogScheduleRow(slotModalItems[0])" class="done-dot">Completed</span>
               </div>
-              <div class="slot-modal-row-actions">
+              <h4 class="slot-modal-hero-title">{{ singleModalHeadline(slotModalItems[0]) }}</h4>
+
+              <template v-if="isCourseLikeItem(slotModalItems[0]) && !isDietFoodLogScheduleRow(slotModalItems[0])">
+                <dl class="slot-meta-dl slot-meta-dl--course">
+                  <template v-if="modalDurationLine(slotModalItems[0])">
+                    <dt>Duration</dt>
+                    <dd>{{ modalDurationLine(slotModalItems[0]) }}</dd>
+                  </template>
+                  <template v-if="scheduleItemKcalDisplay(slotModalItems[0])">
+                    <dt>Estimated burn</dt>
+                    <dd>{{ scheduleItemKcalDisplay(slotModalItems[0]) }}</dd>
+                  </template>
+                  <dt>Status</dt>
+                  <dd>{{ modalStatusLine(slotModalItems[0]) }}</dd>
+                  <template v-if="String(slotModalItems[0].category || '').trim()">
+                    <dt>Category</dt>
+                    <dd>{{ slotModalItems[0].category }}</dd>
+                  </template>
+                </dl>
+                <div v-if="courseModalExerciseList(slotModalItems[0]).length" class="slot-modal-exercises">
+                  <p class="muted slot-modal-exercises-h">Exercises</p>
+                  <ul class="slot-modal-exercise-list">
+                    <li v-for="(name, idx) in courseModalExerciseList(slotModalItems[0])" :key="idx" class="slot-modal-exercise-li">
+                      {{ name }}
+                    </li>
+                  </ul>
+                </div>
+              </template>
+
+              <dl v-else-if="!isDietFoodLogScheduleRow(slotModalItems[0])" class="slot-meta-dl">
+                <template v-if="scheduleItemKcalDisplay(slotModalItems[0])">
+                  <dt>{{ itemTypeLower(slotModalItems[0]) === "diet" ? "Calories" : "Estimated burn" }}</dt>
+                  <dd>{{ scheduleItemKcalDisplay(slotModalItems[0]) }}</dd>
+                </template>
+                <template v-if="modalDurationLine(slotModalItems[0])">
+                  <dt>Duration</dt>
+                  <dd>{{ modalDurationLine(slotModalItems[0]) }}</dd>
+                </template>
+                <dt>Status</dt>
+                <dd>{{ modalStatusLine(slotModalItems[0]) }}</dd>
+                <template v-if="workoutSourceLine(slotModalItems[0])">
+                  <dt>Source</dt>
+                  <dd>{{ workoutSourceLine(slotModalItems[0]) }}</dd>
+                </template>
+                <template v-if="String(slotModalItems[0].subtitle || '').trim()">
+                  <dt>Detail</dt>
+                  <dd class="slot-meta-dd-wrap">{{ slotModalItems[0].subtitle }}</dd>
+                </template>
+                <template v-if="String(slotModalItems[0].category || '').trim()">
+                  <dt>Category</dt>
+                  <dd>{{ slotModalItems[0].category }}</dd>
+                </template>
+                <template v-if="modalNoteLine(slotModalItems[0])">
+                  <dt>Note</dt>
+                  <dd class="slot-meta-dd-wrap">{{ modalNoteLine(slotModalItems[0]) }}</dd>
+                </template>
+              </dl>
+
+              <dl v-else class="slot-meta-dl slot-meta-dl--diet-log">
+                <template v-if="modalDurationLine(slotModalItems[0])">
+                  <dt>Duration</dt>
+                  <dd>{{ modalDurationLine(slotModalItems[0]) }}</dd>
+                </template>
+              </dl>
+
+              <div
+                v-if="isDietFoodLogScheduleRow(slotModalItems[0]) && slotModalDietDetail && (slotModalDietDetail.loading || slotModalDietDetail.loaded)"
+                class="diet-meal-detail diet-meal-detail--in-core"
+              >
+                <template v-if="slotModalDietDetail.loading">
+                  <p class="muted diet-meal-detail-status">Loading foods…</p>
+                </template>
+                <template v-else-if="slotModalDietDetail.error">
+                  <p class="error diet-meal-detail-status">{{ slotModalDietDetail.error }}</p>
+                </template>
+                <template v-else>
+                  <p v-if="slotModalDietDetail.records?.length" class="muted slot-diet-foods-h">Foods</p>
+                  <ul v-if="slotModalDietDetail.records?.length" class="diet-meal-detail-list">
+                    <li v-for="r in slotModalDietDetail.records" :key="String(r._id)" class="diet-meal-detail-row diet-meal-detail-row--modal">
+                      <span class="dm-name">{{ r.foodName }}</span>
+                      <span class="dm-kcal">{{ formatKcalOneDecimal(r.calories) }} kcal</span>
+                    </li>
+                  </ul>
+                  <p v-else class="muted diet-meal-detail-status">No diet records matched this meal block.</p>
+                  <p v-if="slotModalDietDetail.records?.length" class="diet-meal-detail-total">
+                    <strong>Total:</strong> {{ formatKcalOneDecimal(slotModalDietDetail.total) }} kcal
+                  </p>
+                </template>
+              </div>
+
+              <div class="slot-modal-core-actions">
                 <button
                   type="button"
                   class="nav-btn ghost slot-act"
-                  @click="runModalAction(it, modalRowAction(it).kind)"
+                  @click="runModalAction(slotModalItems[0], modalRowAction(slotModalItems[0]).kind)"
                 >
-                  {{ modalRowAction(it).label }}
+                  {{ modalRowAction(slotModalItems[0]).label }}
                 </button>
                 <button
                   type="button"
                   class="slot-del"
-                  :disabled="deletingIds.has(String(it._id))"
-                  @click="removeSlotItem(it)"
+                  :disabled="deletingIds.has(String(slotModalItems[0]._id))"
+                  @click="removeSlotItem(slotModalItems[0])"
                 >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </template>
+
+          <ul v-else class="slot-modal-list">
+            <li v-for="it in slotModalItems" :key="String(it._id)" class="slot-modal-row">
+              <div class="slot-modal-row-text">
+                <div class="slot-modal-row-head">
+                  <span class="item-tag">{{ sourceTag(it) }}</span>
+                  <span v-if="it.is_completed" class="done-dot done-dot--sm">Completed</span>
+                </div>
+                <strong class="slot-row-title slot-row-title--multi">{{ displayTitle(it) }}</strong>
+                <p class="muted slot-row-meta">
+                  {{ it.time }} – {{ endTimeLabel(it) }}
+                  <template v-if="modalDurationLine(it)"> · {{ modalDurationLine(it) }}</template>
+                  <template v-if="scheduleItemKcalDisplay(it)"> · {{ scheduleItemKcalDisplay(it) }}</template>
+                </p>
+                <p v-if="!isDietFoodLogScheduleRow(it)" class="muted slot-row-status">Status: {{ modalStatusLine(it) }}</p>
+                <p v-if="it.subtitle" class="muted slot-row-sub">{{ it.subtitle }}</p>
+              </div>
+              <div class="slot-modal-row-actions">
+                <button type="button" class="nav-btn ghost slot-act" @click="runModalAction(it, modalRowAction(it).kind)">
+                  {{ modalRowAction(it).label }}
+                </button>
+                <button type="button" class="slot-del" :disabled="deletingIds.has(String(it._id))" @click="removeSlotItem(it)">
                   Delete
                 </button>
               </div>
@@ -836,8 +1138,9 @@ async function applyFocusFromQuery() {
     <section class="panel add-panel">
       <h3>Add schedule item</h3>
       <p class="muted">
-        Add Workout, Course Session, Reminder, or Personal. Diet blocks are added from the Diet page via Apply Plan. Leave times
-        empty to auto-pick the next free slot. Workout items also appear on the Workout page for that date.
+        Add Workout, Course Session, Reminder, or Personal. Diet meal blocks on the timeline come from Diet records (Add to
+        Records / manual add). Leave times empty to auto-pick the next free slot. Workout items also appear on the Workout page
+        for that date.
       </p>
       <form novalidate @submit.prevent="addItem">
         <input v-model="form.title" placeholder="Title" />
@@ -875,7 +1178,7 @@ async function applyFocusFromQuery() {
         <h3>{{ displayTitle(s) }}</h3>
         <p v-if="s.subtitle">{{ s.subtitle }}</p>
         <p class="muted">Type: {{ sourceTag(s) }}</p>
-        <p>Date: {{ s.date }} · {{ s.time }} ({{ s.durationMinutes || 60 }} min)</p>
+        <p>Date: {{ s.date }} · {{ s.time }} ({{ effectiveDurationMinutes(s) }} min)</p>
         <p class="muted">{{ s.note || "No note" }}</p>
         <button :disabled="deletingIds.has(String(s._id))" @click="removeItem(s)">Delete</button>
       </article>
@@ -1148,6 +1451,42 @@ async function applyFocusFromQuery() {
   cursor: pointer;
 }
 
+.block.merged-slot.diet-log-sync-block {
+  min-height: 86px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  gap: 5px;
+  line-height: 1.35;
+}
+
+.block.merged-slot.diet-log-sync-block .btitle,
+.block.merged-slot.diet-log-sync-block .bsub,
+.block.merged-slot.diet-log-sync-block .bmeta {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: break-word;
+}
+
+.block.merged-slot.block-movement {
+  gap: 2px;
+  padding: 6px 8px 5px;
+}
+
+.block.merged-slot.block-movement .bhead {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+.block.merged-slot.block-movement .item-tag,
+.block.merged-slot.block-movement .done-dot {
+  font-size: 8.5px;
+}
+
+.block.merged-slot.block-movement .btitle {
+  line-height: 1.22;
+}
+
 .block.merged-slot:hover {
   filter: brightness(1.02);
   box-shadow: 0 4px 12px rgba(47, 72, 88, 0.16);
@@ -1213,6 +1552,50 @@ async function applyFocusFromQuery() {
   min-width: 0;
 }
 
+.bfoot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 6px;
+  row-gap: 0;
+  margin-top: auto;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.bfoot-sep {
+  color: #5a7580;
+  font-size: 10px;
+  font-weight: 600;
+  flex: 0 0 auto;
+  line-height: 1.2;
+}
+
+.bkcal {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #2f6f5c;
+  letter-spacing: 0.01em;
+  line-height: 1.25;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.bfoot .bkcal {
+  overflow: visible;
+}
+
+.bmeta--inline {
+  margin-top: 0;
+  font-size: 10.5px;
+  color: #4b6672;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: visible;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .bhead {
   display: flex;
   align-items: center;
@@ -1269,6 +1652,7 @@ async function applyFocusFromQuery() {
   color: #4b6672;
   flex-shrink: 0;
   margin-top: auto;
+  line-height: 1.25;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1363,13 +1747,222 @@ async function applyFocusFromQuery() {
 
 .slot-modal-card {
   width: min(440px, 100%);
-  max-height: min(80vh, 560px);
+  max-height: min(86vh, 640px);
   overflow: auto;
   border-radius: 14px;
   background: #fdfefe;
   border: 1px solid #cfe4df;
   box-shadow: 0 16px 40px rgba(30, 60, 55, 0.2);
   padding: 16px 18px 18px;
+}
+
+.slot-modal-core {
+  margin-top: 2px;
+}
+
+.slot-modal-core-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.slot-modal-hero-title {
+  margin: 8px 0 0;
+  font-size: 17px;
+  font-weight: 700;
+  color: #1f3b42;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.slot-meta-dl {
+  display: grid;
+  grid-template-columns: minmax(92px, 34%) 1fr;
+  gap: 6px 12px;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f5fbf9;
+  border: 1px solid #dceae6;
+  font-size: 13px;
+}
+
+.slot-meta-dl dt {
+  margin: 0;
+  font-weight: 700;
+  color: #5a7580;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.slot-meta-dl dd {
+  margin: 0;
+  color: #1a3338;
+  font-weight: 600;
+}
+
+.slot-meta-dd-wrap {
+  font-weight: 500;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.slot-modal-core-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #e6f0ed;
+}
+
+.item-tag--lg {
+  font-size: 10px;
+  padding: 2px 8px;
+}
+
+.slot-modal-core--diet-log .diet-meal-detail--in-core {
+  margin: 10px 0 16px;
+}
+
+.slot-diet-foods-h {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.done-dot--sm {
+  font-size: 8px;
+  padding: 1px 5px;
+}
+
+.slot-modal-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.slot-row-title--multi {
+  display: block;
+  margin-top: 6px;
+}
+
+.slot-row-meta {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.slot-row-status {
+  margin: 2px 0 0;
+  font-size: 11px;
+}
+
+.diet-meal-detail {
+  margin: 0 0 14px;
+  padding: 12px 12px 10px;
+  border-radius: 10px;
+  background: #f3faf8;
+  border: 1px solid #cfe4df;
+}
+
+.diet-meal-detail-status {
+  margin: 0;
+  font-size: 13px;
+}
+
+.diet-meal-detail-title {
+  margin: 0 0 10px;
+  font-size: 15px;
+  color: #1f3b42;
+}
+
+.diet-meal-detail-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.diet-meal-detail-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "name kcal" "src src";
+  gap: 2px 12px;
+  font-size: 13px;
+  color: #2f4858;
+}
+
+.dm-name {
+  grid-area: name;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.dm-kcal {
+  grid-area: kcal;
+  justify-self: end;
+  white-space: nowrap;
+}
+
+.dm-src {
+  grid-area: src;
+  font-size: 12px;
+}
+
+.diet-meal-detail-row--modal {
+  grid-template-areas: "name kcal";
+}
+
+.slot-modal-exercises {
+  margin: 12px 0 0;
+  padding: 12px 12px 10px;
+  border-radius: 10px;
+  background: #f3f7fb;
+  border: 1px solid #d5e2f0;
+}
+
+.slot-modal-exercises-h {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.slot-modal-exercise-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.slot-modal-exercise-li {
+  font-size: 13px;
+  color: #2f4858;
+  padding-left: 0.65rem;
+  position: relative;
+}
+
+.slot-modal-exercise-li::before {
+  content: "–";
+  position: absolute;
+  left: 0;
+  color: #6b8a9e;
+}
+
+.slot-meta-dl--diet-log {
+  margin-bottom: 8px;
+}
+
+.diet-meal-detail-total {
+  margin: 10px 0 0;
+  font-size: 14px;
+  color: #1f3b42;
 }
 
 .slot-modal-head {

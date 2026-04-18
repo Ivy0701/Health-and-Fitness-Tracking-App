@@ -2,6 +2,7 @@ const https = require("https");
 const asyncHandler = require("../../utils/asyncHandler");
 const Diet = require("../../models/Diet");
 const User = require("../../models/User");
+const { syncDietLogScheduleForMeal } = require("../../utils/dietScheduleSync");
 const FOOD_LIBRARY = require("./foodLibrary");
 
 const ALLOWED_MEAL_TYPES = new Set(["breakfast", "lunch", "dinner", "snack"]);
@@ -53,6 +54,16 @@ function formatTimeKeyFromDate(value) {
   const dt = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(dt.getTime())) return "12:00";
   return `${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
+}
+
+function normalizeRecordedTimeLocal(raw) {
+  const s = String(raw ?? "").trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return "";
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (!Number.isFinite(h) || !Number.isFinite(min) || h < 0 || h > 23 || min < 0 || min > 59) return "";
+  return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
 }
 
 function formatMealTypeLabel(mealType) {
@@ -273,7 +284,10 @@ function sanitizePayload(payload) {
   const sourceType = payload.sourceType === "recommended" ? "recommended" : "manual";
   const foodId = String(payload.foodId || "").trim();
   const recommendationId = String(payload.recommendationId || "").trim();
+  const dietPlanId = String(payload.dietPlanId || "").trim().slice(0, 64);
+  const planName = String(payload.planName || "").trim().slice(0, 120);
   const recordedAt = payload.recordedAt ? new Date(payload.recordedAt) : null;
+  const recordedTimeLocalNorm = normalizeRecordedTimeLocal(payload.recordedTimeLocal);
 
   if (!foodName) errors.push("foodName is required");
   if (!ALLOWED_MEAL_TYPES.has(mealType)) errors.push("mealType is invalid");
@@ -302,6 +316,9 @@ function sanitizePayload(payload) {
     recommendationId,
   };
   if (recordedAt) data.recordedAt = recordedAt;
+  if (recordedTimeLocalNorm) data.recordedTimeLocal = recordedTimeLocalNorm;
+  if (dietPlanId) data.dietPlanId = dietPlanId;
+  if (planName) data.planName = planName;
 
   return { errors, data };
 }
@@ -322,6 +339,9 @@ function serializeDiet(row) {
     recommendationId: row.recommendationId || "",
     scheduleItemId: row.scheduleItemId ? String(row.scheduleItemId) : "",
     recordedAt: row.recordedAt || row.createdAt || null,
+    recordedTimeLocal: row.recordedTimeLocal ? String(row.recordedTimeLocal).trim().slice(0, 5) : "",
+    dietPlanId: row.dietPlanId ? String(row.dietPlanId).trim() : "",
+    planName: row.planName ? String(row.planName).trim() : "",
   };
 }
 
@@ -412,26 +432,41 @@ const create = asyncHandler(async (req, res) => {
   if (errors.length) return res.status(400).json({ message: errors[0] });
   const row = await Diet.create({ userId: uid, ...data, recordedAt: data.recordedAt || new Date() });
   const fresh = await Diet.findById(row._id).lean();
-  res.status(201).json(serializeDiet(fresh || row.toObject()));
+  const out = serializeDiet(fresh || row.toObject());
+  const dk = formatDateKeyFromDate((fresh || row).date);
+  if (dk) await syncDietLogScheduleForMeal(uid, dk, (fresh || row).mealType);
+  res.status(201).json(out);
 });
 
 const update = asyncHandler(async (req, res) => {
   const row = await Diet.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Diet record not found" });
   if (String(row.userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  const prevDateKey = formatDateKeyFromDate(row.date);
+  const prevMealType = String(row.mealType || "").toLowerCase();
   const { errors, data } = sanitizePayload(req.body);
   if (errors.length) return res.status(400).json({ message: errors[0] });
   Object.assign(row, data);
   await row.save();
   const fresh = await Diet.findById(row._id).lean();
-  res.json(serializeDiet(fresh || row.toObject()));
+  const out = serializeDiet(fresh || row.toObject());
+  const nextDateKey = formatDateKeyFromDate((fresh || row).date);
+  const nextMealType = String((fresh || row).mealType || "").toLowerCase();
+  if (nextDateKey) await syncDietLogScheduleForMeal(req.user.id, nextDateKey, nextMealType);
+  if (prevDateKey && (prevDateKey !== nextDateKey || prevMealType !== nextMealType)) {
+    await syncDietLogScheduleForMeal(req.user.id, prevDateKey, prevMealType);
+  }
+  res.json(out);
 });
 
 const remove = asyncHandler(async (req, res) => {
   const row = await Diet.findById(req.params.id);
   if (!row) return res.status(404).json({ message: "Diet record not found" });
   if (String(row.userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+  const prevDateKey = formatDateKeyFromDate(row.date);
+  const prevMealType = String(row.mealType || "").toLowerCase();
   await row.deleteOne();
+  if (prevDateKey) await syncDietLogScheduleForMeal(req.user.id, prevDateKey, prevMealType);
   res.json({ success: true });
 });
 

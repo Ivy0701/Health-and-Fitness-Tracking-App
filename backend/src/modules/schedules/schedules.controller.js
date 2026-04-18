@@ -9,6 +9,9 @@ const WorkoutDailyStatus = require("../../models/WorkoutDailyStatus");
 const WorkoutPlan = require("../../models/WorkoutPlan");
 const EnrolledCourse = require("../../models/EnrolledCourse");
 const CourseDailyProgress = require("../../models/CourseDailyProgress");
+const { buildCourseExercises, summarizeCourseExercises } = require("../../utils/courseSession");
+const { applyMetBurnsToExercises } = require("../../utils/workoutCaloriesBurn");
+const { runDietScheduleHygieneForUser } = require("../../utils/dietScheduleDataHygiene");
 
 async function isVipUser(userId) {
   const u = await User.findById(userId).select("vip_status isVip").lean();
@@ -43,6 +46,7 @@ function isPlanBackedItem(row) {
 }
 
 const DIET_PLAN_APPLY_SOURCE = "diet_plan_apply";
+const DIET_LOG_SYNC_SOURCE = "diet_log_sync";
 
 function isDietPlanApplyRow(row, dietPlanId) {
   const pid = String(dietPlanId || "").trim();
@@ -124,14 +128,109 @@ async function removeSingleItemAndLinkedState({ row, userId }) {
   }
 }
 
+function parseDateKeyForCourseBurn(dateKey) {
+  const s = String(dateKey || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const d = new Date(`${s}T00:00:00`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function diffInDaysInclusiveForCourseBurn(startDateKey, targetDateKey) {
+  const start = parseDateKeyForCourseBurn(startDateKey);
+  const target = parseDateKeyForCourseBurn(targetDateKey);
+  if (!start || !target) return 1;
+  const diff = Math.floor((target - start) / 86400000);
+  return diff + 1;
+}
+
+/** Aligns with getTodayPlan course_tasks: planned burn from synthesized or saved exercises + MET table. */
+async function attachPlannedBurnKcalForCourseRows(userId, rows) {
+  const courseRows = rows.filter((r) => {
+    const t = String(r?.itemType || "").toLowerCase();
+    return (t === "course" || t === "course_session") && r.courseId && mongoose.isValidObjectId(String(r.courseId));
+  });
+  if (!courseRows.length) return;
+
+  const user = await User.findById(userId).select("weight").lean();
+  const weightKg = user?.weight;
+
+  const oidList = [
+    ...new Set(courseRows.map((r) => String(r.courseId)).filter((id) => mongoose.isValidObjectId(id))),
+  ].map((id) => new mongoose.Types.ObjectId(id));
+  if (!oidList.length) return;
+
+  const enrollments = await EnrolledCourse.find({
+    user_id: userId,
+    status: "active",
+    course_id: { $in: oidList },
+  })
+    .populate("course_id", "title duration category duration_days exercises_preview")
+    .lean();
+  if (!enrollments.length) return;
+
+  const enrolledIds = enrollments.map((e) => e._id);
+  const dateSet = [
+    ...new Set(courseRows.map((r) => String(r.date || "").trim()).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))),
+  ];
+  const progressDocs = await CourseDailyProgress.find({
+    user_id: userId,
+    enrolled_course_id: { $in: enrolledIds },
+    date: { $in: dateSet },
+  }).lean();
+  const progressMap = new Map(progressDocs.map((p) => [`${p.enrolled_course_id}:${p.date}`, p]));
+  const enrollmentByCourseId = new Map(enrollments.map((e) => [String(e.course_id?._id || e.course_id || ""), e]));
+
+  for (const row of rows) {
+    const t = String(row?.itemType || "").toLowerCase();
+    if (t !== "course" && t !== "course_session") continue;
+    const cid = String(row.courseId || "");
+    if (!mongoose.isValidObjectId(cid)) continue;
+    const enr = enrollmentByCourseId.get(cid);
+    if (!enr) continue;
+    const dateKey = String(row.date || "").trim();
+    const progress = progressMap.get(`${enr._id}:${dateKey}`);
+    let exercises = Array.isArray(progress?.exercises) ? progress.exercises : [];
+    const courseMeta = enr.course_id && typeof enr.course_id === "object" ? enr.course_id : {};
+    const day = diffInDaysInclusiveForCourseBurn(enr.start_date, dateKey);
+    if (!exercises.length) {
+      exercises = buildCourseExercises(
+        {
+          title: String(courseMeta.title || row.title || ""),
+          duration: Number(courseMeta.duration || row.durationMinutes || 30),
+          category: String(courseMeta.category || ""),
+        },
+        day,
+        weightKg
+      );
+    }
+    const courseCategory = String(courseMeta.category || "");
+    const withBurn = applyMetBurnsToExercises(exercises, courseCategory, weightKg);
+    const summary = summarizeCourseExercises(withBurn);
+    const burn = Number(summary?.estimated_burn || 0);
+    if (Number.isFinite(burn) && burn > 0) row.plannedBurnKcal = burn;
+
+    let names = (withBurn || []).map((ex) => String(ex?.title || "").trim()).filter(Boolean);
+    if (!names.length && Array.isArray(courseMeta.exercises_preview) && courseMeta.exercises_preview.length) {
+      names = courseMeta.exercises_preview.map((x) => String(x || "").trim()).filter(Boolean);
+    }
+    row.courseExerciseNames = names;
+  }
+}
+
 const list = asyncHandler(async (req, res) => {
   const userId = req.params.userId;
   if (String(userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
-  await ScheduleItem.deleteMany({
-    userId,
-    itemType: "diet",
-    scheduleSource: "diet_log_sync",
-  });
+  /** Safe DB hygiene: duplicate diet_log_sync per day+meal, fix wrong durationMinutes (no localStorage involved). */
+  try {
+    const h = await runDietScheduleHygieneForUser(req.user.id);
+    if (String(process.env.DEBUG_SCHEDULE_HYGIENE || "").trim() === "1" && (h.deletedRows > 0 || h.durationNormalized > 0)) {
+      // eslint-disable-next-line no-console
+      console.log("[schedule list hygiene]", JSON.stringify(h));
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[schedule list hygiene] skipped:", err?.message || err);
+  }
   let rows = await ScheduleItem.find({ userId })
     .populate("courseId", "isPremium")
     .sort({ date: 1, time: 1, createdAt: -1 })
@@ -164,6 +263,7 @@ const list = asyncHandler(async (req, res) => {
           : null;
     return { ...row, courseId, courseIsPremium };
   });
+  await attachPlannedBurnKcalForCourseRows(req.user.id, out);
   res.json(out);
 });
 
@@ -377,9 +477,49 @@ const create = asyncHandler(async (req, res) => {
 });
 
 const update = asyncHandler(async (req, res) => {
-  const row = await ScheduleItem.findById(req.params.id);
+  const qid = mongoose.Types.ObjectId.isValid(String(req.params.id || "").trim())
+    ? new mongoose.Types.ObjectId(String(req.params.id).trim())
+    : null;
+  if (!qid) return res.status(400).json({ message: "Invalid schedule item id" });
+
+  const logPutEntry =
+    String(process.env.DEBUG_SCHEDULE_PUT_ENTRY || "").trim() === "1" ||
+    String(process.env.DEBUG_SCHEDULE_PUT_TRACE || "").trim() === "1" ||
+    String(process.env.DEBUG_SCHEDULE_CONFLICT || "").trim() === "1";
+  if (logPutEntry) {
+    const probe = await ScheduleItem.findOne({ _id: qid, userId: req.user.id })
+      .select("_id itemType scheduleSource meal date time durationMinutes")
+      .lean();
+    // eslint-disable-next-line no-console
+    console.log(
+      "[schedule PUT entry]",
+      JSON.stringify({
+        paramsId: String(qid),
+        userId: String(req.user.id),
+        body: req.body,
+        findOneExists: Boolean(probe),
+        probe: probe
+          ? {
+              _id: String(probe._id),
+              itemType: probe.itemType,
+              scheduleSource: probe.scheduleSource,
+              meal: probe.meal,
+              date: probe.date,
+              time: probe.time,
+              durationMinutes: probe.durationMinutes,
+            }
+          : null,
+      })
+    );
+  }
+
+  let row = await ScheduleItem.findById(qid);
   if (!row) return res.status(404).json({ message: "Schedule item not found" });
   if (String(row.userId) !== String(req.user.id)) return res.status(403).json({ message: "Forbidden" });
+
+  const logPutTrace =
+    String(process.env.DEBUG_SCHEDULE_PUT_TRACE || "").trim() === "1" ||
+    String(process.env.DEBUG_SCHEDULE_CONFLICT || "").trim() === "1";
 
   const patch = {};
   if (req.body.title != null) patch.title = String(req.body.title).trim();
@@ -396,15 +536,96 @@ const update = asyncHandler(async (req, res) => {
   Object.assign(row, patch);
   const dateKey = String(row.date || "").trim();
   const nType = normalizeItemType(row.itemType);
+  const isDietLogSyncRow =
+    nType === "diet" && String(row.scheduleSource || "").trim() === DIET_LOG_SYNC_SOURCE;
+
+  if (logPutTrace) {
+    // eslint-disable-next-line no-console
+    console.log(
+      "[schedule PUT trace]",
+      JSON.stringify({
+        phase: "before hygiene",
+        userId: String(req.user.id),
+        paramsId: String(qid),
+        exists: true,
+        keepScheduleItemIdPassedToHygiene: isDietLogSyncRow ? String(qid) : null,
+        isDietLogSyncRow,
+        itemType: row.itemType,
+        scheduleSource: String(row.scheduleSource || ""),
+        meal: String(row.meal || ""),
+        dateKey,
+      })
+    );
+  }
+
+  /**
+   * Align with GET /schedules list: normalize diet_log_sync durations + dedupe duplicates
+   * before conflict reads `existing`. When editing diet_log_sync, keep this row id so it is not deleted.
+   */
+  try {
+    await runDietScheduleHygieneForUser(req.user.id, isDietLogSyncRow ? { keepScheduleItemId: qid } : {});
+    const rel = await ScheduleItem.findById(qid);
+    if (logPutTrace) {
+      // eslint-disable-next-line no-console
+      console.log(
+        "[schedule PUT trace]",
+        JSON.stringify({
+          phase: "after hygiene + findById(paramsId)",
+          userId: String(req.user.id),
+          paramsId: String(qid),
+          exists: Boolean(rel),
+          note: rel
+            ? "document still present"
+            : "MISSING — row was likely removed during dedupe (keepScheduleItemId not matched in duplicate group, or other delete); enable DEBUG_SCHEDULE_PUT_TRACE on dedupe for skip warnings",
+        })
+      );
+    }
+    if (!rel || String(rel.userId) !== String(req.user.id)) {
+      return res.status(404).json({ message: "Schedule item not found" });
+    }
+    Object.assign(rel, patch);
+    row = rel;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[schedule PUT hygiene] skipped:", err?.message || err);
+  }
+
   const duration =
     patch.durationMinutes != null && Number(patch.durationMinutes) >= 1
-      ? Number(patch.durationMinutes)
+      ? Math.max(1, Math.round(Number(patch.durationMinutes)))
       : row.durationMinutes != null && Number(row.durationMinutes) >= 1
-        ? Number(row.durationMinutes)
+        ? Math.max(1, Math.round(Number(row.durationMinutes)))
         : scheduleTime.defaultDurationMinutes(nType, row);
 
   let resolvedTime = String(row.time || "").trim().slice(0, 5);
-  const existing = await ScheduleItem.find({ userId: req.user.id, date: dateKey, _id: { $ne: row._id } }).lean();
+  const rowIdStr = String(row._id);
+
+  if (isDietLogSyncRow) {
+    const mealKey = String(row.meal || "").toLowerCase();
+    const siblingDupes = await ScheduleItem.find({
+      userId: req.user.id,
+      date: dateKey,
+      itemType: "diet",
+      scheduleSource: DIET_LOG_SYNC_SOURCE,
+      _id: { $ne: qid },
+    }).lean();
+    const dupIds = siblingDupes.filter((d) => String(d.meal || "").toLowerCase() === mealKey).map((d) => d._id);
+    if (dupIds.length) await ScheduleItem.deleteMany({ _id: { $in: dupIds }, userId: req.user.id });
+  }
+
+  let existing = await ScheduleItem.find({ userId: req.user.id, date: dateKey, _id: { $ne: qid } }).lean();
+  existing = (existing || []).filter((e) => String(e?._id || "") !== rowIdStr);
+
+  if (isDietLogSyncRow) {
+    existing = existing.filter((e) => {
+      const src = String(e?.scheduleSource || "").trim();
+      if (src === DIET_PLAN_APPLY_SOURCE) return false;
+      if (src === DIET_LOG_SYNC_SOURCE) return true;
+      const pid = String(e?.dietPlanId || "").trim();
+      if (pid && String(e?.itemType || "").toLowerCase() === "diet") return false;
+      return true;
+    });
+  }
 
   if (!resolvedTime) {
     resolvedTime = scheduleTime.findNextAvailableTimeSlot(dateKey, duration, existing, {
@@ -420,15 +641,90 @@ const update = asyncHandler(async (req, res) => {
   const merged = {
     date: dateKey,
     time: String(row.time).slice(0, 5),
-    durationMinutes: duration,
+    durationMinutes: Math.max(1, Math.round(Number(duration) || 1)),
     itemType: nType,
     title: String(row.title || "").trim() || "Item",
+    scheduleSource: String(row.scheduleSource || "").trim(),
+    meal: String(row.meal || "").trim().toLowerCase(),
   };
-  if (scheduleTime.hasScheduleConflict(merged, existing, null)) {
+  const conflictDetail = scheduleTime.findScheduleConflictDetail(merged, existing, rowIdStr);
+  if (String(process.env.DEBUG_SCHEDULE_CONFLICT || "").trim() === "1") {
+    const classifyRow = (h) => {
+      if (!h) return null;
+      const src = String(h.scheduleSource || "").trim();
+      if (src === DIET_LOG_SYNC_SOURCE) return "diet_log_sync";
+      if (src === DIET_PLAN_APPLY_SOURCE) return "diet_plan_apply";
+      return src ? `scheduleSource=${src}` : `itemType=${h.itemType || ""}`;
+    };
+    const cr = conflictDetail.candidateRange || {};
+    const audit = (existing || []).map((e) => {
+      const eid = String(e?._id || "");
+      const countable = scheduleTime.isCountableBlock(e);
+      let range = null;
+      if (countable) {
+        const nb = scheduleTime.normalizeScheduleItemTimeRange(e);
+        range = {
+          startMin: nb.start,
+          endMin: nb.end,
+          durationMinutesUsed: nb.durationMinutes,
+          startTime: scheduleTime.minutesToHHmm(nb.start),
+          endTime: scheduleTime.minutesToHHmm(nb.end),
+        };
+      }
+      return {
+        id: eid,
+        itemType: e?.itemType,
+        scheduleSource: e?.scheduleSource,
+        meal: e?.meal,
+        title: e?.title,
+        date: e?.date,
+        startTimeDb: String(e?.time || "").slice(0, 5),
+        durationMinutesDb: e?.durationMinutes,
+        range,
+        isCurrentEditingRow: eid === rowIdStr,
+        countable,
+        rowClass: classifyRow(e),
+      };
+    });
+    const hit = conflictDetail.hit || null;
+    // eslint-disable-next-line no-console
+    console.log(
+      "[schedule PUT conflict-debug]",
+      JSON.stringify(
+        {
+          userId: String(req.user.id),
+          dataPipelineNote:
+            "PUT runs runDietScheduleHygieneForUser (duration normalize + diet_log_sync dedupe; keepScheduleItemId when editing diet_log_sync), reloads row, then queries `existing` for conflict — same hygiene as GET /schedules list (except list uses oldest-keeper dedupe; PUT keeps edited id).",
+          isDietLogSyncRow,
+          currentEditingId: rowIdStr,
+          dateCompared: dateKey,
+          mergedCandidate: merged,
+          candidate: {
+            startMin: cr.startMin,
+            endMin: cr.endMin,
+            startTime: Number.isFinite(cr.startMin) ? scheduleTime.minutesToHHmm(cr.startMin) : null,
+            endTime: Number.isFinite(cr.endMin) ? scheduleTime.minutesToHHmm(cr.endMin) : null,
+            durationMinutes: cr.durationMinutes,
+          },
+          excludeId: rowIdStr,
+          existingContainsSelf: audit.some((x) => x.isCurrentEditingRow),
+          existingCount: audit.length,
+          existingItems: audit,
+          overlapRule: "candidate.startMin < hit.endMin && candidate.endMin > hit.startMin (touching allowed)",
+          conflict: conflictDetail.conflict,
+          firstHit: hit,
+          firstHitClassification: classifyRow(hit),
+        },
+        null,
+        2
+      )
+    );
+  }
+  if (conflictDetail.conflict) {
     return res.status(409).json({ message: scheduleTime.SCHEDULE_CONFLICT_MESSAGE, code: "schedule_conflict" });
   }
 
-  row.durationMinutes = duration;
+  row.durationMinutes = merged.durationMinutes;
   row.overlapAccepted = false;
   await row.save();
   res.json(row);

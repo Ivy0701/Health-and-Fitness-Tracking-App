@@ -3,8 +3,6 @@ import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import AppNavbar from "../components/common/AppNavbar.vue";
 import api from "../services/api";
-import { getTodayLocalDate } from "../utils/dateLocal";
-import { buildDietPlanMealsPayload, isDietPlanFullyOnSchedule } from "../utils/dietPlanSchedulePayload";
 import { useFavorites } from "../services/favorites";
 
 const router = useRouter();
@@ -17,8 +15,6 @@ let toastTimer = null;
 const { favorites, loading, ensureFavoritesLoaded, normalizeType, removeFavoriteByRowId, addFavorite, isFavorited } = useFavorites();
 const me = ref(null);
 const recommendationPool = ref([]);
-/** Cached schedule rows for whole-plan diet apply/remove on today. */
-const scheduleRows = ref([]);
 
 const TAB_ITEMS = [
   { id: "all", label: "All" },
@@ -399,68 +395,15 @@ function extractDietPlanIdFromFavorite(row) {
   return id.slice("diet-plan-".length);
 }
 
-async function loadScheduleRowsForFavorites() {
-  if (!me.value?.id) {
-    scheduleRows.value = [];
-    return;
-  }
-  try {
-    scheduleRows.value = await api.get(`/schedules/${me.value.id}`).then((r) => r.data);
-  } catch {
-    scheduleRows.value = [];
-  }
-}
-
-function isFavoriteDietPlanOnScheduleToday(row) {
-  const dietPlanId = extractDietPlanIdFromFavorite(row);
-  if (!dietPlanId) return false;
-  return isDietPlanFullyOnSchedule(scheduleRows.value, getTodayLocalDate(), dietPlanId);
-}
-
-async function toggleDietFavoriteSchedule(row) {
+function useDietFavoriteAsSource(row) {
   if (row.type !== "diet") return;
   const dietPlanId = extractDietPlanIdFromFavorite(row);
-  if (!dietPlanId || !me.value?.id) {
-    showToast("Unable to schedule this favorite.");
+  if (!dietPlanId) {
+    showToast("Unable to open this meal plan.");
     return;
   }
-  const date = getTodayLocalDate();
-  if (isFavoriteDietPlanOnScheduleToday(row)) {
-    try {
-      await api.delete("/schedules/diet-plan", { params: { date, dietPlanId } });
-      showToast(`${String(row.title || "").trim() || "Meal plan"} removed from today's schedule.`);
-    } catch (error) {
-      showToast(error?.response?.data?.message || "Failed to remove plan from schedule.");
-    }
-    await loadScheduleRowsForFavorites();
-    return;
-  }
-
-  const planName = String(row.title || "").trim() || "Meal plan";
-  const planType = String(row.metadata?.planType || row.category || "balanced").trim();
-  const target = Number(row.targetCalories) > 0 ? Number(row.targetCalories) : 2000;
-  const meals = buildDietPlanMealsPayload(target, planType);
-  try {
-    const res = await api.post("/schedules/diet-plan", {
-      userId: me.value.id,
-      date,
-      dietPlanId,
-      planName,
-      planType,
-      meals,
-    });
-    if (res.data?.alreadyScheduled) {
-      showToast(`${planName} is already on your schedule for today (full daily plan).`);
-    } else {
-      showToast(`Added ${planName} to today's schedule (Breakfast, Lunch, Dinner, Snack).`);
-    }
-  } catch (error) {
-    showToast(
-      error?.response?.data?.message ||
-        "This meal plan could not be scheduled without time conflicts. Please clear some time slots or choose another date."
-    );
-  }
-  await loadScheduleRowsForFavorites();
+  router.push({ path: "/diet", query: { focusItem: `diet-plan-${dietPlanId}`, applyAsSource: "1" } });
+  showToast("Opening Diet — this plan will be set as your recommendation source.");
 }
 
 function detailBadges(row) {
@@ -491,7 +434,7 @@ onMounted(async () => {
   } catch {
     me.value = null;
   }
-  await Promise.all([ensureFavoritesLoaded(), loadRecommendationPool(), loadScheduleRowsForFavorites()]);
+  await Promise.all([ensureFavoritesLoaded(), loadRecommendationPool()]);
 });
 </script>
 
@@ -581,10 +524,9 @@ onMounted(async () => {
               v-if="row.type === 'diet' && extractDietPlanIdFromFavorite(row)"
               type="button"
               class="small-btn"
-              :class="{ ghost: isFavoriteDietPlanOnScheduleToday(row) }"
-              @click="toggleDietFavoriteSchedule(row)"
+              @click="useDietFavoriteAsSource(row)"
             >
-              {{ isFavoriteDietPlanOnScheduleToday(row) ? "Remove from Schedule" : "Apply Plan" }}
+              Use on Diet
             </button>
             <button type="button" class="small-btn ghost" @click="openItem(row)">
               {{

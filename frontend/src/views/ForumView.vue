@@ -47,20 +47,15 @@ const TAG_LABEL_MAP = {
   general: "General",
 };
 
-const FILTER_CHIPS_BASE = [
+/** Content filters only — “My Posts” lives in the header next to notifications. */
+const FILTER_CHIPS = [
   { id: "all", label: "All" },
-  { id: "mine", label: "My Posts" },
   { id: "hot", label: "Hot" },
   { id: "new", label: "New" },
   { id: "diet", label: "Diet" },
   { id: "train", label: "Training" },
   { id: "favorites", label: "Favorites" },
 ];
-
-const filterChipsDisplay = computed(() => {
-  if (!me.value) return FILTER_CHIPS_BASE.filter((c) => c.id !== "mine");
-  return FILTER_CHIPS_BASE;
-});
 
 const AVATAR_BG = ["#48aea4", "#70d1ac", "#316879", "#348b93", "#a7f2ad", "#2f4858"];
 
@@ -492,6 +487,11 @@ function toggleNotificationsPanel() {
   });
 }
 
+function toggleMinePostsView() {
+  if (!me.value) return;
+  activeFilter.value = activeFilter.value === "mine" ? "all" : "mine";
+}
+
 async function openNotification(item) {
   notificationsOpen.value = false;
   if (item?.isRead === false) {
@@ -564,10 +564,22 @@ watch(me, (u) => {
           <p class="forum-sub">Share meals, workouts, and habits—stay motivated together.</p>
         </div>
         <div class="forum-head-actions">
-          <button type="button" class="notify-btn" @click="toggleNotificationsPanel">
-            <span aria-hidden="true">🔔</span>
-            <span v-if="unreadNotificationsCount > 0" class="notify-badge">{{ unreadNotificationsCount }}</span>
-          </button>
+          <div class="forum-head-action-group">
+            <button type="button" class="notify-btn" @click="toggleNotificationsPanel">
+              <span aria-hidden="true">🔔</span>
+              <span v-if="unreadNotificationsCount > 0" class="notify-badge">{{ unreadNotificationsCount }}</span>
+            </button>
+            <button
+              v-if="me"
+              type="button"
+              class="forum-my-posts-btn"
+              :class="{ active: activeFilter === 'mine' }"
+              :aria-pressed="activeFilter === 'mine' ? 'true' : 'false'"
+              @click="toggleMinePostsView"
+            >
+              My Posts
+            </button>
+          </div>
           <div v-if="notificationsOpen" class="notify-dropdown">
             <p class="notify-title">Notifications</p>
             <ul v-if="notifications.length" class="notify-list">
@@ -587,7 +599,7 @@ watch(me, (u) => {
     <div class="forum-toolbar panel toolbar-panel">
       <div class="filter-scroll" role="tablist" aria-label="Post filters">
         <button
-          v-for="chip in filterChipsDisplay"
+          v-for="chip in FILTER_CHIPS"
           :key="chip.id"
           type="button"
           role="tab"
@@ -803,6 +815,40 @@ watch(me, (u) => {
 
 .forum-head-actions {
   position: relative;
+  flex-shrink: 0;
+}
+
+.forum-head-action-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.forum-my-posts-btn {
+  border: 1px solid #c8dbd7;
+  background: #f7fcfa;
+  color: var(--c6);
+  border-radius: 999px;
+  padding: 0 14px;
+  min-height: 40px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.forum-my-posts-btn:hover {
+  border-color: var(--c3);
+  background: #eef8f4;
+  color: #2f4858;
+}
+
+.forum-my-posts-btn.active {
+  background: linear-gradient(135deg, #e4f5f0, #d0ebe3);
+  border-color: #5eb5a8;
+  color: #1a454d;
+  box-shadow: 0 0 0 1px rgba(52, 139, 147, 0.28);
 }
 
 .notify-btn {

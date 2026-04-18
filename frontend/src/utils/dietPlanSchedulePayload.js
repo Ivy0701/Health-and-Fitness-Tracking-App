@@ -13,7 +13,7 @@ export const DIET_PLAN_MEAL_ORDER = ["breakfast", "lunch", "dinner", "snack"];
 /** Schedule rows created by Diet "Apply plan" (whole-day meal plan). */
 export const DIET_PLAN_APPLY_SOURCE = "diet_plan_apply";
 
-/** Legacy rows that mirrored food logs on the calendar — hidden from Schedule / Upcoming. */
+/** One block per meal/day: synced from saved Diet records (see backend dietScheduleSync). */
 export const DIET_FOOD_LOG_SCHEDULE_SOURCE = "diet_log_sync";
 
 export function isDietFoodLogScheduleRow(item) {
@@ -23,7 +23,7 @@ export function isDietFoodLogScheduleRow(item) {
   );
 }
 
-/** Diet block from whole-day Apply Plan (four meals) — the only diet rows intended for Dashboard Upcoming. */
+/** Legacy whole-day plan rows from old “Apply Plan → Schedule”; hidden from Schedule UI; not created by current Diet flow. */
 export function isDietMealPlanApplyRow(item) {
   return (
     String(item?.itemType || "").toLowerCase() === "diet" &&

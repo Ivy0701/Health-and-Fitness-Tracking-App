@@ -67,11 +67,31 @@ export function parseTimeToMinutes(t) {
   return h * 60 + min;
 }
 
+/** Must stay aligned with backend `scheduleTime.defaultDurationMinutes` (esp. diet_log_sync = 15). */
+const DIET_LOG_SYNC_SOURCE = "diet_log_sync";
+
+/** Effective duration when `durationMinutes` is missing or invalid (overlap + layout). */
+export function effectiveDurationMinutes(item) {
+  const type = String(item?.itemType || "").toLowerCase();
+  /** diet_log_sync blocks are always 15m; stale large durationMinutes in DB must not widen overlap. */
+  if (type === "diet" && String(item?.scheduleSource || "").trim() === DIET_LOG_SYNC_SOURCE) {
+    return 15;
+  }
+  const fromRow = Number(item?.durationMinutes);
+  if (Number.isFinite(fromRow) && fromRow >= 1) return fromRow;
+  if (type === "diet") {
+    return 30;
+  }
+  if (type === "workout" || type === "exercise") return 45;
+  if (type === "course" || type === "course_session") return 30;
+  if (type === "reminder" || type === "personal" || type === "manual") return 30;
+  return 60;
+}
+
 export function itemEndMinutes(item) {
   const s = parseTimeToMinutes(item.time);
   if (!Number.isFinite(s)) return NaN;
-  const dur = Number(item.durationMinutes) > 0 ? Number(item.durationMinutes) : 60;
-  return s + dur;
+  return s + effectiveDurationMinutes(item);
 }
 
 /** Expand a single week (debug / special cases) */
@@ -213,7 +233,7 @@ export function itemBlockStyle(item) {
   const startMin = parseTimeToMinutes(item.time);
   const day0 = TIMETABLE_START_HOUR * 60;
   const total = timetableTotalMinutes();
-  const dur = Number(item.durationMinutes) > 0 ? Number(item.durationMinutes) : 60;
+  const dur = effectiveDurationMinutes(item);
   const top = ((startMin - day0) / total) * 100;
   const height = (dur / total) * 100;
   const topClamped = Math.max(0, Math.min(100 - 0.5, top));
@@ -222,6 +242,15 @@ export function itemBlockStyle(item) {
     top: `${topClamped}%`,
     height: `${heightClamped}%`,
   };
+}
+
+/** Workout / course slots need extra vertical room for title + kcal + time row. */
+function clusterIncludesMovementBlock(cluster) {
+  for (const it of cluster || []) {
+    const t = String(it?.itemType || "").toLowerCase();
+    if (t === "workout" || t === "exercise" || t === "course" || t === "course_session") return true;
+  }
+  return false;
 }
 
 export function clusterEnvelopeStyle(cluster) {
@@ -240,7 +269,9 @@ export function clusterEnvelopeStyle(cluster) {
   const top = ((start - day0) / total) * 100;
   let height = ((end - start) / total) * 100;
   const minPct = (45 / total) * 100;
-  height = Math.max(height, minPct, cluster.length > 1 ? 12 : 6);
+  const movement = clusterIncludesMovementBlock(cluster);
+  const singleMinPct = movement ? 7 : 6;
+  height = Math.max(height, minPct, cluster.length > 1 ? 12 : singleMinPct);
   return {
     top: `${Math.max(0, top)}%`,
     height: `${Math.min(height, 100 - Math.max(0, top))}%`,
@@ -249,7 +280,7 @@ export function clusterEnvelopeStyle(cluster) {
 
 /** When stacked, flex weight scales with session duration */
 export function itemFlexWeight(item) {
-  return Math.max(1, Number(item.durationMinutes) || 60);
+  return Math.max(1, effectiveDurationMinutes(item));
 }
 
 export function minutesToHHmm(total) {
@@ -267,7 +298,10 @@ export function getDefaultDurationMinutes(itemType, partial = {}) {
     if (t === "course" || t === "course_session") return Math.max(1, fromRow);
     return fromRow;
   }
-  if (t === "diet") return 30;
+  if (t === "diet") {
+    if (String(partial.scheduleSource || "").trim() === DIET_LOG_SYNC_SOURCE) return 15;
+    return 30;
+  }
   if (t === "workout" || t === "exercise") return 45;
   if (t === "course" || t === "course_session") return 30;
   if (t === "reminder" || t === "personal" || t === "manual") return 30;
@@ -405,4 +439,4 @@ export function clusterTimeRangeLabel(cluster) {
   return `${minutesToHHmm(start)} - ${minutesToHHmm(end)}`;
 }
 
-export const SCHEDULE_CONFLICT_MESSAGE = "This time slot is already occupied by another scheduled item.";
+export const SCHEDULE_CONFLICT_MESSAGE = "This time overlaps with another scheduled item.";

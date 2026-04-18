@@ -6,7 +6,7 @@ import api from "../services/api";
 import { useAuthStore } from "../stores/auth";
 import { calculateBmiValue } from "../utils/bmi";
 import { getTodayLocalDate } from "../utils/dateLocal";
-import { isDietFoodLogScheduleRow } from "../utils/dietPlanSchedulePayload";
+import { isDietMealPlanApplyRow } from "../utils/dietPlanSchedulePayload";
 import {
   calculateWorkoutCaloriesBurned,
   exerciseEffectiveDurationMinutes,
@@ -258,7 +258,7 @@ const statCards = computed(() => [
 const todayScheduleItems = computed(() =>
   Array.isArray(allSchedules.value)
     ? allSchedules.value.filter(
-        (item) => String(item?.date || "") === todayKey.value && !isDietFoodLogScheduleRow(item)
+        (item) => String(item?.date || "") === todayKey.value && !isDietMealPlanApplyRow(item)
       )
     : []
 );

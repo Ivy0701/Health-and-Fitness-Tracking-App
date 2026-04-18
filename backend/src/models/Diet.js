@@ -17,7 +17,12 @@ const dietSchema = new mongoose.Schema(
     sourceType: { type: String, enum: ["manual", "recommended"], default: "manual" },
     foodId: { type: String, trim: true, default: "" },
     recommendationId: { type: String, trim: true, default: "" },
+    /** Stable plan id from PLAN_DEFINITIONS when logged from a recommended plan (optional). */
+    dietPlanId: { type: String, trim: true, default: "" },
+    planName: { type: String, trim: true, default: "" },
     scheduleItemId: { type: mongoose.Schema.Types.ObjectId, ref: "ScheduleItem", default: null, index: true },
+    /** Client local wall time HH:mm for this log (used with date for Schedule diet_log_sync display). */
+    recordedTimeLocal: { type: String, trim: true, default: "" },
     recordedAt: { type: Date, default: null },
   },
   { timestamps: true, versionKey: false }

@@ -6,7 +6,6 @@ import api from "../services/api";
 import { useAuthStore } from "../stores/auth";
 import { useFavorites } from "../services/favorites";
 import { getTodayLocalDate } from "../utils/dateLocal";
-import { buildDietPlanMealsPayload, isDietPlanFullyOnSchedule } from "../utils/dietPlanSchedulePayload";
 
 const MEAL_TYPES = [
   { value: "breakfast", label: "Breakfast" },
@@ -135,6 +134,30 @@ function formatRecordTime(value) {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
+/** Local HH:mm for Schedule sync (browser wall clock). */
+function localHHmmNow() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function localHHmmFromRecordedAt(value) {
+  const d = value ? new Date(value) : new Date();
+  if (Number.isNaN(d.getTime())) return localHHmmNow();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function recordedTimeLocalForSavePayload() {
+  if (isEditing.value) {
+    if (form.recordedTimeLocal && /^\d{1,2}:\d{2}$/.test(String(form.recordedTimeLocal).trim())) {
+      return String(form.recordedTimeLocal).trim();
+    }
+    const editRow = records.value.find((r) => String(r._id) === String(editingId.value));
+    if (editRow?.recordedTimeLocal) return String(editRow.recordedTimeLocal).trim();
+    return localHHmmFromRecordedAt(editRow?.recordedAt || editRow?.createdAt);
+  }
+  return localHHmmNow();
+}
+
 function macroForFood(food, grams) {
   const ratio = toNumber(grams) / 100;
   return {
@@ -158,7 +181,6 @@ const DATE_WINDOW_DAYS = 9;
 const DATE_SHIFT_DAYS = 7;
 const dateWindowStart = ref(shiftDateKey(todayKey, -Math.floor(DATE_WINDOW_DAYS / 2)));
 const me = ref(null);
-const scheduleRows = ref([]);
 const loading = ref(false);
 const searchingFoods = ref(false);
 const submitting = ref(false);
@@ -267,6 +289,7 @@ const form = reactive({
   sourceType: "manual",
   foodId: "",
   recommendationId: "",
+  recordedTimeLocal: "",
 });
 
 const foodQuery = ref("");
@@ -274,9 +297,9 @@ const isEditing = computed(() => Boolean(editingId.value));
 const selectedPlan = computed(() => PLAN_DEFINITIONS.find((x) => x.id === selectedPlanId.value) || null);
 const planForRecommendation = computed(() => selectedPlan.value || PLAN_DEFINITIONS[0]);
 const appliedPlan = computed(() => PLAN_DEFINITIONS.find((x) => x.id === appliedPlanId.value) || null);
-/** Whole plan (4 meals) on schedule for selected date — not a single meal row. */
-const isSelectedPlanOnScheduleForDate = computed(() =>
-  Boolean(selectedPlan.value && isDietPlanFullyOnSchedule(scheduleRows.value, selectedDate.value, selectedPlan.value.id))
+/** Selected plan card is the same as the applied recommendation source (not related to Schedule). */
+const isAppliedPlanForSelectedCard = computed(
+  () => Boolean(selectedPlan.value && String(appliedPlanId.value || "").trim() === String(selectedPlan.value.id))
 );
 
 const defaultDynamicPlanType = computed(() => {
@@ -408,6 +431,7 @@ function resetManualForm() {
   form.sourceType = "manual";
   form.foodId = "";
   form.recommendationId = "";
+  form.recordedTimeLocal = "";
   editingId.value = "";
   formError.value = "";
   selectedFoodTemplate.value = null;
@@ -459,19 +483,6 @@ async function loadRecords(dateKey = selectedDate.value) {
   records.value = Array.isArray(data) ? data : [];
 }
 
-async function loadScheduleRows() {
-  if (!me.value?.id) {
-    scheduleRows.value = [];
-    return;
-  }
-  try {
-    const { data } = await api.get(`/schedules/${me.value.id}`);
-    scheduleRows.value = Array.isArray(data) ? data : [];
-  } catch {
-    scheduleRows.value = [];
-  }
-}
-
 async function loadOverview(dateKey = selectedDate.value) {
   console.debug("[Diet][Overview] request", {
     userId: me.value?.id || "",
@@ -510,7 +521,6 @@ async function loadForDate() {
       loadRecords(dateKey),
       loadOverview(dateKey),
       loadPlanFoodLibraryIfNeeded(),
-      loadScheduleRows(),
     ]);
     if (requestId !== loadRequestSeq) return;
     if (recordsRes.status === "rejected") {
@@ -852,6 +862,16 @@ async function focusPlanFromQuery() {
   selectedPlanId.value = planId;
   recordMode.value = "recommended";
   focusedPlanCardId.value = planId;
+
+  if (String(route.query.applyAsSource || "").trim() === "1") {
+    appliedPlanId.value = planId;
+    persistAppliedPlanToStorage();
+    pageSuccess.value = `${targetPlan?.name || "Plan"} is now your active recommendation source.`;
+    const nextQuery = { ...route.query };
+    delete nextQuery.applyAsSource;
+    router.replace({ path: route.path, query: nextQuery });
+  }
+
   await nextTick();
   const el = document.querySelector(`[data-plan-id="${planId}"]`);
   if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -866,51 +886,17 @@ async function applySelectedPlan() {
   pageError.value = "";
   pageSuccess.value = "";
 
-  if (isSelectedPlanOnScheduleForDate.value) {
-    try {
-      await api.delete("/schedules/diet-plan", {
-        params: { date: selectedDate.value, dietPlanId: selectedPlan.value.id },
-      });
-    } catch (error) {
-      pageError.value = error?.response?.data?.message || "Failed to remove plan from schedule.";
-      return;
-    }
-    if (appliedPlanId.value === selectedPlan.value.id) {
-      appliedPlanId.value = "";
-      persistAppliedPlanToStorage();
-    }
-    await loadScheduleRows();
-    pageSuccess.value = `${selectedPlan.value.name} was removed from your schedule for ${selectedDate.value}.`;
+  if (isAppliedPlanForSelectedCard.value) {
+    appliedPlanId.value = "";
+    persistAppliedPlanToStorage();
+    pageSuccess.value = `${selectedPlan.value.name} is no longer your active recommendation source.`;
     return;
   }
 
-  const targetKcal = calculatePlanCalories(selectedPlan.value.type);
-  const meals = buildDietPlanMealsPayload(targetKcal, selectedPlan.value.type);
-  try {
-    const res = await api.post("/schedules/diet-plan", {
-      userId: me.value.id,
-      date: selectedDate.value,
-      dietPlanId: selectedPlan.value.id,
-      planName: selectedPlan.value.name,
-      planType: selectedPlan.value.type,
-      meals,
-    });
-    if (res.data?.alreadyScheduled) {
-      pageSuccess.value = `${selectedPlan.value.name} is already on your schedule for ${selectedDate.value} (full daily plan).`;
-    } else {
-      appliedPlanId.value = selectedPlan.value.id;
-      persistAppliedPlanToStorage();
-      pageSuccess.value = `${selectedPlan.value.name} was added to your schedule for ${selectedDate.value} (Breakfast, Lunch, Dinner, Snack).`;
-    }
-  } catch (error) {
-    pageError.value =
-      error?.response?.data?.message ||
-      "This meal plan could not be scheduled without time conflicts. Please clear some time slots or choose another date.";
-    return;
-  }
-
+  appliedPlanId.value = selectedPlan.value.id;
+  persistAppliedPlanToStorage();
   recordMode.value = "recommended";
-  await loadScheduleRows();
+  pageSuccess.value = `${selectedPlan.value.name} is now your active plan for recommendations on ${selectedDate.value}. Add foods with “Add to Records” to log them and update your schedule.`;
 }
 
 async function toggleSelectedPlanFavorite() {
@@ -965,6 +951,7 @@ async function saveManualRecord() {
     foodId: form.foodId,
     recommendationId: form.recommendationId,
     unit: "g",
+    recordedTimeLocal: recordedTimeLocalForSavePayload(),
   };
   if (!isEditing.value) payload.recordedAt = new Date().toISOString();
   try {
@@ -1001,9 +988,12 @@ async function addRecommendedItem(mealType, item, planId) {
     sourceType: "recommended",
     foodId: item.foodId,
     recommendationId: `${planId}-${item.recommendationId}`,
+    dietPlanId: activeRecommendedPlan.value.id,
+    planName: activeRecommendedPlan.value.name,
     unit: "g",
     note: "Added from popular meal plan",
     recordedAt: new Date().toISOString(),
+    recordedTimeLocal: localHHmmNow(),
   };
   try {
     await api.post("/diets", payload);
@@ -1029,6 +1019,7 @@ function editRecord(row) {
   form.sourceType = row.sourceType || "manual";
   form.foodId = row.foodId || "";
   form.recommendationId = row.recommendationId || "";
+  form.recordedTimeLocal = row.recordedTimeLocal || localHHmmFromRecordedAt(row.recordedAt || row.createdAt);
 }
 
 async function removeRecord(id) {
@@ -1133,7 +1124,7 @@ onMounted(async () => {
 });
 
 watch(
-  () => route.query.focusItem,
+  () => [route.query.focusItem, route.query.applyAsSource],
   async () => {
     await focusPlanFromQuery();
   }
@@ -1313,18 +1304,21 @@ watch(
           <div>
             <h4>{{ selectedPlan.name }} · {{ formatCaloriesNumber(adjustedPlanCalories) }} kcal target</h4>
             <p class="muted">Nutrition-focused daily recommendation split by meal.</p>
-            <p v-if="appliedPlanId === selectedPlan.id && !isSelectedPlanOnScheduleForDate" class="muted small-hint">
-              This plan is active for recommendations below. Use Apply Plan to add the full daily meal plan (four meals) to
-              your Schedule for {{ selectedDate }}.
+            <p v-if="isAppliedPlanForSelectedCard" class="muted small-hint">
+              This plan is your active recommendation source for {{ selectedDate }}. Use Add to Records on each food to log
+              intake; your Schedule shows one block per meal from those records only.
+            </p>
+            <p v-else class="muted small-hint">
+              Use Apply Plan to make this package the recommendation source below (it does not add anything to your Schedule).
             </p>
           </div>
           <div class="selected-head-actions">
             <button
               type="button"
-              :class="['tiny-btn', isSelectedPlanOnScheduleForDate ? 'applied-btn' : 'ghost-btn']"
+              :class="['tiny-btn', isAppliedPlanForSelectedCard ? 'applied-btn' : 'ghost-btn']"
               @click="applySelectedPlan"
             >
-              {{ isSelectedPlanOnScheduleForDate ? "Remove from Schedule" : "Apply Plan" }}
+              {{ isAppliedPlanForSelectedCard ? "Current Plan" : "Apply Plan" }}
             </button>
             <button type="button" :class="['tiny-btn', isSelectedPlanFavorited ? 'saved-btn' : 'ghost-btn']" @click="toggleSelectedPlanFavorite">
               {{ isSelectedPlanFavorited ? "Remove from Favorites" : "Add to Favorites" }}
