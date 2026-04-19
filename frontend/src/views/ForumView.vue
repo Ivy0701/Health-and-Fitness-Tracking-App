@@ -16,6 +16,71 @@ const publishNotice = ref("");
 const searchQuery = ref("");
 const activeFilter = ref("all");
 const expandedComments = ref({});
+/** Per-post: forum body expanded past line-clamp (one-way). */
+const expandedPostBodies = ref({});
+const postBodyOverflows = ref({});
+const postContentObservers = new Map();
+
+function isPostBodyExpanded(postId) {
+  const key = String(postId || "").trim();
+  return Boolean(expandedPostBodies.value[key]);
+}
+
+function expandPostBody(postId) {
+  const key = String(postId || "").trim();
+  if (!key || expandedPostBodies.value[key]) return;
+  expandedPostBodies.value = { ...expandedPostBodies.value, [key]: true };
+}
+
+function setPostBodyOverflow(postId, value) {
+  const key = String(postId || "").trim();
+  if (!key) return;
+  if (postBodyOverflows.value[key] === value) return;
+  postBodyOverflows.value = { ...postBodyOverflows.value, [key]: value };
+}
+
+function measurePostBodyOverflow(postId, el) {
+  const key = String(postId || "").trim();
+  if (!key || !el) return;
+  if (expandedPostBodies.value[key]) {
+    setPostBodyOverflow(key, false);
+    return;
+  }
+  const diff = el.scrollHeight - el.clientHeight;
+  setPostBodyOverflow(key, diff > 1);
+}
+
+function scheduleMeasurePostBody(postId, el) {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      measurePostBodyOverflow(postId, el);
+    });
+  });
+}
+
+function setPostContentEl(postId, el) {
+  const key = String(postId || "").trim();
+  if (!key) return;
+  const prev = postContentObservers.get(key);
+  if (prev?.ro) {
+    prev.ro.disconnect();
+    postContentObservers.delete(key);
+  }
+  if (!el) return;
+  const ro = new ResizeObserver(() => {
+    const entry = postContentObservers.get(key);
+    if (entry?.el) scheduleMeasurePostBody(key, entry.el);
+  });
+  ro.observe(el);
+  postContentObservers.set(key, { ro, el });
+  scheduleMeasurePostBody(key, el);
+}
+
+function showPostBodyExpand(postId) {
+  const key = String(postId || "").trim();
+  if (!key || isPostBodyExpanded(key)) return false;
+  return Boolean(postBodyOverflows.value[key]);
+}
 const commentDrafts = ref({});
 const commentInputRefs = ref({});
 const { favorites, isFavorited, toggleFavorite, ensureFavoritesLoaded } = useFavorites();
@@ -766,7 +831,23 @@ watch(me, (u) => {
           <div class="tag-row">
             <span v-for="t in displayTags(p)" :key="t" class="post-tag" :class="tagClass(t)">#{{ tagLabel(t) }}</span>
           </div>
-          <p class="post-content">{{ p.content }}</p>
+          <div class="post-content-wrap">
+            <p
+              :ref="(el) => setPostContentEl(postIdOf(p), el)"
+              class="post-content"
+              :class="{ 'post-content--collapsed': !isPostBodyExpanded(postIdOf(p)) }"
+            >
+              {{ p.content }}
+            </p>
+            <button
+              v-if="showPostBodyExpand(postIdOf(p))"
+              type="button"
+              class="post-content-expand"
+              @click.stop="expandPostBody(postIdOf(p))"
+            >
+              Expand
+            </button>
+          </div>
 
           <div class="post-stats" role="group" aria-label="Engagement">
             <button
@@ -1572,17 +1653,48 @@ watch(me, (u) => {
   color: #205a53;
 }
 
-.post-content {
+.post-content-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   margin: 0 0 14px;
+}
+
+.post-content {
+  margin: 0;
+  width: 100%;
   line-height: 1.55;
   color: #2c3d45;
   font-size: 0.95rem;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.post-content.post-content--collapsed {
   min-height: calc(1.55em * 3);
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+  line-clamp: 3;
   overflow: hidden;
+}
+
+.post-content-expand {
+  margin-top: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #6f8a95;
+  cursor: pointer;
+  line-height: 1.3;
+}
+
+.post-content-expand:hover {
+  color: #627883;
+  text-decoration: underline;
 }
 
 .post-warning {
@@ -1779,6 +1891,9 @@ watch(me, (u) => {
   font-size: 0.82rem;
   color: #314651;
   line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .mock-comment-actions {
