@@ -8,6 +8,12 @@ import { useAuthStore } from "../stores/auth";
 import { useFavorites } from "../services/favorites";
 import { getTodayLocalDate } from "../utils/dateLocal";
 import { PLAN_DEFINITIONS } from "../constants/dietPlans";
+import {
+  allocateMealCaloriesFromTotal,
+  allocateMealMacrosFromDaily,
+  computePersonalizedDietTargetsCore,
+  macroTargetsFromTotalCalories,
+} from "../utils/personalizedDietTargets";
 
 const MEAL_TYPES = [
   { value: "breakfast", label: "Breakfast" },
@@ -70,14 +76,6 @@ const PLAN_CATEGORY_BLUEPRINT = {
     dinner: ["protein", "carb", "vegetable"],
     snack: ["protein", "fruit"],
   },
-};
-
-/** Meal calorie shares from Daily Intake Target (same for all recipe plans + Record Mode). */
-const RECORD_MODE_MEAL_SHARES = {
-  breakfast: 0.25,
-  lunch: 0.35,
-  dinner: 0.25,
-  snack: 0.15,
 };
 
 function formatDateKey(date) {
@@ -215,6 +213,132 @@ function macroForFood(food, grams) {
   };
 }
 
+const DEFAULT_MEAL_MACRO_TARGETS = { protein: 0, carbs: 0, fat: 0 };
+
+function syncRecoItemNutrition(item) {
+  const nutrition = macroForFood(item, item.recommendedGrams);
+  item.estimatedCalories = nutrition.calories;
+  item.estimatedProtein = nutrition.protein;
+  item.estimatedCarbs = nutrition.carbs;
+  item.estimatedFat = nutrition.fat;
+}
+
+function sumDisplayedMealCaloriesInt(items) {
+  return items.reduce((sum, it) => sum + roundToInt(it.estimatedCalories), 0);
+}
+
+function displayedIntCaloriesAtGrams(item, grams) {
+  return roundToInt(macroForFood(item, roundToOne(grams)).calories);
+}
+
+function correctMealVisibleKcalDeltaStrict(items, mealTargetInt) {
+  const T = roundToInt(mealTargetInt);
+  if (!Array.isArray(items) || !items.length || T <= 0) return;
+  const G_MIN = 12;
+  const G_MAX = 520;
+  const MAX_PASS = 6;
+  for (let pass = 0; pass < MAX_PASS; pass += 1) {
+    if (sumDisplayedMealCaloriesInt(items) === T) return;
+    const n = items.length;
+    const order = [];
+    for (let k = n - 1; k >= 0; k -= 1) order.push(k);
+    let improved = false;
+    for (let oi = 0; oi < order.length; oi += 1) {
+      const idx = order[oi];
+      const it = items[idx];
+      let otherSum = 0;
+      for (let j = 0; j < n; j += 1) {
+        if (j !== idx) otherSum += roundToInt(items[j].estimatedCalories);
+      }
+      const neededInt = T - otherSum;
+      const curG = toNumber(it.recommendedGrams);
+      let bestG = curG;
+      let bestDist = Math.abs(displayedIntCaloriesAtGrams(it, curG) - neededInt);
+      for (let g10 = Math.round(G_MIN * 10); g10 <= Math.round(G_MAX * 10); g10 += 1) {
+        const g = roundToOne(g10 / 10);
+        const d = Math.abs(displayedIntCaloriesAtGrams(it, g) - neededInt);
+        if (d < bestDist || (d === bestDist && Math.abs(g - curG) < Math.abs(bestG - curG))) {
+          bestDist = d;
+          bestG = g;
+          if (d === 0) break;
+        }
+      }
+      const curLineErr = Math.abs(displayedIntCaloriesAtGrams(it, curG) - neededInt);
+      if (bestDist < curLineErr || (bestDist === 0 && curLineErr > 0)) {
+        it.recommendedGrams = bestG;
+        syncRecoItemNutrition(it);
+        improved = true;
+        if (sumDisplayedMealCaloriesInt(items) === T) return;
+      }
+    }
+    if (!improved) break;
+  }
+}
+
+function alignMealIntegerCaloriesStrict(items, mealTargetInt) {
+  const T = roundToInt(mealTargetInt);
+  if (!Array.isArray(items) || !items.length || T <= 0) return;
+  const CAP = 520;
+  const FLOOR = 12;
+  const MAX = 4000;
+  function intSum() {
+    return sumDisplayedMealCaloriesInt(items);
+  }
+  function score() {
+    return Math.abs(intSum() - T);
+  }
+  for (let u = 0; u < MAX; u += 1) {
+    if (intSum() === T) return;
+    const diff = T - intSum();
+    const step = diff > 0 ? 0.5 : -0.5;
+    let bestIdx = -1;
+    let bestScore = Infinity;
+    for (let i = 0; i < items.length; i += 1) {
+      const g = toNumber(items[i].recommendedGrams);
+      if (diff > 0 && g >= CAP - 0.01) continue;
+      if (diff < 0 && g <= FLOOR + 0.01) continue;
+      const prevG = items[i].recommendedGrams;
+      items[i].recommendedGrams = roundToOne(g + step);
+      syncRecoItemNutrition(items[i]);
+      const sc = score();
+      items[i].recommendedGrams = prevG;
+      syncRecoItemNutrition(items[i]);
+      if (sc < bestScore) {
+        bestScore = sc;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0 || bestScore >= score()) {
+      const step2 = diff > 0 ? 1 : -1;
+      let found = false;
+      for (let i = 0; i < items.length; i += 1) {
+        const g = toNumber(items[i].recommendedGrams);
+        if (diff > 0 && g >= CAP - 0.01) continue;
+        if (diff < 0 && g <= FLOOR + 0.01) continue;
+        const prevG = items[i].recommendedGrams;
+        items[i].recommendedGrams = roundToOne(g + step2);
+        syncRecoItemNutrition(items[i]);
+        const sc = score();
+        items[i].recommendedGrams = prevG;
+        syncRecoItemNutrition(items[i]);
+        if (sc < score()) {
+          items[i].recommendedGrams = roundToOne(toNumber(items[i].recommendedGrams) + step2);
+          syncRecoItemNutrition(items[i]);
+          found = true;
+          break;
+        }
+        items[i].recommendedGrams = prevG;
+        syncRecoItemNutrition(items[i]);
+      }
+      if (!found) break;
+      continue;
+    }
+    const g0 = toNumber(items[bestIdx].recommendedGrams);
+    items[bestIdx].recommendedGrams = roundToOne(g0 + step);
+    syncRecoItemNutrition(items[bestIdx]);
+  }
+}
+
 function mealIcon(mealType) {
   if (mealType === "breakfast") return "🍳";
   if (mealType === "lunch") return "🥗";
@@ -336,13 +460,6 @@ function createEmptyOverview() {
 
 const overview = ref(createEmptyOverview());
 
-/** Same numeric source as Diet overview “Daily Intake Target” (BMR + activity from API). */
-const bmrDailyCalorieTarget = computed(() => {
-  const raw = overview.value?.target?.calories;
-  if (!Number.isFinite(Number(raw))) return 0;
-  return roundToInt(Math.max(0, Number(raw)));
-});
-
 function normalizeOverviewPayload(data) {
   const targetCalories = Math.max(0, roundToOne(data?.target?.calories));
   const targetProtein = Math.max(0, roundToOne(data?.target?.protein));
@@ -429,12 +546,33 @@ const defaultDynamicPlanType = computed(() => {
   if (direction === "gain") return "muscle_gain";
   return "balanced";
 });
+
+const personalizedPlanType = computed(() => appliedPlan.value?.type || defaultDynamicPlanType.value);
+
+const personalizedDietTargets = computed(() => computePersonalizedDietTargetsCore(me.value, personalizedPlanType.value));
+
+const dietDayTargetsBlueprint = computed(() => {
+  const t = personalizedDietTargets.value;
+  if (!t || !Number.isFinite(t.dailyCalories) || t.dailyCalories <= 0) return null;
+  const daily = roundToInt(t.dailyCalories);
+  const macrosDaily = macroTargetsFromTotalCalories(daily);
+  return {
+    dailyCalories: daily,
+    protein: macrosDaily.protein,
+    carbs: macrosDaily.carbs,
+    fat: macrosDaily.fat,
+    suggestedWorkoutBurn: t.suggestedWorkoutBurn,
+    mealCalories: allocateMealCaloriesFromTotal(daily),
+    mealMacros: allocateMealMacrosFromDaily(macrosDaily.protein, macrosDaily.carbs, macrosDaily.fat),
+  };
+});
+
 const defaultDynamicPlan = computed(() => ({
   id: "default_dynamic",
   name: "Daily Intake Target",
   type: defaultDynamicPlanType.value,
-  description: "Uses the same daily calorie target as your Diet overview (BMR and activity).",
-  dailyCalories: bmrDailyCalorieTarget.value,
+  description: "Uses your weight goal pace (current weight, target weight, and timeline).",
+  dailyCalories: dietDayTargetsBlueprint.value?.dailyCalories || 0,
 }));
 const isVipUser = computed(() => auth.vipStatus);
 const selectedPlanFavoriteId = computed(() => (selectedPlan.value ? `diet-plan-${selectedPlan.value.id}` : ""));
@@ -479,7 +617,9 @@ function persistAppliedPlanToStorage() {
   }
 }
 
-const hasOverviewData = computed(() => Number.isFinite(Number(overview.value.target?.calories)));
+const hasOverviewData = computed(
+  () => Number.isFinite(Number(personalizedDietTargets.value?.dailyCalories)) && personalizedDietTargets.value.dailyCalories > 0
+);
 
 function formatCaloriesOrDash(value) {
   return Number.isFinite(Number(value)) ? formatCalories(value) : "--";
@@ -491,7 +631,7 @@ function formatCaloriesNumberOrDash(value) {
 
 const calorieRatio = computed(() => {
   if (!hasOverviewData.value) return null;
-  const target = Math.max(1, toNumber(overview.value.target?.calories, 1));
+  const target = Math.max(1, toNumber(personalizedDietTargets.value?.dailyCalories, 1));
   const consumed = toNumber(overview.value.consumed?.calories);
   return consumed / target;
 });
@@ -508,7 +648,7 @@ const calorieStatus = computed(() => {
     };
   }
   const consumed = toNumber(overview.value.consumed?.calories);
-  const target = Math.max(1, toNumber(overview.value.target?.calories, 1));
+  const target = Math.max(1, toNumber(personalizedDietTargets.value?.dailyCalories, 1));
   const exceeded = Math.max(0, roundToInt(consumed - target));
   if (calorieRatio.value >= 1) {
     return {
@@ -538,31 +678,11 @@ const donutStyle = computed(() => ({
   background: `conic-gradient(${calorieStatus.value.color} 0% ${donutFillPercent.value}%, #dfeceb ${donutFillPercent.value}% 100%)`,
 }));
 
-const macroCards = computed(() => [
-  {
-    key: "protein",
-    label: "Protein",
-    consumed: Number.isFinite(Number(overview.value.consumed?.protein)) ? roundToOne(overview.value.consumed?.protein) : null,
-    target: Number.isFinite(Number(overview.value.target?.protein)) ? roundToOne(overview.value.target?.protein) : null,
-  },
-  {
-    key: "carbs",
-    label: "Carbohydrates",
-    consumed: Number.isFinite(Number(overview.value.consumed?.carbs)) ? roundToOne(overview.value.consumed?.carbs) : null,
-    target: Number.isFinite(Number(overview.value.target?.carbs)) ? roundToOne(overview.value.target?.carbs) : null,
-  },
-  {
-    key: "fat",
-    label: "Fat",
-    consumed: Number.isFinite(Number(overview.value.consumed?.fat)) ? roundToOne(overview.value.consumed?.fat) : null,
-    target: Number.isFinite(Number(overview.value.target?.fat)) ? roundToOne(overview.value.target?.fat) : null,
-  },
-]);
-
 function macroPct(card) {
-  if (!Number.isFinite(Number(card?.target))) return 0;
-  const target = Math.max(1, toNumber(card.target, 1));
-  return Math.min(roundToOne((toNumber(card.consumed) / target) * 100), 100);
+  const tgt = Number(card?.target);
+  if (!Number.isFinite(tgt) || tgt <= 0) return 0;
+  const consumed = Math.max(0, toNumber(card.consumed));
+  return Math.min(roundToOne((consumed / tgt) * 100), 100);
 }
 
 function moveDateWindow(step) {
@@ -660,6 +780,7 @@ async function loadOverview(dateKey = selectedDate.value) {
     raw: data,
   });
   overview.value = normalizeOverviewPayload(data || {});
+  syncOverviewWithPersonalizedTargets();
 }
 
 async function loadForDate() {
@@ -688,6 +809,7 @@ async function loadForDate() {
     if (overviewRes.status === "rejected") {
       throw overviewRes.reason;
     }
+    syncOverviewWithPersonalizedTargets();
     if (!records.value.length) {
       overview.value = deriveZeroedOverviewFromTarget(overview.value.target);
       console.debug("[Diet][Overview] reconciled to zero from records", {
@@ -807,13 +929,13 @@ const recommendedSourceMeta = computed(() => {
   return {
     source: "default",
     name: defaultDynamicPlan.value.name,
-    tip: "Based on your daily intake target (BMR and activity). Meals use a 25% / 35% / 25% / 15% split.",
+    tip: "Based on your personalized daily intake target. Meals use a 25% / 35% / 25% / 15% split.",
   };
 });
 
 const planCards = computed(() =>
   PLAN_DEFINITIONS.map((plan, idx) => {
-    const dailyCalories = bmrDailyCalorieTarget.value;
+    const dailyCalories = dietDayTargetsBlueprint.value?.dailyCalories || 0;
     return {
       ...plan,
       isLocked: !isVipUser.value && idx >= LOCK_FREE_PLAN_COUNT,
@@ -841,52 +963,176 @@ const selectedPlanMeta = computed(() => {
   };
 });
 
-function pickFood(mealType, category, seed, usedIds) {
-  const inMeal = foodLibraryRows.value.filter((x) => (x.mealTypes || []).includes(mealType));
-  const preferred = inMeal.filter((x) => x.category === category && !usedIds.has(x.id));
-  const fallback = inMeal.filter((x) => !usedIds.has(x.id));
-  const pool = preferred.length ? preferred : fallback.length ? fallback : inMeal;
-  if (!pool.length) return null;
-  return pool[seed % pool.length];
+const MEAL_CAL_HARD_REL = 0.065;
+const MEAL_CAL_HARD_MIN_HALF = 15;
+
+function mealCalorieHardHalfWidth(targetKcal) {
+  const t = Math.max(0, toNumber(targetKcal));
+  return Math.max(MEAL_CAL_HARD_MIN_HALF, t * MEAL_CAL_HARD_REL);
 }
 
-function createMealRecommendation(mealType, targetCalories, planType, dateKey) {
+function isMealCalorieWithinHardBand(actualKcal, targetKcal) {
+  const t = Math.max(0, toNumber(targetKcal));
+  if (t <= 0) return true;
+  const w = mealCalorieHardHalfWidth(t);
+  return Math.abs(toNumber(actualKcal) - t) <= w;
+}
+
+function sumMealItemsCalories(items) {
+  return items.reduce((sum, it) => sum + toNumber(it.estimatedCalories), 0);
+}
+
+function enforceMealCalorieHardTarget(items, mealTargetKcal, mealMacroTargets) {
+  if (!Array.isArray(items) || !items.length) return;
+  const tgt = toNumber(mealTargetKcal);
+  if (tgt <= 0) return;
+  const macros = mealMacroTargets && typeof mealMacroTargets === "object" ? mealMacroTargets : DEFAULT_MEAL_MACRO_TARGETS;
+  const GRAM_CAP = 400;
+  const GRAM_FLOOR = 20;
+  const MAX_STEPS = 3000;
+  function actualCal() {
+    return sumMealItemsCalories(items);
+  }
+  function stepForError(errAbs) {
+    if (errAbs <= 10) return 0.5;
+    if (errAbs <= 28) return 1;
+    return 5;
+  }
+  for (let step = 0; step < MAX_STEPS; step += 1) {
+    if (isMealCalorieWithinHardBand(actualCal(), tgt)) break;
+    const act = actualCal();
+    const err = act - tgt;
+    const STEP = stepForError(Math.abs(err));
+    if (err < 0) {
+      const s = items.reduce(
+        (acc, it) => ({
+          c: acc.c + toNumber(it.estimatedCarbs),
+        }),
+        { c: 0 }
+      );
+      const ec = s.c - toNumber(macros.carbs);
+      let bestI = -1;
+      let bestScore = -1;
+      for (let i = 0; i < items.length; i += 1) {
+        const g = toNumber(items[i].recommendedGrams);
+        if (g >= GRAM_CAP - 0.01) continue;
+        const k100 = toNumber(items[i].caloriesPer100g);
+        const cp = toNumber(items[i].carbsPer100g);
+        const gain = (k100 / 100) * STEP;
+        const penalty = ec > 2 && cp > 30 ? 0.55 : 1;
+        const score = gain * penalty;
+        if (score > bestScore) {
+          bestScore = score;
+          bestI = i;
+        }
+      }
+      if (bestI < 0) break;
+      items[bestI].recommendedGrams = roundToOne(Math.min(GRAM_CAP, items[bestI].recommendedGrams + STEP));
+      syncRecoItemNutrition(items[bestI]);
+      continue;
+    }
+    let bestI = -1;
+    let bestMarginal = -1;
+    for (let i = 0; i < items.length; i += 1) {
+      const g = toNumber(items[i].recommendedGrams);
+      if (g <= GRAM_FLOOR + 0.01) continue;
+      const k100 = toNumber(items[i].caloriesPer100g);
+      const marginal = (k100 / 100) * STEP;
+      if (marginal > bestMarginal) {
+        bestMarginal = marginal;
+        bestI = i;
+      }
+    }
+    if (bestI < 0) break;
+    items[bestI].recommendedGrams = roundToOne(Math.max(GRAM_FLOOR, items[bestI].recommendedGrams - STEP));
+    syncRecoItemNutrition(items[bestI]);
+  }
+}
+
+function pickFoodForSlot(mealType, category, seed, usedIds, accMacros, mealMacroTargets, carbHeavyCount) {
+  const inMeal = foodLibraryRows.value.filter((x) => (x.mealTypes || []).includes(mealType));
+  let pool = inMeal.filter((x) => x.category === category && !usedIds.has(x.id));
+  if (!pool.length) pool = inMeal.filter((x) => !usedIds.has(x.id));
+  if (!pool.length) pool = inMeal;
+  if (!pool.length) return null;
+  const carbTarget = Math.max(0.1, toNumber(mealMacroTargets.carbs));
+  const protTarget = Math.max(0.1, toNumber(mealMacroTargets.protein));
+  const accC = toNumber(accMacros.carbs);
+  const accP = toNumber(accMacros.protein);
+  const carbRatio = accC / carbTarget;
+  const protRatio = accP / protTarget;
+  if (category === "carb") {
+    if (carbHeavyCount >= 1) {
+      const low = pool.filter((f) => toNumber(f.carbsPer100g) < 32);
+      if (low.length) pool = low;
+    }
+    if (carbRatio > 0.55) {
+      const low = pool.filter((f) => toNumber(f.carbsPer100g) < 35);
+      if (low.length) pool = low;
+    }
+    if (carbRatio > 0.72) {
+      const low = pool.filter((f) => toNumber(f.carbsPer100g) < 22);
+      if (low.length) pool = low;
+    }
+  }
+  if (category === "fruit" && (carbRatio > 0.52 || accC > carbTarget * 0.58)) {
+    const low = pool.filter((f) => toNumber(f.carbsPer100g) < 18);
+    if (low.length) pool = low;
+  }
+  if (category === "protein" && protRatio < 0.42) {
+    pool = [...pool].sort((a, b) => toNumber(b.proteinPer100g) - toNumber(a.proteinPer100g));
+    pool = pool.slice(0, Math.max(4, Math.ceil(pool.length * 0.55)));
+  }
+  return pool[Math.abs(seed) % pool.length];
+}
+
+function createMealRecommendation(mealType, targetCalories, mealMacroTargets, planType, dateKey) {
+  const macros =
+    mealMacroTargets && typeof mealMacroTargets === "object" ? { ...DEFAULT_MEAL_MACRO_TARGETS, ...mealMacroTargets } : { ...DEFAULT_MEAL_MACRO_TARGETS };
+  const tgtCal = Math.max(0, toNumber(targetCalories));
+  if (tgtCal <= 0) return [];
   const categories = PLAN_CATEGORY_BLUEPRINT[planType]?.[mealType] || PLAN_CATEGORY_BLUEPRINT.balanced[mealType];
   const usedIds = new Set();
   const shares = categories.length === 3 ? [0.4, 0.35, 0.25] : [0.6, 0.4];
   const baseSeed = hashString(`${dateKey}-${planType}-${mealType}`);
-
-  const rows = categories
-    .map((category, idx) => {
-      const food = pickFood(mealType, category, baseSeed + idx * 11, usedIds);
-      if (!food) return null;
-      usedIds.add(food.id);
-      const slotCalories = targetCalories * (shares[idx] || 0.33);
-      const grams = clamp(roundToOne((slotCalories / Math.max(1, toNumber(food.caloriesPer100g))) * 100), 20, 400);
-      const nutrition = macroForFood(food, grams);
-      return {
-        recommendationId: `${dateKey}-${planType}-${mealType}-${food.id}-${idx}`,
-        mealType,
-        foodId: food.id,
-        foodName: food.name,
-        category: String(food.category || "").toLowerCase(),
-        caloriesPer100g: toNumber(food.caloriesPer100g),
-        proteinPer100g: toNumber(food.proteinPer100g),
-        carbsPer100g: toNumber(food.carbsPer100g),
-        fatPer100g: toNumber(food.fatPer100g),
-        recommendedGrams: grams,
-        estimatedCalories: nutrition.calories,
-        estimatedProtein: nutrition.protein,
-        estimatedCarbs: nutrition.carbs,
-        estimatedFat: nutrition.fat,
-      };
-    })
-    .filter(Boolean);
-
-  const total = rows.reduce((sum, x) => sum + toNumber(x.estimatedCalories), 0);
-  if (total > 0) {
-    const factor = clamp(targetCalories / total, 0.85, 1.15);
-    return rows.map((item) => {
+  const accMacros = { protein: 0, carbs: 0, fat: 0 };
+  let carbHeavyCount = 0;
+  const rows = [];
+  for (let idx = 0; idx < categories.length; idx += 1) {
+    const category = categories[idx];
+    const food = pickFoodForSlot(mealType, category, baseSeed + idx * 11, usedIds, accMacros, macros, carbHeavyCount);
+    if (!food) continue;
+    usedIds.add(food.id);
+    if (category === "carb" && toNumber(food.carbsPer100g) >= 48) carbHeavyCount += 1;
+    const slotCalories = tgtCal * (shares[idx] || 0.33);
+    const grams = clamp(roundToOne((slotCalories / Math.max(1, toNumber(food.caloriesPer100g))) * 100), 20, 400);
+    const nutrition = macroForFood(food, grams);
+    accMacros.protein += nutrition.protein;
+    accMacros.carbs += nutrition.carbs;
+    accMacros.fat += nutrition.fat;
+    rows.push({
+      recommendationId: `${dateKey}-${planType}-${mealType}-${food.id}-${idx}`,
+      mealType,
+      foodId: food.id,
+      foodName: food.name,
+      category: String(food.category || "").toLowerCase(),
+      caloriesPer100g: toNumber(food.caloriesPer100g),
+      proteinPer100g: toNumber(food.proteinPer100g),
+      carbsPer100g: toNumber(food.carbsPer100g),
+      fatPer100g: toNumber(food.fatPer100g),
+      recommendedGrams: grams,
+      estimatedCalories: nutrition.calories,
+      estimatedProtein: nutrition.protein,
+      estimatedCarbs: nutrition.carbs,
+      estimatedFat: nutrition.fat,
+    });
+  }
+  if (!rows.length) return [];
+  let adjusted = rows.map((item) => ({ ...item }));
+  const totalCal = adjusted.reduce((sum, x) => sum + toNumber(x.estimatedCalories), 0);
+  if (totalCal > 0) {
+    const factor = clamp(tgtCal / totalCal, 0.82, 1.18);
+    adjusted = adjusted.map((item) => {
       const grams = clamp(roundToOne(item.recommendedGrams * factor), 20, 400);
       const nutrition = macroForFood(item, grams);
       return {
@@ -899,44 +1145,59 @@ function createMealRecommendation(mealType, targetCalories, planType, dateKey) {
       };
     });
   }
-  return rows;
+  enforceMealCalorieHardTarget(adjusted, tgtCal, macros);
+  alignMealIntegerCaloriesStrict(adjusted, tgtCal);
+  correctMealVisibleKcalDeltaStrict(adjusted, tgtCal);
+  return adjusted;
 }
 
-function buildPlanDetails(planType, dateKey, targetTotalInput) {
-  const targetTotal = Math.max(0, roundToInt(targetTotalInput ?? 0));
-  if (targetTotal <= 0) {
+function finalizeMealCalorieDisplay(mealRows) {
+  for (const row of mealRows) {
+    if (row.items?.length && row.targetCalories > 0) {
+      alignMealIntegerCaloriesStrict(row.items, row.targetCalories);
+      correctMealVisibleKcalDeltaStrict(row.items, row.targetCalories);
+    }
+  }
+}
+
+function buildPlanDetails(planType, dateKey) {
+  const bp = dietDayTargetsBlueprint.value;
+  if (!bp) {
     return {
       targetTotal: 0,
       meals: MEAL_TYPES.map((meal) => ({
         mealType: meal.value,
         label: meal.label,
         targetCalories: 0,
+        macroTargets: { protein: 0, carbs: 0, fat: 0 },
         items: [],
       })),
     };
   }
+  const targetTotal = bp.dailyCalories;
+  const mealBudget = bp.mealCalories;
+  const mealMacroBudget = bp.mealMacros;
   const mealRows = MEAL_TYPES.map((meal) => {
-    const share = RECORD_MODE_MEAL_SHARES[meal.value] ?? 0.25;
-    const mealTarget = roundToInt(targetTotal * share);
-    const items = createMealRecommendation(meal.value, mealTarget, planType, dateKey);
-    return { mealType: meal.value, label: meal.label, targetCalories: mealTarget, items };
+    const mealTarget = mealBudget[meal.value] ?? 0;
+    const macroTargets = mealMacroBudget[meal.value] || { protein: 0, carbs: 0, fat: 0 };
+    const items = createMealRecommendation(meal.value, mealTarget, macroTargets, planType, dateKey);
+    return { mealType: meal.value, label: meal.label, targetCalories: mealTarget, macroTargets, items };
   });
+  finalizeMealCalorieDisplay(mealRows);
   return { targetTotal, meals: mealRows };
 }
 
 const selectedPlanDetails = computed(() => {
   if (!selectedPlanCard.value) return { targetTotal: 0, meals: [] };
-  return buildPlanDetails(selectedPlanCard.value.type, selectedDate.value, selectedPlanCard.value.dailyCalories);
+  return buildPlanDetails(selectedPlanCard.value.type, selectedDate.value);
 });
 
 const appliedPlanDetails = computed(() => {
   if (!appliedPlanCard.value) return { targetTotal: 0, meals: [] };
-  return buildPlanDetails(appliedPlanCard.value.type, selectedDate.value, appliedPlanCard.value.dailyCalories);
+  return buildPlanDetails(appliedPlanCard.value.type, selectedDate.value);
 });
 
-const defaultDynamicPlanDetails = computed(() =>
-  buildPlanDetails(defaultDynamicPlanType.value, selectedDate.value, defaultDynamicPlan.value.dailyCalories)
-);
+const defaultDynamicPlanDetails = computed(() => buildPlanDetails(defaultDynamicPlanType.value, selectedDate.value));
 
 const activeRecommendedPlan = computed(() => {
   if (appliedPlanCard.value) return appliedPlanCard.value;
@@ -946,6 +1207,63 @@ const activeRecommendedPlan = computed(() => {
 const activeRecommendedPlanDetails = computed(() => {
   if (appliedPlan.value) return appliedPlanDetails.value;
   return defaultDynamicPlanDetails.value;
+});
+
+/** Totals from the currently active generated recommendation (same numbers as Nutrient Intake bar max). */
+const recipePlanMacroTotals = computed(() => {
+  const meals = activeRecommendedPlanDetails.value?.meals || [];
+  let protein = 0;
+  let carbs = 0;
+  let fat = 0;
+  for (const meal of meals) {
+    for (const it of meal.items || []) {
+      protein += toNumber(it.estimatedProtein);
+      carbs += toNumber(it.estimatedCarbs);
+      fat += toNumber(it.estimatedFat);
+    }
+  }
+  return {
+    protein: roundToOne(protein),
+    carbs: roundToOne(carbs),
+    fat: roundToOne(fat),
+  };
+});
+
+function syncOverviewWithPersonalizedTargets() {
+  const bp = dietDayTargetsBlueprint.value;
+  const pdt = personalizedDietTargets.value;
+  if (!bp || !pdt) return;
+  const totals = recipePlanMacroTotals.value;
+  const daily = roundToInt(bp.dailyCalories);
+  const burn = Math.max(0, roundToOne(toNumber(pdt.suggestedWorkoutBurn)));
+  const cons = overview.value.consumed || {};
+  const cCal = toNumber(cons.calories);
+  const cP = toNumber(cons.protein);
+  const cCb = toNumber(cons.carbs);
+  const cF = toNumber(cons.fat);
+
+  overview.value.target.calories = daily;
+  overview.value.target.suggestedWorkoutBurn = burn;
+  overview.value.target.protein = totals.protein;
+  overview.value.target.carbs = totals.carbs;
+  overview.value.target.fat = totals.fat;
+
+  overview.value.remaining.calories = roundToOne(daily - cCal);
+  overview.value.remaining.protein = roundToOne(totals.protein - cP);
+  overview.value.remaining.carbs = roundToOne(totals.carbs - cCb);
+  overview.value.remaining.fat = roundToOne(totals.fat - cF);
+}
+
+const macroCards = computed(() => {
+  const t = recipePlanMacroTotals.value;
+  const c = overview.value?.consumed || {};
+  const row = (key, label) => ({
+    key,
+    label,
+    consumed: Number.isFinite(Number(c[key])) ? roundToOne(Number(c[key])) : null,
+    target: t[key] > 0 ? roundToOne(t[key]) : null,
+  });
+  return [row("protein", "Protein"), row("carbs", "Carbohydrates"), row("fat", "Fat")];
 });
 
 function normalizeMealTypeKey(value) {
@@ -1003,7 +1321,7 @@ const recommendedModeMeals = computed(() => {
 });
 
 function mealAllocatedCalories(meal) {
-  return roundToOne((meal?.items || []).reduce((sum, item) => sum + toNumber(item.estimatedCalories), 0));
+  return sumDisplayedMealCaloriesInt(meal?.items || []);
 }
 
 function mealProgressPct(meal, dailyTarget) {
@@ -1409,6 +1727,14 @@ watch(
   async () => {
     await focusPlanFromQuery();
   }
+);
+
+watch(
+  () => [dietDayTargetsBlueprint.value, activeRecommendedPlanDetails.value],
+  () => {
+    syncOverviewWithPersonalizedTargets();
+  },
+  { deep: true }
 );
 </script>
 
