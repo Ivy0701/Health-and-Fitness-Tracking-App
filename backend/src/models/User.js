@@ -64,6 +64,9 @@ const userSchema = new mongoose.Schema(
     calorieGoal: { type: Number, min: 0, max: 20000 },
     workoutFrequency: { type: Number, min: 0, max: 14 },
     assessment_completed: { type: Boolean, default: false },
+    resetPasswordCode: { type: String, default: null, select: false },
+    resetPasswordExpires: { type: Date, default: null, select: false },
+    resetPasswordCodeUpdatedAt: { type: Date, default: null, select: false },
   },
   {
     timestamps: true,

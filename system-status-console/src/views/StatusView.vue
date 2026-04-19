@@ -344,7 +344,6 @@ onMounted(async () => {
                   <th>Registered at</th>
                   <th>VIP</th>
                   <th>VIP plan</th>
-                  <th>Assessment</th>
                 </tr>
               </thead>
               <tbody>
@@ -358,13 +357,9 @@ onMounted(async () => {
                     <span v-else class="badge">No</span>
                   </td>
                   <td><span class="badge">{{ u.vipPlan || "none" }}</span></td>
-                  <td>
-                    <span v-if="u.assessmentCompleted" class="badge">Completed</span>
-                    <span v-else class="badge">Pending</span>
-                  </td>
                 </tr>
                 <tr v-if="!usersPreview12.length">
-                  <td colspan="7" class="empty">No users found</td>
+                  <td colspan="6" class="empty">No users found</td>
                 </tr>
               </tbody>
             </table>

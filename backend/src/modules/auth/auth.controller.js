@@ -31,4 +31,21 @@ const verify = asyncHandler(async (req, res) => {
   res.json({ valid: true, user: req.user });
 });
 
-module.exports = { register, login, verify };
+const issueResetVerification = asyncHandler(async (req, res) => {
+  const data = await authService.issueResetVerification(req.body?.email);
+  res.json(data);
+});
+
+const resetPassword = asyncHandler(async (req, res) => {
+  const { email, code, verificationCode, newPassword, confirmPassword } = req.body;
+  const data = await authService.resetPasswordWithCode({
+    email,
+    verificationCode,
+    code,
+    newPassword,
+    confirmPassword,
+  });
+  res.json(data);
+});
+
+module.exports = { register, login, verify, issueResetVerification, resetPassword };

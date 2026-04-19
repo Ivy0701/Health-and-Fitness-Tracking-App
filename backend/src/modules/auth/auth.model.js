@@ -28,6 +28,32 @@ async function findByEmail(email) {
   return User.findOne({ email: String(email).toLowerCase() });
 }
 
+/** Includes password + reset fields for forgot-password flow. */
+async function findByEmailForPasswordReset(email) {
+  return User.findOne({ email: String(email).toLowerCase() })
+    .select("+password +resetPasswordCode +resetPasswordExpires")
+    .exec();
+}
+
+async function updateUserById(userId, patch) {
+  return User.findByIdAndUpdate(userId, { $set: patch }, { new: true }).exec();
+}
+
+async function updatePasswordAndClearReset(userId, passwordHash) {
+  return User.findByIdAndUpdate(
+    userId,
+    {
+      $set: {
+        password: passwordHash,
+        resetPasswordCode: null,
+        resetPasswordExpires: null,
+        resetPasswordCodeUpdatedAt: null,
+      },
+    },
+    { new: true }
+  ).exec();
+}
+
 async function findByUsername(username) {
   return User.findOne({ username });
 }
@@ -54,8 +80,11 @@ async function createUser({ email, passwordHash, username }) {
 module.exports = {
   sanitizeUser,
   findByEmail,
+  findByEmailForPasswordReset,
   findByUsername,
   findByEmailOrUsername,
   findById,
   createUser,
+  updateUserById,
+  updatePasswordAndClearReset,
 };

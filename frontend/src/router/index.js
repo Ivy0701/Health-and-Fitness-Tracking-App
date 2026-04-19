@@ -4,6 +4,7 @@ import { useAuthStore } from "../stores/auth";
 import LandingView from "../views/LandingView.vue";
 import LoginView from "../views/LoginView.vue";
 import RegisterView from "../views/RegisterView.vue";
+import ResetPasswordView from "../views/ResetPasswordView.vue";
 import AssessmentView from "../views/AssessmentView.vue";
 import DashboardView from "../views/DashboardView.vue";
 import CoursesView from "../views/CoursesView.vue";
@@ -23,6 +24,7 @@ const routes = [
   { path: "/", component: LandingView },
   { path: "/login", component: LoginView },
   { path: "/register", component: RegisterView },
+  { path: "/reset-password", component: ResetPasswordView },
   { path: "/assessment", component: AssessmentView, meta: { auth: true } },
   { path: "/dashboard", component: DashboardView, meta: { auth: true } },
   { path: "/courses", component: CoursesView, meta: { auth: true } },
@@ -78,7 +80,7 @@ router.beforeEach(async (to) => {
 
   if (auth.isLoggedIn && auth.user) {
     const completed = !!auth.user.assessment_completed;
-    if (!completed && to.path !== "/assessment") {
+    if (!completed && to.path !== "/assessment" && to.path !== "/reset-password") {
       return "/assessment";
     }
     if (completed && to.path === "/assessment") {

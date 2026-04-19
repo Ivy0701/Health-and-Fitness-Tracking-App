@@ -88,7 +88,10 @@ async function submit() {
 
         <div class="field">
           <input v-model="form.password" type="password" placeholder="Password" />
-          <p class="helper">Password must be at least 8 characters.</p>
+          <div class="password-hint-row">
+            <p class="helper password-hint">Password must be at least 8 characters.</p>
+            <router-link to="/reset-password" class="forgot-link">Forgot password?</router-link>
+          </div>
           <p v-if="errors.password" class="field-error">{{ errors.password }}</p>
         </div>
 
@@ -159,6 +162,32 @@ async function submit() {
 .field-label { font-size: 13px; font-weight: 600; color: var(--c5); }
 .signup-link { color: var(--c5); font-weight: 600; text-decoration: none; }
 .signup-link:hover { text-decoration: underline; }
+
+.password-hint-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.password-hint {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+.forgot-link {
+  font-size: 12px;
+  color: var(--c5);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.forgot-link:hover {
+  text-decoration: underline;
+}
 
 .captcha-row {
   display: grid;
