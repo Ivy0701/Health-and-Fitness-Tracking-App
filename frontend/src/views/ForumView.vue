@@ -16,7 +16,7 @@ const publishNotice = ref("");
 const searchQuery = ref("");
 const activeFilter = ref("all");
 const expandedComments = ref({});
-/** Per-post: forum body expanded past line-clamp (one-way). */
+/** Per-post: forum body expanded past line-clamp. */
 const expandedPostBodies = ref({});
 const postBodyOverflows = ref({});
 const postContentObservers = new Map();
@@ -32,6 +32,14 @@ function expandPostBody(postId) {
   expandedPostBodies.value = { ...expandedPostBodies.value, [key]: true };
 }
 
+function collapsePostBody(postId) {
+  const key = String(postId || "").trim();
+  if (!key || !expandedPostBodies.value[key]) return;
+  const next = { ...expandedPostBodies.value };
+  delete next[key];
+  expandedPostBodies.value = next;
+}
+
 function setPostBodyOverflow(postId, value) {
   const key = String(postId || "").trim();
   if (!key) return;
@@ -43,7 +51,6 @@ function measurePostBodyOverflow(postId, el) {
   const key = String(postId || "").trim();
   if (!key || !el) return;
   if (expandedPostBodies.value[key]) {
-    setPostBodyOverflow(key, false);
     return;
   }
   const diff = el.scrollHeight - el.clientHeight;
@@ -79,6 +86,12 @@ function setPostContentEl(postId, el) {
 function showPostBodyExpand(postId) {
   const key = String(postId || "").trim();
   if (!key || isPostBodyExpanded(key)) return false;
+  return Boolean(postBodyOverflows.value[key]);
+}
+
+function showPostBodyCollapse(postId) {
+  const key = String(postId || "").trim();
+  if (!key || !isPostBodyExpanded(key)) return false;
   return Boolean(postBodyOverflows.value[key]);
 }
 const commentDrafts = ref({});
@@ -846,6 +859,14 @@ watch(me, (u) => {
               @click.stop="expandPostBody(postIdOf(p))"
             >
               Expand
+            </button>
+            <button
+              v-if="showPostBodyCollapse(postIdOf(p))"
+              type="button"
+              class="post-content-expand"
+              @click.stop="collapsePostBody(postIdOf(p))"
+            >
+              Collapse
             </button>
           </div>
 
