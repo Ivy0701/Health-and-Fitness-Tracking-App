@@ -74,18 +74,6 @@ npm run dev
 
 Default URL: **http://localhost:5174** — open it in the browser and **sign in** on the login screen before using the console.
 
-**Admin test accounts** (for testing only):
-
-- **Email:** `admin@healthfit.local`
-- **Password:** `admin123`
-
-- **Email:** `ops@healthfit.local`
-- **Password:** `ops123`
-
-These accounts are created automatically when the backend starts and are meant for testing purposes only.
-
-**Important:** These accounts are for testing/demo purposes only.
-
 ## Main Pages and Functions
 
 - **Dashboard** — Overview of your activity and quick access to the main areas of the app.  
@@ -112,21 +100,19 @@ Follow these steps the first time you run the project:
 
 You can log in directly using **test accounts** instead of registering. These accounts are **created automatically** when the backend starts (after MongoDB is configured).
 
-**User test accounts** (for testing only):
+**User and Admin test accounts** (for testing only):
 
-- **Email:** `test1@example.com`
-- **Password:** `Test1234`
+- **User Email:** `test1@example.com`  
+  **Password:** `Test1234`
 
-- **Email:** `test2@example.com`
-- **Password:** `Test5678`
+- **User Email:** `test2@example.com`  
+  **Password:** `Test5678`
 
-**Admin test accounts** (for the separate admin app; for testing only):
+- **Admin Email:** `admin@healthfit.local`  
+  **Password:** `admin123`
 
-- **Email:** `admin@healthfit.local`
-- **Password:** `admin123`
-
-- **Email:** `ops@healthfit.local`
-- **Password:** `ops123`
+- **Admin Email:** `ops@healthfit.local`  
+  **Password:** `ops123`
 
 **Important:** These accounts are for testing/demo purposes only.
 
